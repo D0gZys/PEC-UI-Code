@@ -289,7 +289,7 @@ class BiologicPotentiostatTestApp(tk.Tk):
         # ---- Connection frame (always visible) ----
         self._build_connection_frame(main)
 
-        # ---- Notebook (3 tabs) ----
+        # ---- Notebook (2 tabs) ----
         self.notebook = ttk.Notebook(main)
         self.notebook.pack(fill="both", expand=True, pady=(4, 0))
 
@@ -298,15 +298,10 @@ class BiologicPotentiostatTestApp(tk.Tk):
         self.notebook.add(config_tab, text="  Configuration  ")
         self._build_config_tab(config_tab)
 
-        # Tab 2: Graphique
-        graph_tab = ttk.Frame(self.notebook)
-        self.notebook.add(graph_tab, text="  Graphique  ")
-        self._build_graph_tab(graph_tab)
-
-        # Tab 3: Cartographie
-        carto_tab = ttk.Frame(self.notebook)
-        self.notebook.add(carto_tab, text="  Cartographie  ")
-        self._build_carto_tab(carto_tab)
+        # Tab 2: Mesure (Graphique + Cartographie ensemble)
+        mesure_tab = ttk.Frame(self.notebook)
+        self.notebook.add(mesure_tab, text="  Mesure  ")
+        self._build_mesure_tab(mesure_tab)
 
         # ---- Log ----
         log_frame = ttk.LabelFrame(main, text="Journal", padding=4)
@@ -450,48 +445,12 @@ class BiologicPotentiostatTestApp(tk.Tk):
         self.progress_var = tk.StringVar(value="")
         ttk.Label(ctrl_lf, textvariable=self.progress_var, foreground="green").pack(fill="x", pady=(4, 0))
 
-    # ---- Tab 2: Graphique ----
+    # ---- Tab 2: Mesure (Graph on top, Cartography on bottom) ----
 
-    def _build_graph_tab(self, parent):
-        graph_lf = ttk.Frame(parent, padding=4)
-        graph_lf.pack(fill="both", expand=True)
-
-        # Graph type selector
-        sel_frame = ttk.Frame(graph_lf)
-        sel_frame.pack(fill="x", pady=(0, 4))
-        ttk.Label(sel_frame, text="Affichage :").pack(side="left", padx=(0, 4))
-        graph_types = ["I = f(t)", "Ewe = f(t)", "I = f(Ewe)", "Ewe = f(I)"]
-        for gt in graph_types:
-            ttk.Radiobutton(sel_frame, text=gt, value=gt, variable=self.graph_type_var,
-                            command=self._update_plot).pack(side="left", padx=4)
-
-        # Canvas
-        self.graph_canvas = tk.Canvas(graph_lf, bg="white", highlightthickness=0)
-        self.graph_canvas.pack(fill="both", expand=True)
-        self.graph_canvas.bind("<Configure>", lambda e: self._update_plot())
-
-        # Zoom / pan bindings
-        self.graph_canvas.bind("<MouseWheel>", self._on_graph_scroll)
-        self.graph_canvas.bind("<Button-4>", self._on_graph_scroll)
-        self.graph_canvas.bind("<Button-5>", self._on_graph_scroll)
-        self.graph_canvas.bind("<ButtonPress-1>", self._on_graph_pan_start)
-        self.graph_canvas.bind("<B1-Motion>", self._on_graph_pan_move)
-        self.graph_canvas.bind("<ButtonRelease-1>", self._on_graph_pan_end)
-
-        # Bottom bar
-        bot_frame = ttk.Frame(graph_lf)
-        bot_frame.pack(fill="x", pady=(4, 0))
-        self.data_count_var = tk.StringVar(value="Points : 0")
-        ttk.Label(bot_frame, textvariable=self.data_count_var).pack(side="left")
-        ttk.Button(bot_frame, text="Plein écran", command=self._on_fullscreen_graph).pack(side="right", padx=2)
-        ttk.Button(bot_frame, text="Réinitialiser vue", command=self._reset_view).pack(side="right", padx=2)
-
-    # ---- Tab 3: Cartographie ----
-
-    def _build_carto_tab(self, parent):
-        # Top bar: configuration
-        config_frame = ttk.LabelFrame(parent, text="Configuration de la cartographie", padding=8)
-        config_frame.pack(fill="x", pady=(0, 4))
+    def _build_mesure_tab(self, parent):
+        # ── Top bar: cartography config + controls ──
+        config_frame = ttk.LabelFrame(parent, text="Cartographie", padding=6)
+        config_frame.pack(fill="x", pady=(0, 2))
 
         ttk.Label(config_frame, text="Lignes :").grid(row=0, column=0, sticky="w", padx=(0, 4))
         ttk.Spinbox(config_frame, from_=1, to=50, textvariable=self.carto_rows_var, width=5).grid(row=0, column=1, padx=(0, 12))
@@ -512,21 +471,48 @@ class BiologicPotentiostatTestApp(tk.Tk):
 
         self.carto_progress_var = tk.StringVar(value="")
         ttk.Label(config_frame, textvariable=self.carto_progress_var, foreground="green", font=("", 9, "bold")).grid(
-            row=1, column=0, columnspan=9, sticky="w", pady=(4, 0)
+            row=0, column=9, sticky="w", padx=(8, 0)
         )
 
-        # Main area: matrix canvas + color legend
-        matrix_area = ttk.Frame(parent)
-        matrix_area.pack(fill="both", expand=True)
+        # ── PanedWindow: graph (top) + matrix (bottom) ──
+        paned = ttk.PanedWindow(parent, orient="vertical")
+        paned.pack(fill="both", expand=True, pady=(2, 0))
 
-        self.matrix_canvas = tk.Canvas(matrix_area, bg="#f0f0f0", highlightthickness=0)
+        # ── Top pane: Graph ──
+        graph_frame = ttk.Frame(paned)
+        paned.add(graph_frame, weight=1)
+
+        graph_top = ttk.Frame(graph_frame)
+        graph_top.pack(fill="x")
+        ttk.Label(graph_top, text="Affichage :").pack(side="left", padx=(4, 4))
+        for gt in ["I = f(t)", "Ewe = f(t)", "I = f(Ewe)", "Ewe = f(I)"]:
+            ttk.Radiobutton(graph_top, text=gt, value=gt, variable=self.graph_type_var,
+                            command=self._update_plot).pack(side="left", padx=3)
+        ttk.Button(graph_top, text="Plein écran", command=self._on_fullscreen_graph).pack(side="right", padx=2)
+        ttk.Button(graph_top, text="Reset vue", command=self._reset_view).pack(side="right", padx=2)
+        self.data_count_var = tk.StringVar(value="Points : 0")
+        ttk.Label(graph_top, textvariable=self.data_count_var).pack(side="right", padx=(8, 4))
+
+        self.graph_canvas = tk.Canvas(graph_frame, bg="white", highlightthickness=0, height=200)
+        self.graph_canvas.pack(fill="both", expand=True)
+        self.graph_canvas.bind("<Configure>", lambda e: self._update_plot())
+        self.graph_canvas.bind("<MouseWheel>", self._on_graph_scroll)
+        self.graph_canvas.bind("<Button-4>", self._on_graph_scroll)
+        self.graph_canvas.bind("<Button-5>", self._on_graph_scroll)
+        self.graph_canvas.bind("<ButtonPress-1>", self._on_graph_pan_start)
+        self.graph_canvas.bind("<B1-Motion>", self._on_graph_pan_move)
+        self.graph_canvas.bind("<ButtonRelease-1>", self._on_graph_pan_end)
+
+        # ── Bottom pane: Matrix heatmap ──
+        matrix_frame = ttk.Frame(paned)
+        paned.add(matrix_frame, weight=2)
+
+        self.matrix_canvas = tk.Canvas(matrix_frame, bg="#f0f0f0", highlightthickness=0)
         self.matrix_canvas.pack(side="left", fill="both", expand=True)
 
-        # Color legend
-        self.legend_canvas = tk.Canvas(matrix_area, bg="#f0f0f0", width=80, highlightthickness=0)
+        self.legend_canvas = tk.Canvas(matrix_frame, bg="#f0f0f0", width=80, highlightthickness=0)
         self.legend_canvas.pack(side="right", fill="y", padx=(4, 0))
 
-        # Draw empty matrix on resize
         self.matrix_canvas.bind("<Configure>", lambda e: self._update_matrix_display())
 
     # -----------------------------------------------------------------------
@@ -946,7 +932,7 @@ class BiologicPotentiostatTestApp(tk.Tk):
         self.carto_progress_var.set(f"Démarrage… 0 / {total}")
 
         # Switch to Cartography tab
-        self.notebook.select(2)
+        self.notebook.select(1)
 
         # Draw empty matrix
         self.after(10, self._update_matrix_display)
@@ -983,6 +969,9 @@ class BiologicPotentiostatTestApp(tk.Tk):
                         self._plot_I.append(record["I"])
                         self._plot_E.append(record["Ewe"])
                         last_I = record["I"]
+
+                    # Update graph in real time
+                    self.after(0, self._update_plot)
 
                     if status == "STOP":
                         self._log_safe("Le potentiostat a terminé l'expérience avant la fin de la cartographie.")
