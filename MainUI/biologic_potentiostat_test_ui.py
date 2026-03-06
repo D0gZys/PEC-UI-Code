@@ -7,11 +7,13 @@ Permet de :
 - Configurer et lancer une expérience de Chronoampérométrie (CA)
 - Visualiser en temps réel les courbes I(t) et E(t)
 - Exporter les données en CSV
+- Mode Cartographie : remplir une matrice NxM en échantillonnant I à intervalle régulier
 
 Utilise la bibliothèque kbio fournie dans le Developer Package BioLogic.
 """
 
 import csv
+import math
 import os
 import sys
 import threading
@@ -162,6 +164,45 @@ RECORD_LABELS = ["<I>", "<Ewe>", "<I> and <Ewe>"]
 VS_LABELS = ["Ref", "Pref"]
 
 
+# ---------------------------------------------------------------------------
+# Heatmap color helpers
+# ---------------------------------------------------------------------------
+
+def _value_to_color(value: float, v_min: float, v_max: float) -> str:
+    """Map a value to a blue-white-red gradient color."""
+    if v_max == v_min:
+        return "#cccccc"
+    t = max(0.0, min(1.0, (value - v_min) / (v_max - v_min)))
+    # Blue (0) -> White (0.5) -> Red (1)
+    if t < 0.5:
+        s = t * 2  # 0..1
+        r = int(60 + s * 195)
+        g = int(60 + s * 195)
+        b = 255
+    else:
+        s = (t - 0.5) * 2  # 0..1
+        r = 255
+        g = int(255 - s * 195)
+        b = int(255 - s * 195)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _format_current(value: float) -> str:
+    """Format a current value for display in matrix cells."""
+    av = abs(value)
+    if av == 0:
+        return "0"
+    if av >= 1:
+        return f"{value:.3f} A"
+    if av >= 1e-3:
+        return f"{value * 1e3:.2f} mA"
+    if av >= 1e-6:
+        return f"{value * 1e6:.2f} µA"
+    if av >= 1e-9:
+        return f"{value * 1e9:.2f} nA"
+    return f"{value:.2e}"
+
+
 # ===========================================================================
 # Main Application
 # ===========================================================================
@@ -213,7 +254,15 @@ class BiologicPotentiostatTestApp(tk.Tk):
         self._view_x_max = None
         self._view_y_min = None
         self._view_y_max = None
-        self._pan_start = None  # (pixel_x, pixel_y, vx_min, vx_max, vy_min, vy_max)
+        self._pan_start = None
+
+        # ---- Cartography state ----
+        self.carto_rows_var = tk.IntVar(value=3)
+        self.carto_cols_var = tk.IntVar(value=3)
+        self.carto_interval_var = tk.StringVar(value="5.0")
+        self._matrix_data: list[list[float | None]] = []
+        self._matrix_index = 0  # linear index in serpentine order
+        self._carto_running = False
 
         self._build_ui()
         self._log("Application prête. Configurer le chemin DLL et l'adresse IP de l'instrument.")
@@ -237,8 +286,41 @@ class BiologicPotentiostatTestApp(tk.Tk):
         main = ttk.Frame(self, padding=6)
         main.pack(fill="both", expand=True)
 
-        # ---- Connection frame ----
-        conn_frame = ttk.LabelFrame(main, text="Connexion Instrument", padding=8)
+        # ---- Connection frame (always visible) ----
+        self._build_connection_frame(main)
+
+        # ---- Notebook (3 tabs) ----
+        self.notebook = ttk.Notebook(main)
+        self.notebook.pack(fill="both", expand=True, pady=(4, 0))
+
+        # Tab 1: Configuration
+        config_tab = ttk.Frame(self.notebook)
+        self.notebook.add(config_tab, text="  Configuration  ")
+        self._build_config_tab(config_tab)
+
+        # Tab 2: Graphique
+        graph_tab = ttk.Frame(self.notebook)
+        self.notebook.add(graph_tab, text="  Graphique  ")
+        self._build_graph_tab(graph_tab)
+
+        # Tab 3: Cartographie
+        carto_tab = ttk.Frame(self.notebook)
+        self.notebook.add(carto_tab, text="  Cartographie  ")
+        self._build_carto_tab(carto_tab)
+
+        # ---- Log ----
+        log_frame = ttk.LabelFrame(main, text="Journal", padding=4)
+        log_frame.pack(fill="x", pady=(4, 0))
+        self.log_text = tk.Text(log_frame, height=5, width=100, state="normal", font=("Consolas", 9))
+        scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        self.log_text.pack(fill="both", expand=True)
+
+    # ---- Connection frame ----
+
+    def _build_connection_frame(self, parent):
+        conn_frame = ttk.LabelFrame(parent, text="Connexion Instrument", padding=8)
         conn_frame.pack(fill="x", pady=(0, 4))
 
         ttk.Label(conn_frame, text="Chemin DLL :").grid(row=0, column=0, sticky="w")
@@ -261,38 +343,15 @@ class BiologicPotentiostatTestApp(tk.Tk):
         ttk.Label(conn_frame, textvariable=self.status_var, foreground="blue", font=("", 9, "bold")).grid(
             row=2, column=0, columnspan=6, sticky="w", pady=(4, 0)
         )
-
         conn_frame.columnconfigure(1, weight=1)
 
-        # ---- Middle zone: parameters left, graph right ----
-        mid = ttk.PanedWindow(main, orient="horizontal")
-        mid.pack(fill="both", expand=True, pady=4)
+    # ---- Tab 1: Configuration ----
 
-        # -- Parameters panel --
-        param_outer = ttk.Frame(mid)
-        mid.add(param_outer, weight=1)
-        self._build_params_panel(param_outer)
-
-        # -- Graph panel --
-        graph_outer = ttk.Frame(mid)
-        mid.add(graph_outer, weight=3)
-        self._build_graph_panel(graph_outer)
-
-        # ---- Log ----
-        log_frame = ttk.LabelFrame(main, text="Journal", padding=4)
-        log_frame.pack(fill="both", expand=False, pady=(4, 0))
-        self.log_text = tk.Text(log_frame, height=7, width=100, state="normal", font=("Consolas", 9))
-        scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=scroll.set)
-        scroll.pack(side="right", fill="y")
-        self.log_text.pack(fill="both", expand=True)
-
-    # ---- Parameters panel (EC-Lab style) ----
-
-    def _build_params_panel(self, parent):
-        canvas = tk.Canvas(parent, highlightthickness=0, width=380)
+    def _build_config_tab(self, parent):
+        # Scrollable frame for all parameters
+        canvas = tk.Canvas(parent, highlightthickness=0)
         scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas, padding=4)
+        scrollable_frame = ttk.Frame(canvas, padding=8)
 
         scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
@@ -301,13 +360,10 @@ class BiologicPotentiostatTestApp(tk.Tk):
         scrollbar.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
 
-        # =================================================================
-        # Section 1 : Apply Ewe / duration steps (EC-Lab style)
-        # =================================================================
+        # Section 1: Voltage Steps
         steps_lf = ttk.LabelFrame(scrollable_frame, text="Apply Ewe (Voltage Steps)", padding=6)
         steps_lf.pack(fill="x", pady=(0, 6))
 
-        # Header row
         ttk.Label(steps_lf, text="#", width=3, anchor="center").grid(row=0, column=0)
         ttk.Label(steps_lf, text="Ewe (V)", width=9, anchor="center").grid(row=0, column=1)
         ttk.Label(steps_lf, text="vs.", width=5, anchor="center").grid(row=0, column=2)
@@ -320,43 +376,35 @@ class BiologicPotentiostatTestApp(tk.Tk):
         self._step_widgets: list[dict] = []
         self._step_row_offset = 1
 
-        # Add initial step matching screenshot: 0.500 V, 0h 2mn 10.0000s
         self._add_step_row(voltage=0.500, hours=0, minutes=2, seconds=10.0, vs="Ref")
 
         btn_row = ttk.Frame(steps_lf)
         btn_row.grid(row=100, column=0, columnspan=7, pady=(4, 0))
         ttk.Button(btn_row, text="+ Ajouter pas", command=lambda: self._add_step_row()).pack(side="left", padx=2)
 
-        # =================================================================
-        # Section 2 : Limits (Imax, Imin, |ΔQ| > ΔQM)
-        # =================================================================
+        # Section 2: Limits
         limits_lf = ttk.LabelFrame(scrollable_frame, text="Limits", padding=6)
         limits_lf.pack(fill="x", pady=(0, 6))
 
-        # Imax
         ttk.Label(limits_lf, text="Imax =").grid(row=0, column=0, sticky="e")
         self.imax_var = tk.StringVar(value="pass")
         ttk.Entry(limits_lf, textvariable=self.imax_var, width=10).grid(row=0, column=1, padx=4, sticky="w")
         self.imax_unit_var = tk.StringVar(value="mA")
         ttk.Combobox(limits_lf, textvariable=self.imax_unit_var, values=I_UNIT_LABELS, state="readonly", width=5).grid(row=0, column=2, sticky="w")
 
-        # Imin
         ttk.Label(limits_lf, text="Imin =").grid(row=1, column=0, sticky="e", pady=(4, 0))
         self.imin_var = tk.StringVar(value="pass")
         ttk.Entry(limits_lf, textvariable=self.imin_var, width=10).grid(row=1, column=1, padx=4, sticky="w", pady=(4, 0))
         self.imin_unit_var = tk.StringVar(value="mA")
         ttk.Combobox(limits_lf, textvariable=self.imin_unit_var, values=I_UNIT_LABELS, state="readonly", width=5).grid(row=1, column=2, sticky="w", pady=(4, 0))
 
-        # |ΔQ| > ΔQM
         ttk.Label(limits_lf, text="|ΔQ| > ΔQM =").grid(row=2, column=0, sticky="e", pady=(4, 0))
         self.dqm_var = tk.StringVar(value="0.000")
         ttk.Entry(limits_lf, textvariable=self.dqm_var, width=10).grid(row=2, column=1, padx=4, sticky="w", pady=(4, 0))
         self.dqm_unit_var = tk.StringVar(value="mA.h")
         ttk.Combobox(limits_lf, textvariable=self.dqm_unit_var, values=["A.h", "mA.h", "µA.h"], state="readonly", width=5).grid(row=2, column=2, sticky="w", pady=(4, 0))
 
-        # =================================================================
-        # Section 3 : Record
-        # =================================================================
+        # Section 3: Record
         rec_lf = ttk.LabelFrame(scrollable_frame, text="Record", padding=6)
         rec_lf.pack(fill="x", pady=(0, 6))
 
@@ -369,9 +417,7 @@ class BiologicPotentiostatTestApp(tk.Tk):
         ttk.Entry(rec_frame, textvariable=self.record_dta_var, width=10).pack(side="left")
         ttk.Label(rec_frame, text="s").pack(side="left", padx=(2, 0))
 
-        # =================================================================
-        # Section 4 : E Range / I Range / Bandwidth
-        # =================================================================
+        # Section 4: Ranges
         range_lf = ttk.LabelFrame(scrollable_frame, text="Ranges", padding=6)
         range_lf.pack(fill="x", pady=(0, 6))
 
@@ -384,18 +430,14 @@ class BiologicPotentiostatTestApp(tk.Tk):
         ttk.Label(range_lf, text="Bandwidth =").grid(row=2, column=0, sticky="e", pady=(4, 0))
         ttk.Combobox(range_lf, textvariable=self.bw_var, values=[l for l, _ in BW_LABELS], state="readonly", width=16).grid(row=2, column=1, padx=4, sticky="w", pady=(4, 0))
 
-        # =================================================================
-        # Section 5 : N Cycles
-        # =================================================================
+        # Section 5: N Cycles
         cyc_lf = ttk.LabelFrame(scrollable_frame, text="Cycles", padding=6)
         cyc_lf.pack(fill="x", pady=(0, 6))
         ttk.Label(cyc_lf, text="N Cycles (0 = illimité) :").grid(row=0, column=0, sticky="w")
         ttk.Entry(cyc_lf, textvariable=self.n_cycles_var, width=8).grid(row=0, column=1, padx=4, sticky="w")
 
-        # =================================================================
-        # Section 6 : Experiment control
-        # =================================================================
-        ctrl_lf = ttk.LabelFrame(scrollable_frame, text="Contrôle expérience", padding=6)
+        # Section 6: Experiment control
+        ctrl_lf = ttk.LabelFrame(scrollable_frame, text="Contrôle expérience CA", padding=6)
         ctrl_lf.pack(fill="x", pady=(0, 6))
 
         self.btn_start = ttk.Button(ctrl_lf, text="▶  Démarrer CA", command=self._on_start_experiment)
@@ -407,6 +449,89 @@ class BiologicPotentiostatTestApp(tk.Tk):
 
         self.progress_var = tk.StringVar(value="")
         ttk.Label(ctrl_lf, textvariable=self.progress_var, foreground="green").pack(fill="x", pady=(4, 0))
+
+    # ---- Tab 2: Graphique ----
+
+    def _build_graph_tab(self, parent):
+        graph_lf = ttk.Frame(parent, padding=4)
+        graph_lf.pack(fill="both", expand=True)
+
+        # Graph type selector
+        sel_frame = ttk.Frame(graph_lf)
+        sel_frame.pack(fill="x", pady=(0, 4))
+        ttk.Label(sel_frame, text="Affichage :").pack(side="left", padx=(0, 4))
+        graph_types = ["I = f(t)", "Ewe = f(t)", "I = f(Ewe)", "Ewe = f(I)"]
+        for gt in graph_types:
+            ttk.Radiobutton(sel_frame, text=gt, value=gt, variable=self.graph_type_var,
+                            command=self._update_plot).pack(side="left", padx=4)
+
+        # Canvas
+        self.graph_canvas = tk.Canvas(graph_lf, bg="white", highlightthickness=0)
+        self.graph_canvas.pack(fill="both", expand=True)
+        self.graph_canvas.bind("<Configure>", lambda e: self._update_plot())
+
+        # Zoom / pan bindings
+        self.graph_canvas.bind("<MouseWheel>", self._on_graph_scroll)
+        self.graph_canvas.bind("<Button-4>", self._on_graph_scroll)
+        self.graph_canvas.bind("<Button-5>", self._on_graph_scroll)
+        self.graph_canvas.bind("<ButtonPress-1>", self._on_graph_pan_start)
+        self.graph_canvas.bind("<B1-Motion>", self._on_graph_pan_move)
+        self.graph_canvas.bind("<ButtonRelease-1>", self._on_graph_pan_end)
+
+        # Bottom bar
+        bot_frame = ttk.Frame(graph_lf)
+        bot_frame.pack(fill="x", pady=(4, 0))
+        self.data_count_var = tk.StringVar(value="Points : 0")
+        ttk.Label(bot_frame, textvariable=self.data_count_var).pack(side="left")
+        ttk.Button(bot_frame, text="Plein écran", command=self._on_fullscreen_graph).pack(side="right", padx=2)
+        ttk.Button(bot_frame, text="Réinitialiser vue", command=self._reset_view).pack(side="right", padx=2)
+
+    # ---- Tab 3: Cartographie ----
+
+    def _build_carto_tab(self, parent):
+        # Top bar: configuration
+        config_frame = ttk.LabelFrame(parent, text="Configuration de la cartographie", padding=8)
+        config_frame.pack(fill="x", pady=(0, 4))
+
+        ttk.Label(config_frame, text="Lignes :").grid(row=0, column=0, sticky="w", padx=(0, 4))
+        ttk.Spinbox(config_frame, from_=1, to=50, textvariable=self.carto_rows_var, width=5).grid(row=0, column=1, padx=(0, 12))
+
+        ttk.Label(config_frame, text="Colonnes :").grid(row=0, column=2, sticky="w", padx=(0, 4))
+        ttk.Spinbox(config_frame, from_=1, to=50, textvariable=self.carto_cols_var, width=5).grid(row=0, column=3, padx=(0, 12))
+
+        ttk.Label(config_frame, text="Intervalle (s) :").grid(row=0, column=4, sticky="w", padx=(0, 4))
+        ttk.Entry(config_frame, textvariable=self.carto_interval_var, width=8).grid(row=0, column=5, padx=(0, 12))
+
+        self.btn_carto_start = ttk.Button(config_frame, text="▶  Démarrer cartographie", command=self._on_start_cartography)
+        self.btn_carto_start.grid(row=0, column=6, padx=4)
+        self.btn_carto_stop = ttk.Button(config_frame, text="■  Arrêter", command=self._on_stop_experiment, state="disabled")
+        self.btn_carto_stop.grid(row=0, column=7, padx=4)
+
+        self.btn_carto_export = ttk.Button(config_frame, text="Exporter CSV", command=self._on_export_matrix_csv, state="disabled")
+        self.btn_carto_export.grid(row=0, column=8, padx=4)
+
+        self.carto_progress_var = tk.StringVar(value="")
+        ttk.Label(config_frame, textvariable=self.carto_progress_var, foreground="green", font=("", 9, "bold")).grid(
+            row=1, column=0, columnspan=9, sticky="w", pady=(4, 0)
+        )
+
+        # Main area: matrix canvas + color legend
+        matrix_area = ttk.Frame(parent)
+        matrix_area.pack(fill="both", expand=True)
+
+        self.matrix_canvas = tk.Canvas(matrix_area, bg="#f0f0f0", highlightthickness=0)
+        self.matrix_canvas.pack(side="left", fill="both", expand=True)
+
+        # Color legend
+        self.legend_canvas = tk.Canvas(matrix_area, bg="#f0f0f0", width=80, highlightthickness=0)
+        self.legend_canvas.pack(side="right", fill="y", padx=(4, 0))
+
+        # Draw empty matrix on resize
+        self.matrix_canvas.bind("<Configure>", lambda e: self._update_matrix_display())
+
+    # -----------------------------------------------------------------------
+    # Voltage step management
+    # -----------------------------------------------------------------------
 
     def _add_step_row(self, voltage: float = 0.0, hours: int = 0, minutes: int = 0,
                        seconds: float = 5.0, vs: str = "Ref"):
@@ -441,11 +566,10 @@ class BiologicPotentiostatTestApp(tk.Tk):
 
     def _remove_step_row(self, idx: int):
         if len(self._step_widgets) <= 1:
-            return  # garder au moins un pas
+            return
         w = self._step_widgets.pop(idx)
         for widget_key in ("lbl", "e_v", "cb_vs", "e_h", "e_m", "e_s", "btn"):
             w[widget_key].destroy()
-        # re-number
         for i, sw in enumerate(self._step_widgets):
             sw["lbl"].configure(text=str(i + 1))
 
@@ -461,42 +585,6 @@ class BiologicPotentiostatTestApp(tk.Tk):
             steps.append(VoltageStep(voltage=v, duration=duration, vs_init=vs_init))
         return steps
 
-    # ---- Graph panel ----
-
-    def _build_graph_panel(self, parent):
-        graph_lf = ttk.LabelFrame(parent, text="Graphique en temps réel", padding=4)
-        graph_lf.pack(fill="both", expand=True)
-
-        # Graph type selector
-        sel_frame = ttk.Frame(graph_lf)
-        sel_frame.pack(fill="x", pady=(0, 4))
-        ttk.Label(sel_frame, text="Affichage :").pack(side="left", padx=(0, 4))
-        graph_types = ["I = f(t)", "Ewe = f(t)", "I = f(Ewe)", "Ewe = f(I)"]
-        for gt in graph_types:
-            ttk.Radiobutton(sel_frame, text=gt, value=gt, variable=self.graph_type_var,
-                            command=self._update_plot).pack(side="left", padx=4)
-
-        # Single canvas for the selected graph
-        self.graph_canvas = tk.Canvas(graph_lf, bg="white", highlightthickness=0)
-        self.graph_canvas.pack(fill="both", expand=True)
-        self.graph_canvas.bind("<Configure>", lambda e: self._update_plot())
-
-        # Zoom / pan bindings
-        self.graph_canvas.bind("<MouseWheel>", self._on_graph_scroll)           # Windows
-        self.graph_canvas.bind("<Button-4>", self._on_graph_scroll)              # Linux up
-        self.graph_canvas.bind("<Button-5>", self._on_graph_scroll)              # Linux down
-        self.graph_canvas.bind("<ButtonPress-1>", self._on_graph_pan_start)
-        self.graph_canvas.bind("<B1-Motion>", self._on_graph_pan_move)
-        self.graph_canvas.bind("<ButtonRelease-1>", self._on_graph_pan_end)
-
-        # Bottom bar: buttons + counter
-        bot_frame = ttk.Frame(graph_lf)
-        bot_frame.pack(fill="x", pady=(4, 0))
-        self.data_count_var = tk.StringVar(value="Points : 0")
-        ttk.Label(bot_frame, textvariable=self.data_count_var).pack(side="left")
-        ttk.Button(bot_frame, text="Plein écran", command=self._on_fullscreen_graph).pack(side="right", padx=2)
-        ttk.Button(bot_frame, text="Réinitialiser vue", command=self._reset_view).pack(side="right", padx=2)
-
     # -----------------------------------------------------------------------
     # Logging
     # -----------------------------------------------------------------------
@@ -505,6 +593,10 @@ class BiologicPotentiostatTestApp(tk.Tk):
         t = time.strftime("%H:%M:%S")
         self.log_text.insert("end", f"[{t}] {msg}\n")
         self.log_text.see("end")
+
+    def _log_safe(self, msg: str):
+        """Thread-safe log."""
+        self.after(0, self._log, msg)
 
     def _set_status(self, msg: str):
         self.status_var.set(msg)
@@ -598,7 +690,7 @@ class BiologicPotentiostatTestApp(tk.Tk):
         self._log("Déconnecté de l'instrument.")
 
     # -----------------------------------------------------------------------
-    # Experiment
+    # Shared: resolve label, build ECC params, select tech file
     # -----------------------------------------------------------------------
 
     def _resolve_label_value(self, label: str, mapping: list[tuple[str, int]]) -> int:
@@ -606,6 +698,101 @@ class BiologicPotentiostatTestApp(tk.Tk):
             if lbl == label:
                 return val
         raise ValueError(f"Label inconnu : {label}")
+
+    def _select_tech_file(self) -> str:
+        bt = self.board_type
+        match bt:
+            case KBIO.BOARD_TYPE.ESSENTIAL.value:
+                return "ca.ecc"
+            case KBIO.BOARD_TYPE.PREMIUM.value:
+                return "ca4.ecc"
+            case KBIO.BOARD_TYPE.DIGICORE.value:
+                return "ca5.ecc"
+            case _:
+                raise RuntimeError(f"Type de carte inconnu ({bt}).")
+
+    def _build_ecc_params(self, steps, record_dt, n_cycles, i_range_val, e_range_val, bw_val):
+        """Build the ECC parameter block for a CA technique."""
+        p_steps_list = []
+        for idx, step in enumerate(steps):
+            p_steps_list.append(make_ecc_parm(self.api, CA_PARMS["voltage_step"], step.voltage, idx))
+            p_steps_list.append(make_ecc_parm(self.api, CA_PARMS["step_duration"], step.duration, idx))
+            p_steps_list.append(make_ecc_parm(self.api, CA_PARMS["vs_init"], step.vs_init, idx))
+
+        p_nb_steps = make_ecc_parm(self.api, CA_PARMS["nb_steps"], len(steps) - 1)
+        p_record_dt = make_ecc_parm(self.api, CA_PARMS["record_dt"], record_dt)
+        p_repeat = make_ecc_parm(self.api, CA_PARMS["repeat"], n_cycles)
+        p_i_range = make_ecc_parm(self.api, CA_PARMS["I_range"], i_range_val)
+        p_e_range = make_ecc_parm(self.api, CA_PARMS["E_range"], e_range_val)
+        p_bw = make_ecc_parm(self.api, CA_PARMS["bandwidth"], bw_val)
+
+        return make_ecc_parms(
+            self.api,
+            *p_steps_list,
+            p_nb_steps,
+            p_record_dt,
+            p_i_range,
+            p_e_range,
+            p_bw,
+            p_repeat,
+        )
+
+    def _read_ca_params(self):
+        """Read CA parameters from the UI and return (steps, record_dt, n_cycles, i_range, e_range, bw)."""
+        steps = self._get_steps()
+        if not steps:
+            raise ValueError("Au moins un pas de tension est requis.")
+        record_dt = float(self.record_dta_var.get())
+        n_cycles = int(self.n_cycles_var.get())
+        i_range_val = self._resolve_label_value(self.i_range_var.get(), I_RANGE_LABELS)
+        e_range_val = self._resolve_label_value(self.e_range_var.get(), E_RANGE_LABELS)
+        bw_val = self._resolve_label_value(self.bw_var.get(), BW_LABELS)
+        return steps, record_dt, n_cycles, i_range_val, e_range_val, bw_val
+
+    def _load_and_start_ca(self, steps, record_dt, n_cycles, i_range_val, e_range_val, bw_val):
+        """Load a CA technique and start the channel. Returns the channel number."""
+        ch = self.channel_var.get()
+        tech_file = self._select_tech_file()
+        self._log_safe(f"Technique : {tech_file}")
+
+        ecc_parms = self._build_ecc_params(steps, record_dt, n_cycles, i_range_val, e_range_val, bw_val)
+
+        self.api.LoadTechnique(self.connection_id, ch, tech_file, ecc_parms, first=True, last=True, display=False)
+        self._log_safe("Technique CA chargée.")
+
+        self.api.StartChannel(self.connection_id, ch)
+        self._log_safe(f"Canal {ch} démarré — acquisition en cours…")
+        return ch
+
+    def _parse_ca_data(self, data, tech_name):
+        """Parse CA experiment data records."""
+        current_values, data_info, data_record = data
+        ix = 0
+        bt = self.board_type
+
+        for _ in range(data_info.NbRows):
+            inx = ix + data_info.NbCols
+            if inx > len(data_record):
+                break
+
+            t_high, t_low, *row = data_record[ix:inx]
+            t_rel = (t_high << 32) + t_low
+            t = current_values.TimeBase * t_rel
+
+            if len(row) >= 2:
+                Ewe = self.api.ConvertChannelNumericIntoSingle(row[0], bt)
+                I = self.api.ConvertChannelNumericIntoSingle(row[1], bt)
+                cycle = row[2] if len(row) >= 3 else 0
+                yield {"t": t, "Ewe": Ewe, "I": I, "cycle": cycle}
+            elif len(row) == 1:
+                Ewe = self.api.ConvertChannelNumericIntoSingle(row[0], bt)
+                yield {"t": t, "Ewe": Ewe, "I": 0.0, "cycle": 0}
+
+            ix = inx
+
+    # -----------------------------------------------------------------------
+    # Experiment (standard CA)
+    # -----------------------------------------------------------------------
 
     def _on_start_experiment(self):
         if self.connection_id is None:
@@ -616,16 +803,7 @@ class BiologicPotentiostatTestApp(tk.Tk):
             return
 
         try:
-            steps = self._get_steps()
-            if not steps:
-                raise ValueError("Au moins un pas de tension est requis.")
-
-            record_dt = float(self.record_dta_var.get())
-            n_cycles = int(self.n_cycles_var.get())
-            i_range_val = self._resolve_label_value(self.i_range_var.get(), I_RANGE_LABELS)
-            e_range_val = self._resolve_label_value(self.e_range_var.get(), E_RANGE_LABELS)
-            bw_val = self._resolve_label_value(self.bw_var.get(), BW_LABELS)
-
+            params = self._read_ca_params()
         except Exception as exc:
             messagebox.showerror("Paramètres invalides", str(exc))
             return
@@ -639,82 +817,37 @@ class BiologicPotentiostatTestApp(tk.Tk):
         self.data_count_var.set("Points : 0")
 
         self._stop_event.clear()
+        self._carto_running = False
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
         self.btn_export.configure(state="disabled")
 
+        # Switch to Graph tab
+        self.notebook.select(1)
+
         self._experiment_thread = threading.Thread(
             target=self._run_experiment,
-            args=(steps, record_dt, n_cycles, i_range_val, e_range_val, bw_val),
+            args=params,
             daemon=True,
         )
         self._experiment_thread.start()
 
     def _run_experiment(self, steps, record_dt, n_cycles, i_range_val, e_range_val, bw_val):
         """Background thread: load CA technique, start, poll data until STOP."""
-        ch = self.channel_var.get()
         try:
-            # Select correct .ecc file
-            bt = self.board_type
-            match bt:
-                case KBIO.BOARD_TYPE.ESSENTIAL.value:
-                    tech_file = "ca.ecc"
-                case KBIO.BOARD_TYPE.PREMIUM.value:
-                    tech_file = "ca4.ecc"
-                case KBIO.BOARD_TYPE.DIGICORE.value:
-                    tech_file = "ca5.ecc"
-                case _:
-                    raise RuntimeError(f"Type de carte inconnu ({bt}).")
+            ch = self._load_and_start_ca(steps, record_dt, n_cycles, i_range_val, e_range_val, bw_val)
 
-            self._log_safe(f"Technique : {tech_file}")
-
-            # Build parameter list
-            p_steps_list = []
-            for idx, step in enumerate(steps):
-                p_steps_list.append(make_ecc_parm(self.api, CA_PARMS["voltage_step"], step.voltage, idx))
-                p_steps_list.append(make_ecc_parm(self.api, CA_PARMS["step_duration"], step.duration, idx))
-                p_steps_list.append(make_ecc_parm(self.api, CA_PARMS["vs_init"], step.vs_init, idx))
-
-            p_nb_steps = make_ecc_parm(self.api, CA_PARMS["nb_steps"], len(steps) - 1)
-            p_record_dt = make_ecc_parm(self.api, CA_PARMS["record_dt"], record_dt)
-            p_repeat = make_ecc_parm(self.api, CA_PARMS["repeat"], n_cycles)
-            p_i_range = make_ecc_parm(self.api, CA_PARMS["I_range"], i_range_val)
-            p_e_range = make_ecc_parm(self.api, CA_PARMS["E_range"], e_range_val)
-            p_bw = make_ecc_parm(self.api, CA_PARMS["bandwidth"], bw_val)
-
-            ecc_parms = make_ecc_parms(
-                self.api,
-                *p_steps_list,
-                p_nb_steps,
-                p_record_dt,
-                p_i_range,
-                p_e_range,
-                p_bw,
-                p_repeat,
-            )
-
-            # Load technique
-            self.api.LoadTechnique(self.connection_id, ch, tech_file, ecc_parms, first=True, last=True, display=False)
-            self._log_safe("Technique CA chargée.")
-
-            # Start channel
-            self.api.StartChannel(self.connection_id, ch)
-            self._log_safe(f"Canal {ch} démarré — acquisition en cours…")
-
-            # Poll loop
             while not self._stop_event.is_set():
                 try:
                     data = self.api.GetData(self.connection_id, ch)
                     status, tech_name = get_info_data(self.api, data)
 
-                    # Parse data — CA returns the same format as CP: t, Ewe, I, cycle
                     for record in self._parse_ca_data(data, tech_name):
                         self._data_rows.append(record)
                         self._plot_t.append(record["t"])
                         self._plot_I.append(record["I"])
                         self._plot_E.append(record["Ewe"])
 
-                    # Update UI from main thread
                     self.after(0, self._update_plot)
 
                     if status == "STOP":
@@ -731,49 +864,19 @@ class BiologicPotentiostatTestApp(tk.Tk):
         finally:
             self.after(0, self._experiment_finished)
 
-    def _parse_ca_data(self, data, tech_name):
-        """Parse CA experiment data records.
-        
-        CA data format: t_high, t_low, Ewe, I, cycle (5 columns typically for VMP300).
-        Falls back to raw parsing if unexpected format.
-        """
-        current_values, data_info, data_record = data
-        ix = 0
-        bt = self.board_type
-
-        for _ in range(data_info.NbRows):
-            inx = ix + data_info.NbCols
-            if inx > len(data_record):
-                break
-
-            t_high, t_low, *row = data_record[ix:inx]
-
-            # compute timestamp in seconds
-            t_rel = (t_high << 32) + t_low
-            t = current_values.TimeBase * t_rel
-
-            if len(row) >= 2:
-                Ewe = self.api.ConvertChannelNumericIntoSingle(row[0], bt)
-                I = self.api.ConvertChannelNumericIntoSingle(row[1], bt)
-                cycle = row[2] if len(row) >= 3 else 0
-                yield {"t": t, "Ewe": Ewe, "I": I, "cycle": cycle}
-            elif len(row) == 1:
-                Ewe = self.api.ConvertChannelNumericIntoSingle(row[0], bt)
-                yield {"t": t, "Ewe": Ewe, "I": 0.0, "cycle": 0}
-
-            ix = inx
-
-    def _log_safe(self, msg: str):
-        """Thread-safe log."""
-        self.after(0, self._log, msg)
-
     def _experiment_finished(self):
         self.btn_start.configure(state="normal")
         self.btn_stop.configure(state="disabled")
+        self.btn_carto_start.configure(state="normal")
+        self.btn_carto_stop.configure(state="disabled")
         if self._data_rows:
             self.btn_export.configure(state="normal")
+        if self._carto_running:
+            self._carto_running = False
+            if any(v is not None for row in self._matrix_data for v in row):
+                self.btn_carto_export.configure(state="normal")
+            self._update_matrix_display()
         self.progress_var.set(f"Terminé — {len(self._data_rows)} points")
-        self._update_plot()
 
     def _on_stop_experiment(self):
         self._stop_event.set()
@@ -786,18 +889,335 @@ class BiologicPotentiostatTestApp(tk.Tk):
                 pass
 
     # -----------------------------------------------------------------------
-    # Plotting (lightweight canvas-based)
+    # Cartography
+    # -----------------------------------------------------------------------
+
+    def _serpentine_order(self, rows: int, cols: int) -> list[tuple[int, int]]:
+        """Generate (row, col) indices in serpentine (boustrophedon) order."""
+        order = []
+        for r in range(rows):
+            if r % 2 == 0:
+                for c in range(cols):
+                    order.append((r, c))
+            else:
+                for c in range(cols - 1, -1, -1):
+                    order.append((r, c))
+        return order
+
+    def _on_start_cartography(self):
+        if self.connection_id is None:
+            messagebox.showwarning("Non connecté", "Connectez-vous d'abord à l'instrument.")
+            return
+        if self._experiment_thread is not None and self._experiment_thread.is_alive():
+            messagebox.showinfo("En cours", "Une expérience/cartographie est déjà en cours.")
+            return
+
+        try:
+            params = self._read_ca_params()
+            rows = self.carto_rows_var.get()
+            cols = self.carto_cols_var.get()
+            interval = float(self.carto_interval_var.get())
+            if rows < 1 or cols < 1:
+                raise ValueError("Lignes et colonnes doivent être >= 1.")
+            if interval <= 0:
+                raise ValueError("L'intervalle doit être > 0.")
+        except Exception as exc:
+            messagebox.showerror("Paramètres invalides", str(exc))
+            return
+
+        # Init matrix
+        self._matrix_data = [[None] * cols for _ in range(rows)]
+        self._matrix_index = 0
+        self._carto_running = True
+
+        # Clear standard data too
+        self._data_rows.clear()
+        self._plot_t.clear()
+        self._plot_I.clear()
+        self._plot_E.clear()
+
+        self._stop_event.clear()
+        self.btn_carto_start.configure(state="disabled")
+        self.btn_carto_stop.configure(state="normal")
+        self.btn_carto_export.configure(state="disabled")
+        self.btn_start.configure(state="disabled")
+        self.btn_stop.configure(state="normal")
+        total = rows * cols
+        self.carto_progress_var.set(f"Démarrage… 0 / {total}")
+
+        # Switch to Cartography tab
+        self.notebook.select(2)
+
+        # Draw empty matrix
+        self.after(10, self._update_matrix_display)
+
+        self._experiment_thread = threading.Thread(
+            target=self._run_cartography,
+            args=(*params, rows, cols, interval),
+            daemon=True,
+        )
+        self._experiment_thread.start()
+
+    def _run_cartography(self, steps, record_dt, n_cycles, i_range_val, e_range_val, bw_val,
+                          rows, cols, interval):
+        """Background thread: run CA and sample I at regular intervals to fill the matrix."""
+        total = rows * cols
+        order = self._serpentine_order(rows, cols)
+
+        try:
+            ch = self._load_and_start_ca(steps, record_dt, n_cycles, i_range_val, e_range_val, bw_val)
+
+            last_I = None
+            cell_idx = 0
+            next_sample_time = time.monotonic() + interval
+
+            while not self._stop_event.is_set() and cell_idx < total:
+                # Poll data to keep buffer fresh and get latest I
+                try:
+                    data = self.api.GetData(self.connection_id, ch)
+                    status, tech_name = get_info_data(self.api, data)
+
+                    for record in self._parse_ca_data(data, tech_name):
+                        self._data_rows.append(record)
+                        self._plot_t.append(record["t"])
+                        self._plot_I.append(record["I"])
+                        self._plot_E.append(record["Ewe"])
+                        last_I = record["I"]
+
+                    if status == "STOP":
+                        self._log_safe("Le potentiostat a terminé l'expérience avant la fin de la cartographie.")
+                        break
+
+                except Exception as poll_exc:
+                    self._log_safe(f"Erreur lecture données : {poll_exc}")
+
+                # Check if it's time to sample
+                now = time.monotonic()
+                if now >= next_sample_time and last_I is not None:
+                    r, c = order[cell_idx]
+                    self._matrix_data[r][c] = last_I
+                    cell_idx += 1
+                    self._matrix_index = cell_idx
+
+                    # Update UI
+                    self.after(0, self._update_matrix_display)
+                    if cell_idx < total:
+                        nr, nc = order[cell_idx] if cell_idx < total else (r, c)
+                        self.after(0, lambda ci=cell_idx, tot=total, rr=nr, cc=nc:
+                                   self.carto_progress_var.set(
+                                       f"Case {ci} / {tot} — ligne {rr + 1}, col {cc + 1}"))
+                    else:
+                        self.after(0, lambda tot=total:
+                                   self.carto_progress_var.set(f"Terminé — {tot} / {tot} cases remplies"))
+
+                    next_sample_time = now + interval
+
+                time.sleep(0.3)
+
+            # Stop the channel when matrix is full
+            if cell_idx >= total:
+                try:
+                    self.api.StopChannel(self.connection_id, ch)
+                    self._log_safe(f"Cartographie terminée — {total} cases remplies.")
+                except Exception:
+                    pass
+
+        except Exception as exc:
+            self._log_safe(f"Erreur cartographie : {exc}")
+        finally:
+            self.after(0, self._experiment_finished)
+
+    # -----------------------------------------------------------------------
+    # Matrix display (heatmap)
+    # -----------------------------------------------------------------------
+
+    def _update_matrix_display(self):
+        """Redraw the matrix heatmap on the cartography canvas."""
+        canvas = self.matrix_canvas
+        canvas.delete("all")
+
+        rows = len(self._matrix_data)
+        cols = len(self._matrix_data[0]) if rows > 0 else 0
+        if rows == 0 or cols == 0:
+            # If no cartography configured yet, show placeholder
+            r = self.carto_rows_var.get()
+            c = self.carto_cols_var.get()
+            if r > 0 and c > 0:
+                rows, cols = r, c
+                self._matrix_data = [[None] * cols for _ in range(rows)]
+            else:
+                return
+
+        cw = canvas.winfo_width()
+        ch = canvas.winfo_height()
+        if cw < 50 or ch < 50:
+            return
+
+        margin_left = 50
+        margin_top = 30
+        margin_right = 10
+        margin_bottom = 30
+
+        plot_w = cw - margin_left - margin_right
+        plot_h = ch - margin_top - margin_bottom
+        if plot_w <= 0 or plot_h <= 0:
+            return
+
+        cell_w = plot_w / cols
+        cell_h = plot_h / rows
+
+        # Compute value range for color scale
+        values = [v for row in self._matrix_data for v in row if v is not None]
+        if values:
+            v_min, v_max = min(values), max(values)
+            if v_min == v_max:
+                v_max = v_min + abs(v_min) * 0.1 if v_min != 0 else 1.0
+        else:
+            v_min, v_max = 0, 1
+
+        # Title
+        canvas.create_text(cw // 2, 12, text="Cartographie I (A)", font=("", 11, "bold"), fill="#333")
+
+        # Current cell (for highlight)
+        order = self._serpentine_order(rows, cols)
+        current_cell = order[self._matrix_index] if self._matrix_index < len(order) else None
+
+        # Draw cells
+        for r in range(rows):
+            for c in range(cols):
+                x0 = margin_left + c * cell_w
+                y0 = margin_top + r * cell_h
+                x1 = x0 + cell_w
+                y1 = y0 + cell_h
+
+                val = self._matrix_data[r][c]
+
+                if val is not None:
+                    color = _value_to_color(val, v_min, v_max)
+                    canvas.create_rectangle(x0, y0, x1, y1, fill=color, outline="#999")
+                    # Text color: dark on light, light on dark
+                    t = (val - v_min) / (v_max - v_min) if v_max != v_min else 0.5
+                    txt_color = "#000" if 0.2 < t < 0.8 else "#fff"
+                    # Adapt font size to cell
+                    font_size = max(7, min(11, int(cell_w / 8)))
+                    canvas.create_text((x0 + x1) / 2, (y0 + y1) / 2,
+                                       text=_format_current(val),
+                                       font=("", font_size), fill=txt_color)
+                else:
+                    canvas.create_rectangle(x0, y0, x1, y1, fill="#e0e0e0", outline="#bbb")
+
+                # Highlight current cell
+                if current_cell == (r, c) and self._carto_running:
+                    canvas.create_rectangle(x0 + 1, y0 + 1, x1 - 1, y1 - 1,
+                                            outline="#ff6600", width=3)
+
+        # Column labels
+        for c in range(cols):
+            cx = margin_left + (c + 0.5) * cell_w
+            canvas.create_text(cx, margin_top + rows * cell_h + 14,
+                               text=str(c + 1), font=("", 9), fill="#555")
+
+        # Row labels
+        for r in range(rows):
+            cy = margin_top + (r + 0.5) * cell_h
+            canvas.create_text(margin_left - 10, cy,
+                               text=str(r + 1), font=("", 9), fill="#555", anchor="e")
+
+        # Update legend
+        self._draw_legend(v_min, v_max, values)
+
+        # Update count
+        filled = sum(1 for v in values)
+        total = rows * cols
+        self.data_count_var.set(f"Points : {len(self._data_rows)}")
+
+    def _draw_legend(self, v_min: float, v_max: float, values: list[float]):
+        """Draw color legend on the legend canvas."""
+        canvas = self.legend_canvas
+        canvas.delete("all")
+
+        cw = canvas.winfo_width()
+        ch = canvas.winfo_height()
+        if ch < 60 or cw < 30:
+            return
+
+        margin_top = 40
+        margin_bottom = 30
+        bar_x = 10
+        bar_w = 25
+        bar_h = ch - margin_top - margin_bottom
+        if bar_h <= 0:
+            return
+
+        canvas.create_text(cw // 2, 12, text="I (A)", font=("", 9, "bold"), fill="#333")
+
+        if not values:
+            canvas.create_rectangle(bar_x, margin_top, bar_x + bar_w, margin_top + bar_h,
+                                    fill="#e0e0e0", outline="#999")
+            return
+
+        # Draw gradient bar (top = max, bottom = min)
+        n_steps = min(bar_h, 100)
+        step_h = bar_h / n_steps
+        for i in range(n_steps):
+            frac = 1.0 - i / n_steps  # top = 1.0 (max), bottom = 0.0 (min)
+            color = _value_to_color(v_min + frac * (v_max - v_min), v_min, v_max)
+            y0 = margin_top + i * step_h
+            y1 = y0 + step_h + 1
+            canvas.create_rectangle(bar_x, y0, bar_x + bar_w, y1, fill=color, outline="")
+
+        canvas.create_rectangle(bar_x, margin_top, bar_x + bar_w, margin_top + bar_h, outline="#999")
+
+        # Tick labels
+        for frac, label_y in [(1.0, margin_top), (0.5, margin_top + bar_h / 2), (0.0, margin_top + bar_h)]:
+            val = v_min + frac * (v_max - v_min)
+            canvas.create_text(bar_x + bar_w + 5, label_y,
+                               text=_format_current(val), font=("", 7), anchor="w", fill="#333")
+
+    # -----------------------------------------------------------------------
+    # Matrix CSV export
+    # -----------------------------------------------------------------------
+
+    def _on_export_matrix_csv(self):
+        if not self._matrix_data or not any(v is not None for row in self._matrix_data for v in row):
+            messagebox.showinfo("Aucune donnée", "Pas de données de cartographie à exporter.")
+            return
+
+        rows = len(self._matrix_data)
+        cols = len(self._matrix_data[0]) if rows > 0 else 0
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv"), ("Tous", "*.*")],
+            initialfile="cartography_data.csv",
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "w", newline="") as f:
+                writer = csv.writer(f)
+                # Header
+                writer.writerow([""] + [f"Col {c + 1}" for c in range(cols)])
+                # Data
+                for r in range(rows):
+                    row_data = [f"Ligne {r + 1}"]
+                    for c in range(cols):
+                        val = self._matrix_data[r][c]
+                        row_data.append(f"{val:.6e}" if val is not None else "")
+                    writer.writerow(row_data)
+            self._log(f"Cartographie exportée : {path} ({rows}x{cols})")
+        except Exception as exc:
+            messagebox.showerror("Erreur export", str(exc))
+
+    # -----------------------------------------------------------------------
+    # Plotting (lightweight canvas-based) — Standard CA
     # -----------------------------------------------------------------------
 
     def _clear_canvas(self, canvas: tk.Canvas):
         canvas.delete("all")
 
-    # -----------------------------------------------------------------------
-    # Zoom / Pan helpers
-    # -----------------------------------------------------------------------
-
     def _get_current_data(self):
-        """Return (xs, ys, xlabel, ylabel, color) for the selected graph type."""
         gt = self.graph_type_var.get()
         if gt == "I = f(t)":
             return self._plot_t, self._plot_I, "t (s)", "I (A)", "#1f77b4"
@@ -810,7 +1230,6 @@ class BiologicPotentiostatTestApp(tk.Tk):
         return [], [], "", "", "#000"
 
     def _data_bounds(self, xs, ys):
-        """Return (x_min, x_max, y_min, y_max) with safe defaults."""
         if len(xs) < 1:
             return 0, 1, 0, 1
         x_min, x_max = min(xs), max(xs)
@@ -824,19 +1243,17 @@ class BiologicPotentiostatTestApp(tk.Tk):
         return x_min, x_max, y_min, y_max
 
     def _get_view(self, xs, ys):
-        """Return current viewport (x_min, x_max, y_min, y_max). Falls back to data bounds."""
         if self._view_x_min is not None:
             return self._view_x_min, self._view_x_max, self._view_y_min, self._view_y_max
         return self._data_bounds(xs, ys)
 
     def _reset_view(self):
-        """Reset zoom/pan to show all data."""
         self._view_x_min = self._view_x_max = None
         self._view_y_min = self._view_y_max = None
         self._update_plot()
 
     def _canvas_margins(self):
-        return 80, 20, 25, 45  # left, right, top, bottom
+        return 80, 20, 25, 45
 
     def _pixel_to_data(self, canvas, px, py, x_min, x_max, y_min, y_max):
         ml, mr, mt, mb = self._canvas_margins()
@@ -851,13 +1268,11 @@ class BiologicPotentiostatTestApp(tk.Tk):
         return dx, dy
 
     def _on_graph_scroll(self, event):
-        """Zoom in/out centered on mouse position."""
         xs, ys, *_ = self._get_current_data()
         if len(xs) < 2:
             return
         vx0, vx1, vy0, vy1 = self._get_view(xs, ys)
 
-        # Determine scroll direction
         if hasattr(event, 'delta'):
             factor = 0.8 if event.delta > 0 else 1.25
         elif event.num == 4:
@@ -865,10 +1280,7 @@ class BiologicPotentiostatTestApp(tk.Tk):
         else:
             factor = 1.25
 
-        # Mouse position in data coords
         mx, my = self._pixel_to_data(self.graph_canvas, event.x, event.y, vx0, vx1, vy0, vy1)
-
-        # Zoom around mouse
         self._view_x_min = mx - (mx - vx0) * factor
         self._view_x_max = mx + (vx1 - mx) * factor
         self._view_y_min = my - (my - vy0) * factor
@@ -911,7 +1323,6 @@ class BiologicPotentiostatTestApp(tk.Tk):
     # -----------------------------------------------------------------------
 
     def _on_fullscreen_graph(self):
-        """Open the current graph in a maximized separate window."""
         xs, ys, xlabel, ylabel, color = self._get_current_data()
         if len(xs) < 2:
             messagebox.showinfo("Pas de données", "Pas assez de données pour afficher le graphe.")
@@ -919,14 +1330,12 @@ class BiologicPotentiostatTestApp(tk.Tk):
 
         win = tk.Toplevel(self)
         win.title(f"{ylabel} = f({xlabel})")
-        win.state("zoomed")  # maximized on Windows
+        win.state("zoomed")
 
-        # Graph type selector in fullscreen
         top_bar = ttk.Frame(win, padding=4)
         top_bar.pack(fill="x")
         fs_graph_var = tk.StringVar(value=self.graph_type_var.get())
 
-        # Separate zoom/pan state for fullscreen
         fs_state = {"vx0": None, "vx1": None, "vy0": None, "vy1": None, "pan": None}
 
         def fs_get_data():
@@ -982,9 +1391,9 @@ class BiologicPotentiostatTestApp(tk.Tk):
             sx, sy, vx0, vx1, vy0, vy1 = fs_state["pan"]
             ml, mr, mt, mb = self._canvas_margins()
             cw = fs_canvas.winfo_width()
-            ch = fs_canvas.winfo_height()
+            ch_ = fs_canvas.winfo_height()
             pw_ = cw - ml - mr
-            ph_ = ch - mt - mb
+            ph_ = ch_ - mt - mb
             if pw_ <= 0 or ph_ <= 0:
                 return
             dx = -(event.x - sx) / pw_ * (vx1 - vx0)
@@ -1033,7 +1442,6 @@ class BiologicPotentiostatTestApp(tk.Tk):
     def _draw_curve_viewport(self, canvas: tk.Canvas, xs: list[float], ys: list[float],
                              xlabel: str, ylabel: str, color: str,
                              x_min: float, x_max: float, y_min: float, y_max: float):
-        """Draw the graph using the given viewport bounds."""
         canvas.delete("all")
         w = canvas.winfo_width()
         h = canvas.winfo_height()
@@ -1069,7 +1477,7 @@ class BiologicPotentiostatTestApp(tk.Tk):
         canvas.create_line(ml, mt, ml, h - mb, fill="#333")
         canvas.create_line(ml, h - mb, w - mr, h - mb, fill="#333")
 
-        # Axis labels
+        # Labels
         canvas.create_text(w // 2, h - 5, text=xlabel, font=("", 10))
         canvas.create_text(14, h // 2, text=ylabel, font=("", 10), angle=90)
 
@@ -1083,7 +1491,7 @@ class BiologicPotentiostatTestApp(tk.Tk):
             yv = y_min + frac * y_range
             canvas.create_text(ml - 8, ty(yv), text=f"{yv:.3e}", font=("", 8), anchor="e")
 
-        # Clip to plot area: only draw visible points
+        # Downsample
         max_pts = max(pw * 2, 100)
         if len(xs) > max_pts:
             step_d = max(len(xs) // max_pts, 1)
@@ -1093,11 +1501,10 @@ class BiologicPotentiostatTestApp(tk.Tk):
             xs_d = xs
             ys_d = ys
 
-        # Draw crosses at each data point (skip out-of-viewport)
+        # Draw crosses
         cross_size = 3
         for xv, yv in zip(xs_d, ys_d):
             cx, cy = tx(xv), ty(yv)
-            # Skip points clearly outside the plot area
             if cx < ml - cross_size or cx > w - mr + cross_size:
                 continue
             if cy < mt - cross_size or cy > h - mb + cross_size:
@@ -1108,7 +1515,7 @@ class BiologicPotentiostatTestApp(tk.Tk):
                                cx + cross_size, cy - cross_size, fill=color, width=1.5)
 
     # -----------------------------------------------------------------------
-    # CSV Export
+    # CSV Export (standard CA)
     # -----------------------------------------------------------------------
 
     def _on_export_csv(self):
