@@ -9,7 +9,9 @@ Layout :
 """
 
 import os
+import json
 import queue
+import re
 import sys
 import threading
 import time
@@ -32,6 +34,8 @@ from newport_conex_test_ui import (ConexAxis, ConexError, DEFAULT_DLL_CANDIDATES
 
 PREVIEW_POLL_MS = 15          # ~66 fps display polling
 FPS_UPDATE_INTERVAL = 1.0     # seconds between FPS label updates
+CAMERA_PIXEL_PITCH_UM = 3.45  # camera sensor pitch in um/pixel
+DEFAULT_GOTO_MM_PER_PX = 0.001  # legacy fallback
 
 # ───────────────────────── Camera stream ──────────────────────────
 
@@ -228,7 +232,7 @@ class CameraConfigDialog(tk.Toplevel):
             self.serial_combo["values"] = self.app._camera_serials_list
 
         # Exposure + Gain
-        ttk.Label(f, text="Exposition (µs) :").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Label(f, text="Exposition (s) :").grid(row=2, column=0, sticky="w", pady=4)
         ttk.Entry(f, textvariable=self.app.exposure_var, width=12).grid(row=2, column=1, sticky="w", pady=4)
         ttk.Label(f, text="Gain :").grid(row=2, column=2, sticky="w", pady=4, padx=(12, 0))
         ttk.Entry(f, textvariable=self.app.gain_var, width=12).grid(row=2, column=3, sticky="w", pady=4)
@@ -284,6 +288,7 @@ class MainApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.project_root = Path(__file__).resolve().parent.parent
+        self.laser_config_path = self.project_root / "MainUI" / "laser_presets.json"
 
         # ── Motor state ──
         self.conex_class = None
@@ -305,6 +310,19 @@ class MainApp(tk.Tk):
         self._last_frame_width = 0
         self._last_frame_height = 0
         self._camera_serials_list = []
+        self._preview_scale_x = 1.0
+        self._preview_scale_y = 1.0
+        self._preview_offset_x = 0
+        self._preview_offset_y = 0
+        self._preview_draw_w = 0
+        self._preview_draw_h = 0
+        self._preview_source_x0 = 0
+        self._preview_source_y0 = 0
+        self._zoom_factor = 1.0
+        self._zoom_min = 1.0
+        self._zoom_max = 12.0
+        self._zoom_center_x = 0.5
+        self._zoom_center_y = 0.5
 
         self.TLCameraSDK = None
         self.SENSOR_TYPE = None
@@ -324,17 +342,24 @@ class MainApp(tk.Tk):
         self.motor_timeout_var = tk.StringVar(value="30")
         self.step_x_var = tk.StringVar(value="0.05")
         self.step_y_var = tk.StringVar(value="0.05")
+        self.abs_x_var = tk.StringVar(value="0.0")
+        self.abs_y_var = tk.StringVar(value="0.0")
         self.jog_speed_var = tk.StringVar(value="0.5")  # mm/s pour le jog clavier continu
         self._jog_active: dict[str, bool] = {"X": False, "Y": False}
+        self.motor_pos_x_var = tk.StringVar(value="X: -")
+        self.motor_pos_y_var = tk.StringVar(value="Y: -")
+        self._motor_pos_poll_ms = 250
+        self._motor_pos_job = None
 
         self.serial_var = tk.StringVar(value="")
-        self.exposure_var = tk.StringVar(value="10000")
+        self.exposure_var = tk.StringVar(value="0.01")  # en secondes
         self.gain_var = tk.StringVar(value="0")
         self.gain_info_var = tk.StringVar(value="Gain : inconnu")
         self.camera_dll_path_var = tk.StringVar(value=str(self._native_dll_dir()))
 
         self.status_var = tk.StringVar(value="Prêt")
         self.fps_var = tk.StringVar(value="FPS : –")
+        self.zoom_var = tk.StringVar(value="Zoom : 1.00x")
 
         # Point / laser overlay
         self.laser_x = 0
@@ -343,15 +368,44 @@ class MainApp(tk.Tk):
         self.laser_coord_var = tk.StringVar(value="Point : X=– Y=–")
         self.laser_step_var = tk.StringVar(value="5")
         self.laser_size_var = tk.StringVar(value="6")
+        self.goto_mm_per_px_x_var = tk.StringVar(value=self._format_mm_per_px(CAMERA_PIXEL_PITCH_UM / (4.0 * 1000.0)))
+        self.goto_mm_per_px_y_var = tk.StringVar(value=self._format_mm_per_px(CAMERA_PIXEL_PITCH_UM / (4.0 * 1000.0)))
+        self.goto_invert_x_var = tk.BooleanVar(value=False)
+        self.goto_invert_y_var = tk.BooleanVar(value=False)
+        self.goto_status_var = tk.StringVar(value="GoTo : inactif")
+        self._goto_armed = False
 
         # Objectif – préréglages position du point laser (px) + taille (px)
         # Format : {"x": int, "y": int, "size": int}
         self.OBJECTIVE_PRESETS = {
-            "4x":  {"x": 2588, "y": 1350, "size": 32},
-            "10x": {"x": 2588, "y": 1350, "size": 32},   # à calibrer
-            "50x": {"x": 2588, "y": 1350, "size": 32},   # à calibrer
+            "4x": {
+                "x": 2588,
+                "y": 1350,
+                "size": 32,
+                "mm_per_px_x": CAMERA_PIXEL_PITCH_UM / (4.0 * 1000.0),
+                "mm_per_px_y": CAMERA_PIXEL_PITCH_UM / (4.0 * 1000.0),
+            },
+            "10x": {
+                "x": 2588,
+                "y": 1350,
+                "size": 32,
+                "mm_per_px_x": CAMERA_PIXEL_PITCH_UM / (10.0 * 1000.0),
+                "mm_per_px_y": CAMERA_PIXEL_PITCH_UM / (10.0 * 1000.0),
+            },
+            "50x": {
+                "x": 2588,
+                "y": 1350,
+                "size": 32,
+                "mm_per_px_x": CAMERA_PIXEL_PITCH_UM / (50.0 * 1000.0),
+                "mm_per_px_y": CAMERA_PIXEL_PITCH_UM / (50.0 * 1000.0),
+            },
         }
         self.objective_var = tk.StringVar(value="4x")
+        self._load_laser_config()
+        try:
+            self._save_laser_config()
+        except Exception:
+            pass
 
         # Séquence de balayage
         self.seq_start_motor: tuple | None = None   # (x_mm, y_mm)
@@ -370,7 +424,9 @@ class MainApp(tk.Tk):
         self._controls_visible = tk.BooleanVar(value=True)
 
         self._build_ui()
+        self.on_objective_change()
         self._bind_keyboard_controls()
+        self._schedule_motor_pos_poll()
         self._log("Application prête.")
 
     # ═══════════════════════════ UI BUILD ═══════════════════════════
@@ -397,6 +453,7 @@ class MainApp(tk.Tk):
                                        anchor="center", background="#1a1a1a", foreground="#888888")
         self.preview_label.grid(row=0, column=0, sticky="nsew")
         self.preview_label.bind("<Configure>", self._on_preview_resize)
+        self.preview_label.bind("<Button-1>", self._on_preview_click)
 
         # ── Bottom controls panel (row 1 – fixed height) ──
         self._controls_frame = ttk.Frame(self._main_frame)
@@ -418,6 +475,7 @@ class MainApp(tk.Tk):
         ttk.Label(self._statusbar, textvariable=self.status_var, foreground="blue",
                   width=40, anchor="w").pack(side="left", padx=6)
         ttk.Label(self._statusbar, textvariable=self.fps_var, width=14, anchor="w").pack(side="left", padx=6)
+        ttk.Label(self._statusbar, textvariable=self.zoom_var, width=14, anchor="w").pack(side="left", padx=6)
         ttk.Label(self._statusbar, textvariable=self.laser_coord_var, width=24, anchor="w").pack(side="left", padx=6)
 
         # Live / Stop buttons directly visible in status bar for quick access
@@ -496,28 +554,63 @@ class MainApp(tk.Tk):
         ttk.Button(obj_box, text="+", width=3,
                    command=lambda: self.on_laser_size(+1)).grid(row=2, column=3, padx=1)
 
+        ttk.Label(obj_box, text="mm/px X").grid(row=3, column=0, sticky="w", padx=2)
+        ttk.Label(obj_box, textvariable=self.goto_mm_per_px_x_var, width=9, foreground="blue").grid(row=3, column=1, padx=2, sticky="w")
+        ttk.Label(obj_box, text="mm/px Y").grid(row=3, column=2, sticky="w", padx=2)
+        ttk.Label(obj_box, textvariable=self.goto_mm_per_px_y_var, width=9, foreground="blue").grid(row=3, column=3, padx=2, sticky="w")
+
+        ttk.Checkbutton(obj_box, text="Inv X", variable=self.goto_invert_x_var).grid(row=3, column=4, padx=2)
+        ttk.Checkbutton(obj_box, text="Inv Y", variable=self.goto_invert_y_var).grid(row=3, column=5, padx=2)
+
+        ttk.Button(obj_box, text="GoTo", width=8, command=self.on_arm_goto).grid(row=4, column=0, columnspan=2, padx=2, pady=(4, 0), sticky="w")
+        ttk.Label(obj_box, textvariable=self.goto_status_var, foreground="blue", font=("Segoe UI", 8)).grid(
+            row=4, column=2, columnspan=4, sticky="w", padx=2, pady=(4, 0)
+        )
+
         # ── Motor jog section ──
         motor_box = ttk.LabelFrame(outer, text="Moteurs", padding=4)
         motor_box.pack(side="left", fill="y", padx=(0, 4))
 
-        ttk.Label(motor_box, text="Pas X").grid(row=0, column=0, sticky="w", padx=2)
+        ttk.Label(motor_box, text="Pas X (mm)").grid(row=0, column=0, sticky="w", padx=2)
         ttk.Entry(motor_box, textvariable=self.step_x_var, width=7).grid(row=0, column=1, padx=2)
-        ttk.Button(motor_box, text="X −", width=4,
+        ttk.Button(motor_box, text="X -", width=4,
                    command=lambda: self.on_motor_jog("X", -1, False)).grid(row=0, column=2, padx=1)
         ttk.Button(motor_box, text="X +", width=4,
                    command=lambda: self.on_motor_jog("X", +1, False)).grid(row=0, column=3, padx=1)
 
-        ttk.Label(motor_box, text="Pas Y").grid(row=1, column=0, sticky="w", padx=2)
+        ttk.Label(motor_box, text="Pas Y (mm)").grid(row=1, column=0, sticky="w", padx=2)
         ttk.Entry(motor_box, textvariable=self.step_y_var, width=7).grid(row=1, column=1, padx=2)
-        ttk.Button(motor_box, text="Y −", width=4,
+        ttk.Button(motor_box, text="Y -", width=4,
                    command=lambda: self.on_motor_jog("Y", -1, False)).grid(row=1, column=2, padx=1)
         ttk.Button(motor_box, text="Y +", width=4,
                    command=lambda: self.on_motor_jog("Y", +1, False)).grid(row=1, column=3, padx=1)
 
-        ttk.Label(motor_box, text="Vit. clavier (mm/s)").grid(row=2, column=0, columnspan=2, sticky="w", padx=2, pady=(4, 0))
-        ttk.Entry(motor_box, textvariable=self.jog_speed_var, width=7).grid(row=2, column=2, columnspan=2, sticky="w", padx=2, pady=(4, 0))
-        ttk.Label(motor_box, text="Clavier continu : ← → ↑ ↓", foreground="gray",
-                  font=("Segoe UI", 8)).grid(row=3, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        ttk.Label(motor_box, text="Abs X (mm)").grid(row=2, column=0, sticky="w", padx=2, pady=(4, 0))
+        ttk.Entry(motor_box, textvariable=self.abs_x_var, width=7).grid(row=2, column=1, padx=2, pady=(4, 0))
+        ttk.Button(motor_box, text="Aller X", width=8,
+                   command=lambda: self.on_motor_move_absolute("X")).grid(row=2, column=2, columnspan=2, padx=1, pady=(4, 0), sticky="w")
+
+        ttk.Label(motor_box, text="Abs Y (mm)").grid(row=3, column=0, sticky="w", padx=2)
+        ttk.Entry(motor_box, textvariable=self.abs_y_var, width=7).grid(row=3, column=1, padx=2)
+        ttk.Button(motor_box, text="Aller Y", width=8,
+                   command=lambda: self.on_motor_move_absolute("Y")).grid(row=3, column=2, columnspan=2, padx=1, sticky="w")
+
+        ttk.Label(motor_box, text="Pos X").grid(row=4, column=0, sticky="w", padx=2, pady=(2, 0))
+        ttk.Label(motor_box, textvariable=self.motor_pos_x_var, width=12, anchor="w", foreground="blue").grid(
+            row=4, column=1, sticky="w", padx=2, pady=(2, 0)
+        )
+        ttk.Label(motor_box, text="Pos Y").grid(row=4, column=2, sticky="w", padx=2, pady=(2, 0))
+        ttk.Label(motor_box, textvariable=self.motor_pos_y_var, width=12, anchor="w", foreground="blue").grid(
+            row=4, column=3, sticky="w", padx=2, pady=(2, 0)
+        )
+
+        ttk.Label(motor_box, text="Plage : 0 - 25 mm", foreground="gray",
+                  font=("Segoe UI", 8)).grid(row=5, column=0, columnspan=4, sticky="w", pady=(1, 0))
+
+        ttk.Label(motor_box, text="Vit. clavier (mm/s)").grid(row=6, column=0, columnspan=2, sticky="w", padx=2, pady=(4, 0))
+        ttk.Entry(motor_box, textvariable=self.jog_speed_var, width=7).grid(row=6, column=2, columnspan=2, sticky="w", padx=2, pady=(4, 0))
+        ttk.Label(motor_box, text="Clavier continu : Left/Right/Up/Down | Echap = quitter champ", foreground="gray",
+                  font=("Segoe UI", 8)).grid(row=7, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
         # ── Séquence de balayage ──
         seq_box = ttk.LabelFrame(outer, text="Séquence balayage", padding=4)
@@ -560,7 +653,7 @@ class MainApp(tk.Tk):
         cam_box = ttk.LabelFrame(outer, text="Caméra rapide", padding=4)
         cam_box.pack(side="left", fill="y", padx=(0, 4))
 
-        ttk.Label(cam_box, text="Expo (µs)").grid(row=0, column=0, sticky="w", padx=2)
+        ttk.Label(cam_box, text="Expo (s)").grid(row=0, column=0, sticky="w", padx=2)
         ttk.Entry(cam_box, textvariable=self.exposure_var, width=9).grid(row=0, column=1, padx=2)
         ttk.Label(cam_box, text="Gain").grid(row=0, column=2, sticky="w", padx=(8, 2))
         ttk.Entry(cam_box, textvariable=self.gain_var, width=6).grid(row=0, column=3, padx=2)
@@ -603,16 +696,98 @@ class MainApp(tk.Tk):
         self.bind_all("<KeyRelease-Right>", lambda e: self._on_arrow_release(e, "X"))
         self.bind_all("<KeyRelease-Up>",    lambda e: self._on_arrow_release(e, "Y"))
         self.bind_all("<KeyRelease-Down>",  lambda e: self._on_arrow_release(e, "Y"))
+        # Echap ou Entrée dans un champ texte : rendre le focus à la fenêtre principale
+        self.bind_all("<Escape>", self._defocus_entry)
+        self.bind_all("<Return>", self._defocus_entry)
+        # Clic hors d'un champ texte : retrait automatique du focus
+        self.bind_all("<Button-1>", self._on_global_click)
+        # Zoom preview via trackpad/mousewheel meme sans focus sur l'image
+        self.bind_all("<MouseWheel>", self._on_preview_wheel, add="+")
+        self.bind_all("<Control-MouseWheel>", self._on_preview_wheel, add="+")
+        self.bind_all("<Button-4>", self._on_preview_wheel, add="+")
+        self.bind_all("<Button-5>", self._on_preview_wheel, add="+")
+
+    @staticmethod
+    def _event_widget_class(event) -> str:
+        widget = getattr(event, "widget", None)
+        if hasattr(widget, "winfo_class"):
+            try:
+                return widget.winfo_class()
+            except Exception:
+                return ""
+        return ""
+
+    def _safe_focus_get(self):
+        try:
+            return self.focus_get()
+        except Exception:
+            return None
+
+    def _set_preview_cursor(self, cursor_name: str):
+        if not hasattr(self, "preview_label"):
+            return
+        try:
+            self.preview_label.configure(cursor=cursor_name)
+        except Exception:
+            if cursor_name:
+                try:
+                    self.preview_label.configure(cursor="cross")
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.preview_label.configure(cursor="")
+                except Exception:
+                    pass
+
+    def _set_goto_armed(self, armed: bool):
+        self._goto_armed = bool(armed)
+        if self._goto_armed:
+            self.goto_status_var.set("GoTo : clique dans l'image")
+            self._set_preview_cursor("tcross")
+        else:
+            self.goto_status_var.set("GoTo : inactif")
+            self._set_preview_cursor("")
+
+    def _defocus_entry(self, event=None):
+        """Retire le focus d'un champ texte et le donne ? la fen?tre principale."""
+        wc = self._safe_focus_get()
+        if wc is not None:
+            try:
+                wc_class = wc.winfo_class()
+            except Exception:
+                wc_class = ""
+            if wc_class in {"Entry", "TEntry", "Text", "Spinbox", "TSpinbox"}:
+                try:
+                    self.focus_set()
+                except Exception:
+                    pass
+
+    def _on_global_click(self, event):
+        """Retire le focus d'un champ texte si on clique ailleurs."""
+        wc = self._event_widget_class(event)
+        if wc not in {"Entry", "TEntry", "Text", "Spinbox", "TSpinbox", "Combobox", "TCombobox"}:
+            current_focus = self._safe_focus_get()
+            if current_focus is not None:
+                try:
+                    cf_class = current_focus.winfo_class()
+                except Exception:
+                    cf_class = ""
+                if cf_class in {"Entry", "TEntry", "Text", "Spinbox", "TSpinbox"}:
+                    try:
+                        self.focus_set()
+                    except Exception:
+                        pass
 
     def _on_arrow_press(self, event, axis_name: str, direction: int):
-        wc = event.widget.winfo_class() if event.widget else ""
+        wc = self._event_widget_class(event)
         if wc in {"Entry", "TEntry", "Text"}:
             return
         self.on_motor_jog_start(axis_name, direction)
         return "break"
 
     def _on_arrow_release(self, event, axis_name: str):
-        wc = event.widget.winfo_class() if event.widget else ""
+        wc = self._event_widget_class(event)
         if wc in {"Entry", "TEntry", "Text"}:
             return
         self.on_motor_jog_stop(axis_name)
@@ -657,6 +832,29 @@ class MainApp(tk.Tk):
         if axis is None or not axis.connected:
             raise ConexError(f"Axe {axis_name} non connecté")
         return axis
+
+    def _update_motor_position_labels(self):
+        def fmt(name: str, axis):
+            if axis is None or not axis.connected:
+                return f"{name}: -"
+            snap = axis.snapshot()
+            if snap.position is not None:
+                return f"{name}: {snap.position:.4f} mm"
+            if snap.issue:
+                return f"{name}: {snap.issue}"
+            return f"{name}: -"
+
+        self.motor_pos_x_var.set(fmt("X", self.axis_x))
+        self.motor_pos_y_var.set(fmt("Y", self.axis_y))
+
+    def _schedule_motor_pos_poll(self):
+        if self._motor_pos_job is None:
+            self._motor_pos_loop()
+
+    def _motor_pos_loop(self):
+        self._motor_pos_job = None
+        self._update_motor_position_labels()
+        self._motor_pos_job = self.after(self._motor_pos_poll_ms, self._motor_pos_loop)
 
     # ═══════════════════════ MOTOR METHODS ═══════════════════════
 
@@ -786,6 +984,29 @@ class MainApp(tk.Tk):
             self.after(0, lambda: self._log(f"Jog {axis_name} : {delta:+.4f} mm"))
         self._run_async(f"Jog {axis_name}", worker)
 
+    def on_motor_move_absolute(self, axis_name: str):
+        val_var = self.abs_x_var if axis_name == "X" else self.abs_y_var
+        try:
+            timeout_s = self._get_motor_timeout()
+            target = float(val_var.get())
+        except ValueError:
+            messagebox.showerror("Erreur", f"Position absolue {axis_name} invalide")
+            return
+
+        if not (ABS_MIN_MM <= target <= ABS_MAX_MM):
+            messagebox.showerror(
+                "Erreur",
+                f"Position {axis_name} hors limites [{ABS_MIN_MM:.1f}, {ABS_MAX_MM:.1f}] mm"
+            )
+            return
+
+        def worker():
+            axis = self._axis_or_error(axis_name)
+            axis.move_absolute(target, timeout_s=timeout_s)
+            self.after(0, lambda: self._log(f"Move abs {axis_name} -> {target:.4f} mm"))
+
+        self._run_async(f"Move abs {axis_name}", worker)
+
     def on_motor_jog_start(self, axis_name: str, direction: int):
         """Démarre un déplacement continu (appui maintenu sur une flèche).
         
@@ -839,22 +1060,181 @@ class MainApp(tk.Tk):
 
     # ═══════════════════════ OBJECTIF / PRESET LASER ═══════════════════════
 
+    @staticmethod
+    def _parse_objective_magnification(objective_name: str) -> float | None:
+        txt = str(objective_name or "").strip().lower().replace(",", ".")
+        if not txt:
+            return None
+        match = re.search(r"(\d+(?:\.\d+)?)", txt)
+        if not match:
+            return None
+        try:
+            value = float(match.group(1))
+        except Exception:
+            return None
+        return value if value > 0 else None
+
+    def _auto_mm_per_px_for_objective(self, objective_name: str) -> float | None:
+        magnification = self._parse_objective_magnification(objective_name)
+        if magnification is None:
+            return None
+        return CAMERA_PIXEL_PITCH_UM / (magnification * 1000.0)
+
+    @staticmethod
+    def _format_mm_per_px(value: float) -> str:
+        txt = f"{float(value):.9f}".rstrip("0").rstrip(".")
+        return txt or "0"
+
+    def _apply_objective_auto_scale_if_needed(self, objective_name: str, preset: dict) -> bool:
+        auto = self._auto_mm_per_px_for_objective(objective_name)
+        if auto is None:
+            return False
+
+        changed = False
+        for key in ("mm_per_px_x", "mm_per_px_y"):
+            raw = preset.get(key, DEFAULT_GOTO_MM_PER_PX)
+            try:
+                current = float(raw)
+            except Exception:
+                current = -1.0
+            if current <= 0 or abs(current - DEFAULT_GOTO_MM_PER_PX) < 1e-12:
+                preset[key] = auto
+                changed = True
+        return changed
+
+    def _load_laser_config(self):
+        if not self.laser_config_path.exists():
+            for name, current in self.OBJECTIVE_PRESETS.items():
+                self._apply_objective_auto_scale_if_needed(name, current)
+            return
+        try:
+            data = json.loads(self.laser_config_path.read_text(encoding="utf-8"))
+        except Exception:
+            for name, current in self.OBJECTIVE_PRESETS.items():
+                self._apply_objective_auto_scale_if_needed(name, current)
+            return
+
+        presets = data.get("objective_presets", {})
+        if not isinstance(presets, dict):
+            presets = {}
+
+        for name, current in self.OBJECTIVE_PRESETS.items():
+            incoming = presets.get(name)
+            if isinstance(incoming, dict):
+                try:
+                    current["x"] = int(incoming.get("x", current.get("x", 0)))
+                except Exception:
+                    pass
+                try:
+                    current["y"] = int(incoming.get("y", current.get("y", 0)))
+                except Exception:
+                    pass
+                try:
+                    current["size"] = max(1, int(incoming.get("size", current.get("size", 6))))
+                except Exception:
+                    pass
+
+                try:
+                    mmx = float(incoming.get("mm_per_px_x", current.get("mm_per_px_x", DEFAULT_GOTO_MM_PER_PX)))
+                    if mmx > 0:
+                        current["mm_per_px_x"] = mmx
+                except Exception:
+                    pass
+                try:
+                    mmy = float(incoming.get("mm_per_px_y", current.get("mm_per_px_y", DEFAULT_GOTO_MM_PER_PX)))
+                    if mmy > 0:
+                        current["mm_per_px_y"] = mmy
+                except Exception:
+                    pass
+
+            self._apply_objective_auto_scale_if_needed(name, current)
+
+    def _save_laser_config(self):
+        payload = {"objective_presets": {}}
+        for name, preset in self.OBJECTIVE_PRESETS.items():
+            payload["objective_presets"][name] = {
+                "x": int(preset.get("x", 0)),
+                "y": int(preset.get("y", 0)),
+                "size": max(1, int(preset.get("size", 6))),
+                "mm_per_px_x": float(preset.get("mm_per_px_x", DEFAULT_GOTO_MM_PER_PX)),
+                "mm_per_px_y": float(preset.get("mm_per_px_y", DEFAULT_GOTO_MM_PER_PX)),
+            }
+
+        self.laser_config_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.laser_config_path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp_path.replace(self.laser_config_path)
+
+    def _persist_current_laser_preset(self):
+        name = self.objective_var.get()
+        preset = self.OBJECTIVE_PRESETS.setdefault(name, {})
+        preset["x"] = int(self.laser_x)
+        preset["y"] = int(self.laser_y)
+
+        try:
+            size = max(1, int(float(self.laser_size_var.get())))
+        except Exception:
+            size = int(preset.get("size", 6))
+        preset["size"] = size
+
+        auto = self._auto_mm_per_px_for_objective(name)
+        if auto is not None and auto > 0:
+            preset["mm_per_px_x"] = auto
+            preset["mm_per_px_y"] = auto
+            self.goto_mm_per_px_x_var.set(self._format_mm_per_px(auto))
+            self.goto_mm_per_px_y_var.set(self._format_mm_per_px(auto))
+        else:
+            try:
+                mmx = float(self.goto_mm_per_px_x_var.get())
+                if mmx > 0:
+                    preset["mm_per_px_x"] = mmx
+            except Exception:
+                pass
+            try:
+                mmy = float(self.goto_mm_per_px_y_var.get())
+                if mmy > 0:
+                    preset["mm_per_px_y"] = mmy
+            except Exception:
+                pass
+
+        try:
+            self._save_laser_config()
+        except Exception as exc:
+            self._log(f"Avert. sauvegarde laser impossible : {exc}")
+
     def on_objective_change(self):
-        """Applique le préréglage laser de l'objectif sélectionné."""
+        """Applique le pr?r?glage laser de l'objectif s?lectionn?."""
         name = self.objective_var.get()
         preset = self.OBJECTIVE_PRESETS.get(name)
         if not preset:
             return
-        self.laser_x = preset["x"]
-        self.laser_y = preset["y"]
-        self.laser_size_var.set(str(preset["size"]))
+
+        auto = self._auto_mm_per_px_for_objective(name)
+        if auto is not None and auto > 0:
+            preset["mm_per_px_x"] = auto
+            preset["mm_per_px_y"] = auto
+        else:
+            self._apply_objective_auto_scale_if_needed(name, preset)
+
+        self.laser_x = int(preset.get("x", self.laser_x))
+        self.laser_y = int(preset.get("y", self.laser_y))
+        self.laser_size_var.set(str(max(1, int(preset.get("size", 6)))))
+
+        mmx = float(preset.get("mm_per_px_x", DEFAULT_GOTO_MM_PER_PX))
+        mmy = float(preset.get("mm_per_px_y", DEFAULT_GOTO_MM_PER_PX))
+        self.goto_mm_per_px_x_var.set(self._format_mm_per_px(mmx))
+        self.goto_mm_per_px_y_var.set(self._format_mm_per_px(mmy))
+
         self.laser_initialized = True
         self._update_laser_label()
         if self._last_image is not None:
             self._render_preview(self._last_image)
-        self._log(f"Objectif {name} appliqué : point laser X={preset['x']} Y={preset['y']} taille={preset['size']}px")
 
-    # ═══════════════════════ SÉQUENCE BALAYAGE ═══════════════════════
+        self._persist_current_laser_preset()
+        self._log(
+            f"Objectif {name} appliqu? : point laser X={self.laser_x} Y={self.laser_y} "
+            f"taille={self.laser_size_var.get()}px mm/px=({self._format_mm_per_px(mmx)},{self._format_mm_per_px(mmy)})"
+        )
 
     def _read_motor_positions(self) -> tuple[float, float]:
         """Lit la position actuelle des deux axes (mm). Lève ConexError si non connecté."""
@@ -1135,7 +1515,7 @@ class MainApp(tk.Tk):
             if self.camera is not None:
                 self.on_disconnect_camera()
             self.camera = self.sdk.open_camera(serial)
-            self.exposure_var.set(str(int(self.camera.exposure_time_us)))
+            self.exposure_var.set(str(round(self.camera.exposure_time_us / 1_000_000, 6)))
             self._refresh_gain_from_camera()
             self._set_status(f"Caméra connectée : {serial}")
             self._log(
@@ -1180,10 +1560,13 @@ class MainApp(tk.Tk):
     def _apply_camera_params_checked(self):
         if self.camera is None:
             raise RuntimeError("Caméra non connectée")
-        exp = int(float(self.exposure_var.get()))
-        if exp <= 0:
+        exp_s = float(self.exposure_var.get())
+        if exp_s <= 0:
             raise ValueError
-        self.camera.exposure_time_us = exp
+        exp_us = int(round(exp_s * 1_000_000))
+        if exp_us <= 0:
+            raise ValueError
+        self.camera.exposure_time_us = exp_us
         gr = self.camera.gain_range
         gmax = int(gr.max)
         if gmax > 0:
@@ -1224,6 +1607,7 @@ class MainApp(tk.Tk):
             messagebox.showerror("Erreur démarrage live", str(exc))
 
     def on_stop_live(self):
+        self._set_goto_armed(False)
         if self.stream_thread is None:
             return
         try:
@@ -1295,7 +1679,11 @@ class MainApp(tk.Tk):
         draw = ImageDraw.Draw(image)
         x, y = int(self.laser_x), int(self.laser_y)
         draw.ellipse((x - radius, y - radius, x + radius, y + radius), outline=(255, 0, 0), width=2)
-        draw.ellipse((x - 1, y - 1, x + 1, y + 1), fill=(255, 0, 0))
+        # Mire centrale explicite: centre visuel du cercle
+        cross = max(4, min(10, radius // 2))
+        draw.line((x - cross, y, x + cross, y), fill=(255, 255, 255), width=1)
+        draw.line((x, y - cross, x, y + cross), fill=(255, 255, 255), width=1)
+        draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=(255, 255, 255), outline=(255, 0, 0), width=1)
         return image
 
     def on_laser_move(self, dx: int, dy: int):
@@ -1315,6 +1703,7 @@ class MainApp(tk.Tk):
         self.laser_y += int(dy * step)
         self._clamp_laser_to_frame()
         self._update_laser_label()
+        self._persist_current_laser_preset()
         if self._last_image is not None:
             self._render_preview(self._last_image)
 
@@ -1325,8 +1714,228 @@ class MainApp(tk.Tk):
             size = 6
         size = max(1, size + int(delta))
         self.laser_size_var.set(str(size))
+        self._persist_current_laser_preset()
         if self._last_image is not None:
             self._render_preview(self._last_image)
+
+    def _parse_goto_config(self) -> tuple[float, float]:
+        objective = self.objective_var.get()
+        auto = self._auto_mm_per_px_for_objective(objective)
+        if auto is not None and auto > 0:
+            mm_per_px_x = auto
+            mm_per_px_y = auto
+            self.goto_mm_per_px_x_var.set(self._format_mm_per_px(auto))
+            self.goto_mm_per_px_y_var.set(self._format_mm_per_px(auto))
+        else:
+            mm_per_px_x = float(self.goto_mm_per_px_x_var.get())
+            mm_per_px_y = float(self.goto_mm_per_px_y_var.get())
+            if mm_per_px_x <= 0 or mm_per_px_y <= 0:
+                raise ValueError
+
+        # Par convention image/platine, la translation moteur est inversee
+        # du deplacement observe en pixels dans l'image camera.
+        sx = -1.0
+        sy = 1.0
+        if self.goto_invert_x_var.get():
+            sx *= -1.0
+        if self.goto_invert_y_var.get():
+            sy *= -1.0
+        self._persist_current_laser_preset()
+        return mm_per_px_x * sx, mm_per_px_y * sy
+
+    def on_arm_goto(self):
+        if self.stream_thread is None:
+            self._set_goto_armed(False)
+            messagebox.showerror("GoTo", "Demarrer d'abord le flux live.")
+            return
+        try:
+            self._axis_or_error("X")
+            self._axis_or_error("Y")
+            self._parse_goto_config()
+        except ValueError:
+            self._set_goto_armed(False)
+            messagebox.showerror("GoTo", "Les valeurs mm/px X et Y doivent etre positives.")
+            return
+        except Exception as exc:
+            self._set_goto_armed(False)
+            messagebox.showerror("GoTo", str(exc))
+            return
+        self._set_goto_armed(True)
+        self._set_status("GoTo arme : cliquer dans l'image")
+        self._log("GoTo arme. Clique dans l'image pour deplacer la platine.")
+
+    def _preview_to_frame_coords(self, click_x: int, click_y: int):
+        if self._preview_draw_w <= 0 or self._preview_draw_h <= 0:
+            return None
+        local_x = click_x - self._preview_offset_x
+        local_y = click_y - self._preview_offset_y
+        if local_x < 0 or local_y < 0 or local_x >= self._preview_draw_w or local_y >= self._preview_draw_h:
+            return None
+        frame_x = self._preview_source_x0 + int(round(local_x * self._preview_scale_x))
+        frame_y = self._preview_source_y0 + int(round(local_y * self._preview_scale_y))
+        frame_x = max(0, min(self._last_frame_width - 1, frame_x))
+        frame_y = max(0, min(self._last_frame_height - 1, frame_y))
+        return frame_x, frame_y
+
+    def _on_preview_click(self, event):
+        if not self._goto_armed:
+            return
+        point = self._preview_to_frame_coords(event.x, event.y)
+        if point is None:
+            self._log("GoTo: clic en dehors de l'image affichee")
+            return
+
+        self._set_goto_armed(False)
+
+        target_x_px, target_y_px = point
+        start_laser_x = int(self.laser_x)
+        start_laser_y = int(self.laser_y)
+        dx_px = int(target_x_px - start_laser_x)
+        dy_px = int(target_y_px - start_laser_y)
+
+        if dx_px == 0 and dy_px == 0:
+            self._log("GoTo: le point clique est deja sur le laser")
+            return
+
+        try:
+            scale_x, scale_y = self._parse_goto_config()
+            timeout_s = self._get_motor_timeout()
+        except ValueError:
+            messagebox.showerror("GoTo", "Les valeurs mm/px X et Y doivent etre positives.")
+            return
+
+        move_x_mm = dx_px * scale_x
+        move_y_mm = dy_px * scale_y
+
+        self._log(
+            f"GoTo: cible px=({target_x_px},{target_y_px}) delta_px=({dx_px},{dy_px}) "
+            f"delta_mm=({move_x_mm:.4f},{move_y_mm:.4f})"
+        )
+
+        def worker():
+            ax = self._axis_or_error("X")
+            ay = self._axis_or_error("Y")
+
+            current_x = ax.read_position()
+            current_y = ay.read_position()
+            target_x = current_x + move_x_mm
+            target_y = current_y + move_y_mm
+
+            if not (ABS_MIN_MM <= target_x <= ABS_MAX_MM):
+                raise ConexError(f"GoTo X hors limites ({target_x:.4f} mm)")
+            if not (ABS_MIN_MM <= target_y <= ABS_MAX_MM):
+                raise ConexError(f"GoTo Y hors limites ({target_y:.4f} mm)")
+
+            ax.move_absolute_no_wait(target_x)
+            ay.move_absolute_no_wait(target_y)
+            ax.wait_done(timeout_s=timeout_s)
+            ay.wait_done(timeout_s=timeout_s)
+
+            self.after(0, lambda: self._log(
+                f"GoTo termine: X={target_x:.4f} Y={target_y:.4f} mm (point rouge fixe)"
+            ))
+
+        self._run_async("GoTo", worker)
+
+    def _event_preview_coords(self, event):
+        try:
+            x_root = int(getattr(event, "x_root"))
+            y_root = int(getattr(event, "y_root"))
+        except Exception:
+            x_root = int(self.winfo_pointerx())
+            y_root = int(self.winfo_pointery())
+
+        px = int(self.preview_label.winfo_rootx())
+        py = int(self.preview_label.winfo_rooty())
+        pw = int(self.preview_label.winfo_width())
+        ph = int(self.preview_label.winfo_height())
+        if pw <= 0 or ph <= 0:
+            return None
+        if not (px <= x_root < px + pw and py <= y_root < py + ph):
+            return None
+        return x_root - px, y_root - py
+
+    def _wheel_steps(self, event) -> float:
+        delta = getattr(event, "delta", 0)
+        if delta:
+            if abs(delta) >= 120:
+                return float(delta) / 120.0
+            return float(delta) / 30.0
+        num = getattr(event, "num", None)
+        if num == 4:
+            return 1.0
+        if num == 5:
+            return -1.0
+        return 0.0
+
+    def _on_preview_wheel(self, event):
+        local = self._event_preview_coords(event)
+        if local is None:
+            return
+
+        if self._last_image is None or self._last_frame_width <= 0 or self._last_frame_height <= 0:
+            return "break"
+
+        steps = self._wheel_steps(event)
+        if abs(steps) < 1e-6:
+            return "break"
+
+        zoom_mult = 1.15 ** steps
+        new_zoom = self._zoom_factor * zoom_mult
+        new_zoom = max(self._zoom_min, min(self._zoom_max, new_zoom))
+        if abs(new_zoom - self._zoom_factor) < 1e-9:
+            return "break"
+
+        point = self._preview_to_frame_coords(local[0], local[1])
+        if point is None:
+            point = (self._last_frame_width // 2, self._last_frame_height // 2)
+
+        if self._last_frame_width > 1:
+            self._zoom_center_x = point[0] / (self._last_frame_width - 1)
+        if self._last_frame_height > 1:
+            self._zoom_center_y = point[1] / (self._last_frame_height - 1)
+
+        self._zoom_factor = new_zoom
+        self.zoom_var.set(f"Zoom : {self._zoom_factor:.2f}x")
+
+        if self._last_image is not None:
+            self._render_preview(self._last_image)
+        return "break"
+
+    def _apply_digital_zoom(self, image: Image.Image) -> Image.Image:
+        w, h = image.size
+        if w <= 1 or h <= 1:
+            self._preview_source_x0 = 0
+            self._preview_source_y0 = 0
+            return image
+
+        zoom = max(self._zoom_min, min(self._zoom_max, float(self._zoom_factor)))
+        if zoom <= 1.0001:
+            self._zoom_factor = 1.0
+            self.zoom_var.set("Zoom : 1.00x")
+            self._preview_source_x0 = 0
+            self._preview_source_y0 = 0
+            return image
+
+        crop_w = max(int(round(w / zoom)), 1)
+        crop_h = max(int(round(h / zoom)), 1)
+
+        cx = int(round(self._zoom_center_x * (w - 1)))
+        cy = int(round(self._zoom_center_y * (h - 1)))
+
+        x0 = cx - crop_w // 2
+        y0 = cy - crop_h // 2
+        x0 = max(0, min(w - crop_w, x0))
+        y0 = max(0, min(h - crop_h, y0))
+        x1 = x0 + crop_w
+        y1 = y0 + crop_h
+
+        self._preview_source_x0 = x0
+        self._preview_source_y0 = y0
+        return image.crop((x0, y0, x1, y1))
+
+
+
 
     # ═══════════════════════ PREVIEW ═══════════════════════
 
@@ -1354,8 +1963,18 @@ class MainApp(tk.Tk):
         return image.resize((nw, nh), resample)
 
     def _render_preview(self, image: Image.Image):
-        display = self._draw_laser_overlay(image.copy())
+        display_full = self._draw_laser_overlay(image.copy())
+        display = self._apply_digital_zoom(display_full)
         fitted = self._fit_image_to_preview(display)
+        tw = max(self.preview_label.winfo_width(), 1)
+        th = max(self.preview_label.winfo_height(), 1)
+        fw, fh = fitted.size
+        self._preview_draw_w = fw
+        self._preview_draw_h = fh
+        self._preview_offset_x = max((tw - fw) // 2, 0)
+        self._preview_offset_y = max((th - fh) // 2, 0)
+        self._preview_scale_x = (display.size[0] / fw) if fw > 0 else 1.0
+        self._preview_scale_y = (display.size[1] / fh) if fh > 0 else 1.0
         self.preview_photo = ImageTk.PhotoImage(image=fitted)
         self.preview_label.configure(image=self.preview_photo, text="")
 
@@ -1395,6 +2014,9 @@ class MainApp(tk.Tk):
                 self.sdk = None
 
     def _on_close(self):
+        if self._motor_pos_job is not None:
+            self.after_cancel(self._motor_pos_job)
+            self._motor_pos_job = None
         try:
             self.on_disconnect_camera()
             self._disconnect_motors_impl(silent=True)

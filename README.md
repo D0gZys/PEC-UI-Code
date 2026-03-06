@@ -1,261 +1,468 @@
-﻿# Plateforme de mesure — Microscope + Caméra + Platine motorisée
+# Plateforme de Mesure (Microscope + Caméra + Platine + Potentiostat)
 
-Interface de contrôle Python pour un système de microscopie équipé d'une platine XY motorisée Newport CONEX-CC, d'une caméra USB Thorlabs LP126CU/M et d'un microscope à trois objectifs.
+Projet de contrôle instrumenté sous Windows pour:
+- piloter une caméra Thorlabs (live + paramètres),
+- piloter une platine XY Newport CONEX-CC,
+- aligner automatiquement la platine sur un point image via `GoTo`,
+- exécuter des séquences de balayage,
+- tester un potentiostat BioLogic SP-300 (scripts dédiés).
 
----
-
-## Table des matières
-
-1. [Description du système physique](#1-description-du-système-physique)
-2. [Architecture du projet](#2-architecture-du-projet)
-3. [Matériel requis](#3-matériel-requis)
-4. [Installation](#4-installation)
-5. [Lancement](#5-lancement)
-6. [Interface principale — Guide d'utilisation](#6-interface-principale--guide-dutilisation)
-7. [Séquences de balayage](#7-séquences-de-balayage)
-8. [Raccourcis clavier](#8-raccourcis-clavier)
-9. [Dépannage](#9-dépannage)
+Le point rouge affiché dans l'image représente la position fixe du laser (référentiel caméra). La platine bouge, pas le laser.
 
 ---
 
-## 1. Description du système physique
+## Table des matieres
 
-Le système est composé de :
-
-- Un **microscope** équipé de trois objectifs interchangeables : **4×**, **10×**, **50×**
-- Une **platine XY motorisée** (Newport CONEX-CC) positionnée sous le microscope, qui déplace l'échantillon
-- Une **caméra USB** (Thorlabs LP126CU/M) montée sur le microscope qui retransmet l'image en temps réel
-- Un **laser** projeté depuis le microscope sur la platine, dont la position dans l'image dépend de l'objectif utilisé
-
-Le programme permet de :
-
-- Visualiser en temps réel le flux vidéo de la caméra
-- Afficher un **marqueur rouge** représentant la position du faisceau laser dans l'image
-- Controler la platine XY (déplacements manuels et séquences automatiques)
-- Effectuer des **balayages automatisés** (linéaire ou rectangulaire) d'une zone de l'échantillon
+1. [Vue d'ensemble](#vue-densemble)
+2. [Arborescence du projet](#arborescence-du-projet)
+3. [Prerequis](#prerequis)
+4. [Installation](#installation)
+5. [Lancement rapide](#lancement-rapide)
+6. [Scripts de lancement (reference rapide)](#scripts-de-lancement-reference-rapide)
+7. [Securite d'utilisation](#securite-dutilisation)
+8. [Validation rapide du code](#validation-rapide-du-code)
+9. [Guide complet `MainUI/main_ui.py`](#guide-complet-mainuimain_uipy)
+10. [Configuration persistante (`laser_presets.json`)](#configuration-persistante-laser_presetsjson)
+11. [Autres scripts Python](#autres-scripts-python)
+12. [Potentiostat BioLogic](#potentiostat-biologic)
+13. [Depannage](#depannage)
+14. [Workflow Git recommande](#workflow-git-recommande)
+15. [Limites connues](#limites-connues)
+16. [References et documentation constructeur](#references-et-documentation-constructeur)
+17. [Notes pratiques](#notes-pratiques)
 
 ---
 
-## 2. Architecture du projet
+## Vue d'ensemble
 
-```
+### Matériel cible
+
+- Microscope avec objectifs `4x`, `10x`, `50x`
+- Caméra Thorlabs (ex. LP126CU/M)
+- 2 axes Newport CONEX-CC (X/Y)
+- (Optionnel) Potentiostat BioLogic SP-300
+
+### Fonctionnalités principales
+
+- Interface unifiée caméra + moteurs (`MainUI/main_ui.py`)
+- Live caméra (mono/couleur) + affichage FPS
+- Overlay laser: cercle rouge + mire centrale
+- `GoTo` sur clic image avec curseur en croix
+- Zoom numérique image (molette/trackpad selon driver)
+- Déplacement moteurs:
+  - relatif (jog)
+  - continu au clavier
+  - absolu (aller à une position)
+  - lecture position live X/Y
+- Séquences auto:
+  - linéaire
+  - rectangle en serpentin
+- Sauvegarde automatique des presets laser/objectif dans JSON
+
+---
+
+## Arborescence du projet
+
+```text
 Programme/
-├── MainUI/
-│   ├── main_ui.py                   ← Interface principale (programme à lancer)
-│   ├── newport_conex_test_ui.py     ← Classes et UI de test pour les moteurs
-│   └── motor_camera_combo_test_ui.py← Ancienne interface combinée (conservée)
-├── Camera/
-│   └── SDK/
-│       ├── Native Toolkit/          ← DLLs natives Thorlabs (thorlabs_tsi_camera_sdk.dll)
-│       └── Python Toolkit/          ← Package Python SDK caméra (.zip)
-├── Servo controler/
-│   └── CONEX-CC-Command_Interface_Manual.pdf
-└── README.md
+├─ README.md
+├─ Camera/
+│  ├─ SDK/
+│  │  ├─ Native Toolkit/
+│  │  └─ Python Toolkit/
+│  ├─ ... docs Thorlabs (PDF/CHM/README)
+├─ MainUI/
+│  ├─ main_ui.py
+│  ├─ laser_presets.json
+│  ├─ newport_conex_test_ui.py
+│  ├─ thorlabs_camera_test_ui.py
+│  ├─ motor_camera_combo_test_ui.py
+│  ├─ biologic_potentiostat_test_ui.py
+│  ├─ biologic_ca_cli.py
+│  └─ README_Potentiostat.md
+├─ Potentiostat/
+│  └─ Examples/
+│     ├─ C-C++/
+│     ├─ LabVIEW/
+│     └─ Python/
+└─ Servo controler/
+   └─ CONEX-CC-Command_Interface_Manual.pdf
 ```
 
 ---
 
-## 3. Matériel requis
+## Prérequis
 
-| Équipement | Modèle | Interface |
-|---|---|---|
-| Caméra | Thorlabs LP126CU/M | USB |
-| Contrôleur moteur X | Newport CONEX-CC | COM (USB-série) |
-| Contrôleur moteur Y | Newport CONEX-CC | COM (USB-série) |
+### Système
 
-**Logiciels / pilotes à installer :**
+- Windows 10/11
+- Python 3.11 recommandé (3.10+ généralement OK)
 
-- [ThorCam](https://www.thorlabs.com/software_pages/ViewSoftwarePage.cfm?Code=ThorCam) (installe les DLLs natives Thorlabs)
-- [Newport Motion Control](https://www.newport.com/) — fournit `Newport.CONEXCC.CommandInterface.dll`
-- Python 3.11 (recommandé) avec les paquets listés ci-dessous
+### Logiciels constructeurs
 
----
+- **Thorlabs ThorCam / SDK** (DLL natives caméra)
+- **Newport Motion Control** (DLL .NET CONEX-CC)
+- **EC-Lab Development Package** (si potentiostat BioLogic)
 
-## 4. Installation
+### Dépendances Python
 
-### 4.1 Dépendances Python
+Pour l'UI principale caméra+moteurs:
 
-```bash
-pip install numpy pillow pythonnet
-```
+- `numpy`
+- `pillow`
+- `pythonnet`
+- `thorlabs_tsi_sdk` (installé via zip fourni dans `Camera/SDK/Python Toolkit/`)
 
-### 4.2 SDK caméra Thorlabs
+Pour les scripts BioLogic:
 
-```bash
-pip install "Camera/SDK/Python Toolkit/thorlabs_tsi_camera_python_sdk_package.zip"
-```
-
-### 4.3 Emplacement des DLLs
-
-Les DLLs natives sont recherchées automatiquement dans :
-
-- `C:\Program Files\Thorlabs\ThorImageCAM\`
-- `Camera/SDK/Native Toolkit/dlls/Native_64_lib/`
-
-Le chemin peut aussi être renseigné manuellement dans le menu **Caméra → Configuration caméra**.
+- pas de package pip externe obligatoire (utilise `kbio` fourni dans `Potentiostat/Examples/Python/kbio/`)
 
 ---
 
-## 5. Lancement
+## Installation
 
-```bash
-cd "c:\Users\thoma\Documents\Stage\Programme"
+### 1) Créer un environnement virtuel (recommandé)
+
+Depuis la racine du projet:
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+### 2) Installer les dépendances UI principale
+
+```powershell
+python -m pip install --upgrade pip
+python -m pip install numpy pillow pythonnet
+```
+
+### 3) Installer le SDK Python Thorlabs depuis le zip du projet
+
+```powershell
+python -m pip install "Camera/SDK/Python Toolkit/thorlabs_tsi_camera_python_sdk_package.zip"
+```
+
+Remarque: `main_ui.py` sait aussi ajouter dynamiquement un sous-chemin du zip au runtime, mais l'installation pip reste la méthode la plus robuste.
+
+### 4) Vérifier les DLL natives
+
+- Caméra Thorlabs: `thorlabs_tsi_camera_sdk.dll`
+- Moteurs Newport: `Newport.CONEXCC.CommandInterface.dll`
+
+L'application propose des dialogues pour sélectionner les chemins si besoin.
+
+---
+
+## Lancement rapide
+
+Depuis `Programme/`:
+
+```powershell
 python MainUI/main_ui.py
 ```
 
 ---
 
-## 6. Interface principale — Guide d'utilisation
+## Scripts de lancement (reference rapide)
 
-### 6.1 Structure de la fenêtre
+Depuis la racine `Programme/`:
 
+```powershell
+python MainUI/main_ui.py
+python MainUI/newport_conex_test_ui.py
+python MainUI/thorlabs_camera_test_ui.py
+python MainUI/motor_camera_combo_test_ui.py
+python MainUI/biologic_potentiostat_test_ui.py
+python MainUI/biologic_ca_cli.py --help
 ```
-┌─────────────────────────────────────────────────┐
-│  [Moteurs ▼]   [Caméra ▼]   [Affichage ▼]      │  ← Barre de menus
-├─────────────────────────────────────────────────┤
-│                                                 │
-│           IMAGE CAMÉRA (taille maximale)        │
-│         (point rouge = position du laser)        │
-│                                                 │
-├──────────────┬──────────────┬───────────────────┤
-│ Objectif /   │   Moteurs    │ Séquence balayage │  ← Panneaux compacts
-│    Laser     │              │                   │
-├──────────────┴──────────────┴───────────────────┤
-│ Journal (5 lignes, masquable)                    │
-├─────────────────────────────────────────────────┤
-│ Status | FPS | Coords point | [▶ Live] [■ Stop] │
-└─────────────────────────────────────────────────┘
-```
-
-### 6.2 Menus de connexion
-
-Toutes les connexions se font depuis les menus en haut de la fenêtre.
-
-**Menu Moteurs**
-
-| Action | Description |
-|---|---|
-| Configuration moteurs… | Ouvre le dialogue : chemin DLL, ports COM X/Y, adresse, timeout |
-| Connecter moteurs | Ouvre les ports COM et connecte les deux axes |
-| Initialiser (Home X+Y) | Lance la procédure de mise à zéro (homing) des deux axes |
-| Déconnecter moteurs | Ferme les connexions |
-| STOP moteurs | Arrêt d'urgence des deux axes |
-
-**Menu Caméra**
-
-| Action | Description |
-|---|---|
-| Configuration caméra… | Ouvre le dialogue : chemin DLL, numéro de série, exposition, gain |
-| Connecter caméra | Se connecte à la caméra sélectionnée |
-| Déconnecter caméra | Ferme la connexion |
-| Démarrer flux live | Lance la capture vidéo en continu |
-| Arrêter flux live | Arrête la capture |
-| Appliquer paramètres | Applique exposition et gain sans redémarrer |
-
-**Menu Affichage**
-
-Permet de masquer/afficher le journal et les panneaux de contrôle pour maximiser la zone image.
-
-### 6.3 Panneau « Objectif / Laser »
-
-Le marqueur rouge représente la position du faisceau laser dans le champ de la caméra. Sa position et sa taille varient selon l'objectif utilisé.
-
-| Objectif | X (px) | Y (px) | Taille (px) |
-|---|---|---|---|
-| 4× | 2588 | 1350 | 32 |
-| 10× | à calibrer | à calibrer | à calibrer |
-| 50× | à calibrer | à calibrer | à calibrer |
-
-- **Sélecteur d'objectif** → applique automatiquement le bon preset
-- **Pas (px) + boutons X−/X+/Y−/Y+** → déplace le marqueur manuellement
-- **Taille (px) + −/+** → ajuste le rayon du cercle rouge
-
-### 6.4 Panneau « Moteurs »
-
-Contrôle manuel de la platine XY en déplacement relatif.
-
-- **Pas X / Pas Y (mm)** → distance par clic ou par appui touche
-- **X − / X + / Y − / Y +** → jog relatif
-- Raccourcis clavier : **← → ↑ ↓**
 
 ---
 
-## 7. Séquences de balayage
+## Securite d'utilisation
 
-Les séquences permettent de déplacer la platine automatiquement entre deux points, avec un temps de pause configurable à chaque étape.
-
-### 7.1 Définir les points
-
-1. Déplacer la platine vers la **position de départ** → cliquer **Set Départ**
-2. Déplacer la platine vers la **position d'arrivée** → cliquer **Set Arrivée**
-
-Les coordonnées moteur (en mm) sont lues directement depuis les contrôleurs et affichées en vert/rouge dans le panneau.
-
-### 7.2 Paramètres
-
-| Paramètre | Description |
-|---|---|
-| Mode | Linéaire ou Rectangle |
-| Pas (mm) | Distance entre deux positions consécutives |
-| Durée/pt (s) | Temps d'attente à chaque position (temps d'acquisition) |
-
-### 7.3 Mode Linéaire
-
-Déplace la platine en ligne droite du point de départ au point d'arrivée, avec des arrêts régulièrement espacés de `pas (mm)`.
-
-```
-Départ ●──────────────────────────────● Arrivée
-         step  step  step  step  step
-```
-
-### 7.4 Mode Rectangle (serpentin)
-
-Balaye toute la zone rectangulaire délimitée par les deux points, en parcourant des lignes horizontales en sens alternés (serpentin) :
-
-```
-Départ ●→→→→→→→→→→→→→→→→→→→→→●
-        ←←←←←←←←←←←←←←←←←←←←
-        →→→→→→→→→→→→→→→→→→→→→→
-        ←←←←←←←←←←←←←←←←←←←←
-                                ● Arrivée
-```
-
-- Le nombre de colonnes = `round(|ΔX| / pas)`
-- Le nombre de lignes = `round(|ΔY| / pas)`
-- Les segments de connexion entre lignes ne comptent **pas** comme des points de mesure
-
-### 7.5 Déroulement
-
-1. **Mise en position** — La platine se déplace rapidement vers le point de départ (sans délai de mesure). Le statut affiche `Mise en position…`.
-2. **Balayage** — Chaque point est atteint, la platine attend la convergence, puis marque une pause de `durée/pt` secondes. Le statut affiche `N / Total – (x, y)`.
-3. **Fin** — Le statut affiche `Terminé (N points).`
-
-À tout moment, le bouton **■ Stop** interrompt la séquence proprement.
+- Verifier que la zone de deplacement mecanique est libre avant tout `GoTo` ou balayage.
+- Toujours initialiser (`Home`) les axes avant une sequence automatisee.
+- Ne pas lancer des pas/trajectoires trop grands sans surveillance.
+- Utiliser `STOP moteurs` en cas de comportement inattendu.
 
 ---
 
-## 8. Raccourcis clavier
+## Validation rapide du code
 
-| Touche | Action |
-|---|---|
-| ← | Jog X − |
-| → | Jog X + |
-| ↑ | Jog Y + |
-| ↓ | Jog Y − |
-
-> Les raccourcis sont désactivés quand le curseur est dans un champ texte.
+```powershell
+python -m py_compile MainUI/main_ui.py
+```
 
 ---
 
-## 9. Dépannage
+## Guide complet `MainUI/main_ui.py`
 
-| Problème | Cause probable | Solution |
-|---|---|---|
-| `pythonnet is not installed` | Paquet manquant | `pip install pythonnet` |
-| `Unable to load Newport.CONEXCC…` | DLL Newport introuvable | Installer Newport Motion Control ou renseigner le chemin manuellement |
-| `Cannot import Thorlabs camera SDK` | SDK non installé | `pip install "Camera/SDK/Python Toolkit/…zip"` |
-| Caméra non détectée | DLL native absente | Vérifier le chemin DLL dans Configuration caméra |
-| Moteur ne répond pas | Port COM incorrect ou déjà utilisé | Fermer Newport Motion Control, vérifier le port dans le gestionnaire de périphériques |
-| Grand saut au démarrage d'une séquence | Comportement normal | La phase "Mise en position" amène la platine au point de départ sans pause de mesure |
-| Image caméra qui pousse les panneaux | Ancien layout | Utiliser `main_ui.py` (le layout utilise `grid` avec poids fixes) |
+### 1) Connexion moteurs
 
+Menu `Moteurs`:
+
+1. `Configuration moteurs...`
+2. `Charger DLL`
+3. `Scanner ports`
+4. Choisir COM X et COM Y
+5. `Connecter moteurs`
+6. `Initialiser (Home X+Y)`
+
+Important: l'implémentation applique un mapping COM inversé interne (`X <- Y_port`, `Y <- X_port`) pour rester cohérente avec le montage historique.
+
+### 2) Connexion caméra
+
+Menu `Caméra`:
+
+1. `Configuration caméra...`
+2. `Charger SDK`
+3. `Découvrir`
+4. `Connecter caméra`
+5. `Démarrer flux live`
+
+Paramètres rapides disponibles en bas: exposition (s), gain.
+
+### 3) Panneau Objectif / Laser
+
+- Sélecteur objectif: `4x / 10x / 50x`
+- Position du point laser (preset par objectif)
+- Taille du cercle (rayon en px)
+
+Le centre du cercle est matérialisé par une mire centrale.
+
+### Échelle GoTo (auto)
+
+La conversion mm/px est calculée automatiquement à partir de:
+
+- pitch capteur: `3.45 µm/pixel`
+- grossissement objectif
+
+Formule de base:
+
+```text
+mm_per_px = 3.45 / (grossissement * 1000)
+```
+
+Valeurs théoriques:
+
+- `4x`  -> `0.0008625 mm/px`
+- `10x` -> `0.0003450 mm/px`
+- `50x` -> `0.0000690 mm/px`
+
+Les cases `Inv X` / `Inv Y` permettent d'inverser le sens par axe si votre montage l'exige.
+
+### 4) GoTo sur clic image
+
+Procédure:
+
+1. cliquer bouton `GoTo`
+2. curseur image passe en croix (mode précision)
+3. cliquer la cible dans l'image
+4. la platine se déplace pour amener le centre laser sur la cible
+
+Notes:
+
+- le point rouge reste fixe à l'écran (référence laser)
+- c'est l'échantillon qui se déplace via la platine
+- la précision dépend de l'étalonnage optique réel et du jeu mécanique
+
+### 5) Zoom numérique image
+
+Fonctionne sur la zone preview:
+
+- molette souris
+- gestes trackpad transformés en évènements wheel (selon OS/driver)
+
+Le zoom est numérique (crop + resize), sans changer le capteur caméra.
+
+### 6) Contrôle moteurs
+
+- Jog relatif: `X-/X+`, `Y-/Y+`
+- Jog continu clavier: flèches
+- Aller absolu: `Abs X`, `Abs Y`
+- Positions live: affichage `Pos X`, `Pos Y`
+- Stop: menu `STOP moteurs`
+
+Plage logicielle de sécurité (code): `0.0 mm` à `25.0 mm`.
+
+### 7) Séquences de balayage
+
+Deux modes:
+
+- `Linéaire`: interpolation du point départ à arrivée
+- `Rectangle`: balayage serpentin (raster)
+
+Paramètres:
+
+- `Pas (mm)`
+- `Durée/pt (s)`
+- positions départ/arrivée lues directement sur moteurs
+
+Exécution sur thread dédié avec arrêt propre via bouton `Stop`.
+
+### 8) Raccourcis clavier
+
+- flèches: jog continu
+- les raccourcis sont ignorés si un champ texte est actif
+
+---
+
+## Configuration persistante (`laser_presets.json`)
+
+Fichier: `MainUI/laser_presets.json`
+
+Contient, pour chaque objectif:
+
+- `x`, `y` (position du centre laser en pixels)
+- `size` (rayon du cercle)
+- `mm_per_px_x`, `mm_per_px_y`
+
+Mise à jour automatique lors des changements de position/taille et des actions GoTo.
+
+Exemple:
+
+```json
+{
+  "objective_presets": {
+    "4x": {
+      "x": 2623,
+      "y": 1293,
+      "size": 19,
+      "mm_per_px_x": 0.0008625,
+      "mm_per_px_y": 0.0008625
+    }
+  }
+}
+```
+
+---
+
+## Autres scripts Python
+
+Dans `MainUI/`:
+
+- `newport_conex_test_ui.py`
+  - UI dédiée test moteurs Newport
+  - utile pour valider COM/DLL hors caméra
+
+- `thorlabs_camera_test_ui.py`
+  - UI dédiée test caméra Thorlabs
+  - utile pour valider SDK/DLL/flux avant intégration
+
+- `motor_camera_combo_test_ui.py`
+  - ancienne UI combinée (prototype)
+
+- `biologic_potentiostat_test_ui.py`
+  - UI de test BioLogic SP-300 (chronoampérométrie)
+
+- `biologic_ca_cli.py`
+  - version CLI BioLogic (sans interface graphique)
+
+---
+
+## Potentiostat BioLogic
+
+Le projet contient une partie dédiée au SP-300.
+
+Entrées principales:
+
+- `MainUI/biologic_potentiostat_test_ui.py`
+- `MainUI/biologic_ca_cli.py`
+- `MainUI/README_Potentiostat.md` (documentation détaillée)
+
+Pré-requis principaux:
+
+- EC-Lab Development Package installé (DLL + fichiers techniques `.ecc`)
+- accès réseau/IP au SP-300
+
+---
+
+## Dépannage
+
+### `pythonnet is not installed`
+
+```powershell
+python -m pip install pythonnet
+```
+
+### DLL Newport introuvable
+
+- vérifier installation Newport Motion Control
+- charger manuellement la DLL dans `Configuration moteurs`
+
+### SDK caméra Thorlabs non importable
+
+```powershell
+python -m pip install numpy pillow
+python -m pip install "Camera/SDK/Python Toolkit/thorlabs_tsi_camera_python_sdk_package.zip"
+```
+
+### Caméra non détectée
+
+- vérifier câble USB / alimentation
+- vérifier chemin DLL natif
+- lancer `thorlabs_camera_test_ui.py` pour isoler le problème
+
+### Moteurs non détectés / ne bougent pas
+
+- vérifier ports COM dans le gestionnaire de périphériques
+- fermer logiciels concurrents utilisant le port
+- vérifier adresse (default `1`)
+- tester d'abord `newport_conex_test_ui.py`
+
+### GoTo légèrement décalé
+
+- vérifier objectif actif (`4x/10x/50x`)
+- vérifier sens `Inv X` / `Inv Y`
+- réduire la taille visuelle du cercle pour mieux juger le centre
+- tenir compte des jeux mécaniques (backlash) et de l'optique intermédiaire éventuelle
+
+### Erreur Tkinter liée au focus (`popdown`)
+
+Le code contient désormais une récupération de focus sécurisée pour éviter les crashes lors des interactions Combobox/clic global.
+
+---
+
+## Workflow Git recommandé
+
+Pour éviter de casser `main`:
+
+1. créer une branche de travail
+2. développer et tester dessus
+3. fusionner vers `main` une fois validé
+
+Exemple:
+
+```powershell
+git checkout -b codex/travail-mainui
+# ... modifications + tests ...
+git add -A
+git commit -m "MainUI: ..."
+git checkout main
+git merge --no-ff codex/travail-mainui
+```
+
+---
+
+## Limites connues
+
+- La précision GoTo dépend d'un modèle d'échelle (pas de correction visuelle par vision assistée).
+- Le geste pincement trackpad dépend du mapping driver -> événements wheel Tkinter.
+- Le projet est fortement orienté Windows (DLL natives + chemins constructeurs).
+
+---
+
+## Références et documentation constructeur
+
+- Thorlabs SDK/API: dossier `Camera/` (PDF/CHM inclus)
+- Newport CONEX-CC manual: `Servo controler/CONEX-CC-Command_Interface_Manual.pdf`
+- BioLogic examples: `Potentiostat/Examples/`
+
+---
+
+## Notes pratiques
+
+- Script principal à utiliser au quotidien: `MainUI/main_ui.py`
+- Fichier de configuration laser/objectifs: `MainUI/laser_presets.json`
+- Si vous voulez documenter uniquement la partie potentiostat, voir `MainUI/README_Potentiostat.md`
