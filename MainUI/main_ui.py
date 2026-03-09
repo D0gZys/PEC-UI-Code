@@ -380,8 +380,6 @@ class MainApp(tk.Tk):
         self.goto_invert_y_var = tk.BooleanVar(value=False)
         self.goto_status_var = tk.StringVar(value="GoTo : inactif")
         self._goto_armed = False
-        self.goto_grid_var = tk.BooleanVar(value=False)
-        self.goto_grid_spacing_var = tk.StringVar(value="100")
 
         # Objectif – préréglages position du point laser (px) + taille (px)
         # Format : {"x": int, "y": int, "size": int}
@@ -587,12 +585,6 @@ class MainApp(tk.Tk):
         ttk.Label(obj_box, textvariable=self.goto_status_var, foreground="blue", font=("Segoe UI", 8)).grid(
             row=6, column=4, columnspan=2, sticky="w", padx=2
         )
-
-        # ── Grille de calibration ──
-        ttk.Checkbutton(obj_box, text="Grille", variable=self.goto_grid_var,
-                        command=self._on_grid_toggle).grid(row=7, column=0, sticky="w", padx=2, pady=(2, 0))
-        ttk.Label(obj_box, text="Espacement (px)").grid(row=7, column=1, columnspan=2, sticky="w", padx=2, pady=(2, 0))
-        ttk.Entry(obj_box, textvariable=self.goto_grid_spacing_var, width=6).grid(row=7, column=3, padx=2, pady=(2, 0))
 
         # ── Motor jog section ──
         motor_box = ttk.LabelFrame(outer, text="Moteurs", padding=4)
@@ -2033,34 +2025,6 @@ class MainApp(tk.Tk):
             resample = Image.LANCZOS
         return image.resize((nw, nh), resample)
 
-    def _draw_grid_overlay(self, image: Image.Image) -> Image.Image:
-        """Dessine une grille de calibration sur l'image d'affichage (pixels écran)."""
-        if not self.goto_grid_var.get():
-            return image
-        try:
-            spacing = int(float(self.goto_grid_spacing_var.get()))
-        except Exception:
-            spacing = 100
-        spacing = max(10, spacing)
-        w, h = image.size
-        if image.mode != "RGB":
-            image = image.convert("RGB")
-        draw = ImageDraw.Draw(image)
-        color = (180, 180, 180)
-        x = spacing
-        while x < w:
-            draw.line([(x, 0), (x, h - 1)], fill=color, width=1)
-            x += spacing
-        y = spacing
-        while y < h:
-            draw.line([(0, y), (w - 1, y)], fill=color, width=1)
-            y += spacing
-        return image
-
-    def _on_grid_toggle(self):
-        if self._last_image is not None:
-            self._render_preview(self._last_image)
-
     def _render_preview(self, image: Image.Image):
         display_full = self._draw_laser_overlay(image.copy())
         display = self._apply_digital_zoom(display_full)
@@ -2074,7 +2038,6 @@ class MainApp(tk.Tk):
         self._preview_offset_y = max((th - fh) // 2, 0)
         self._preview_scale_x = (display.size[0] / fw) if fw > 0 else 1.0
         self._preview_scale_y = (display.size[1] / fh) if fh > 0 else 1.0
-        fitted = self._draw_grid_overlay(fitted)
         self.preview_photo = ImageTk.PhotoImage(image=fitted)
         self.preview_label.configure(image=self.preview_photo, text="")
 
