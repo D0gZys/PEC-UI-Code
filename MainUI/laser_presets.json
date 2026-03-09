@@ -5,21 +5,37 @@
       "y": 1293,
       "size": 19,
       "mm_per_px_x": 0.0008625000000000001,
-      "mm_per_px_y": 0.0008625000000000001
+      "mm_per_px_y": 0.0008625000000000001,
+      "goto_comp_px_x": 0,
+      "goto_comp_px_y": 0
     },
     "10x": {
       "x": 2624,
       "y": 1294,
       "size": 20,
       "mm_per_px_x": 0.00034500000000000004,
-      "mm_per_px_y": 0.00034500000000000004
+      "mm_per_px_y": 0.00034500000000000004,
+      "goto_comp_px_x": 0,
+      "goto_comp_px_y": 0
     },
     "50x": {
       "x": 2588,
       "y": 1329,
       "size": 32,
-      "mm_per_px_x": 6.9e-05,
-      "mm_per_px_y": 6.9e-05
+      "mm_per_px_x": 6.900000000000001e-05,
+      "mm_per_px_y": 6.900000000000001e-05,
+      "goto_comp_px_x": 0,
+      "goto_comp_px_y": 0
     }
+  },
+  "goto_settings": {
+    "backlash_enable": true,
+    "backlash_x_mm": 0.0,
+    "backlash_y_mm": 0.0,
+    "approach_pos_x": true,
+    "approach_pos_y": true,
+    "goto_velocity_mm_s": 0.1,
+    "goto_settle_ms": 0,
+    "goto_rotation_deg": 0.0
   }
 }

@@ -370,16 +370,12 @@ class MainApp(tk.Tk):
         self.laser_size_var = tk.StringVar(value="6")
         self.goto_mm_per_px_x_var = tk.StringVar(value=self._format_mm_per_px(CAMERA_PIXEL_PITCH_UM / (4.0 * 1000.0)))
         self.goto_mm_per_px_y_var = tk.StringVar(value=self._format_mm_per_px(CAMERA_PIXEL_PITCH_UM / (4.0 * 1000.0)))
-        self.goto_comp_px_x_var = tk.StringVar(value="0")
-        self.goto_comp_px_y_var = tk.StringVar(value="0")
-        self.goto_backlash_enable_var = tk.BooleanVar(value=False)
-        self.goto_backlash_x_var = tk.StringVar(value="0.000")
-        self.goto_backlash_y_var = tk.StringVar(value="0.000")
-        self.goto_approach_pos_x_var = tk.BooleanVar(value=False)
-        self.goto_approach_pos_y_var = tk.BooleanVar(value=False)
-        self.goto_velocity_var = tk.StringVar(value="0.1")   # mm/s dédié aux déplacements GoTo
-        self.goto_settle_ms_var = tk.StringVar(value="0")    # ms d'attente après fin de mouvement
-        self.goto_rotation_deg_var = tk.StringVar(value="0")  # rotation caméra→platine (degrés)
+        # Corrections directionnelles GoTo (en mm, valeur négative = réduire le déplacement)
+        self.goto_corr_xp_var = tk.StringVar(value="0")   # correction quand X augmente
+        self.goto_corr_xm_var = tk.StringVar(value="0")   # correction quand X diminue
+        self.goto_corr_yp_var = tk.StringVar(value="0")   # correction quand Y augmente
+        self.goto_corr_ym_var = tk.StringVar(value="0")   # correction quand Y diminue
+        self.goto_velocity_var = tk.StringVar(value="0.1")
         self.goto_invert_x_var = tk.BooleanVar(value=False)
         self.goto_invert_y_var = tk.BooleanVar(value=False)
         self.goto_status_var = tk.StringVar(value="GoTo : inactif")
@@ -394,8 +390,6 @@ class MainApp(tk.Tk):
                 "size": 32,
                 "mm_per_px_x": CAMERA_PIXEL_PITCH_UM / (4.0 * 1000.0),
                 "mm_per_px_y": CAMERA_PIXEL_PITCH_UM / (4.0 * 1000.0),
-                "goto_comp_px_x": 0,
-                "goto_comp_px_y": 0,
             },
             "10x": {
                 "x": 2588,
@@ -403,8 +397,6 @@ class MainApp(tk.Tk):
                 "size": 32,
                 "mm_per_px_x": CAMERA_PIXEL_PITCH_UM / (10.0 * 1000.0),
                 "mm_per_px_y": CAMERA_PIXEL_PITCH_UM / (10.0 * 1000.0),
-                "goto_comp_px_x": 0,
-                "goto_comp_px_y": 0,
             },
             "50x": {
                 "x": 2588,
@@ -412,8 +404,6 @@ class MainApp(tk.Tk):
                 "size": 32,
                 "mm_per_px_x": CAMERA_PIXEL_PITCH_UM / (50.0 * 1000.0),
                 "mm_per_px_y": CAMERA_PIXEL_PITCH_UM / (50.0 * 1000.0),
-                "goto_comp_px_x": 0,
-                "goto_comp_px_y": 0,
             },
         }
         self.objective_var = tk.StringVar(value="4x")
@@ -578,33 +568,23 @@ class MainApp(tk.Tk):
         ttk.Checkbutton(obj_box, text="Inv X", variable=self.goto_invert_x_var).grid(row=3, column=4, padx=2)
         ttk.Checkbutton(obj_box, text="Inv Y", variable=self.goto_invert_y_var).grid(row=3, column=5, padx=2)
 
-        ttk.Label(obj_box, text="Corr X (px)").grid(row=4, column=0, sticky="w", padx=2)
-        ttk.Entry(obj_box, textvariable=self.goto_comp_px_x_var, width=6).grid(row=4, column=1, padx=2)
-        ttk.Label(obj_box, text="Corr Y (px)").grid(row=4, column=2, sticky="w", padx=2)
-        ttk.Entry(obj_box, textvariable=self.goto_comp_px_y_var, width=6).grid(row=4, column=3, padx=2)
+        # ── Corrections directionnelles GoTo (en mm) ──
+        ttk.Label(obj_box, text="Corr X+ (mm)").grid(row=4, column=0, sticky="w", padx=2)
+        ttk.Entry(obj_box, textvariable=self.goto_corr_xp_var, width=7).grid(row=4, column=1, padx=2)
+        ttk.Label(obj_box, text="Corr X- (mm)").grid(row=4, column=2, sticky="w", padx=2)
+        ttk.Entry(obj_box, textvariable=self.goto_corr_xm_var, width=7).grid(row=4, column=3, padx=2)
 
-        ttk.Checkbutton(obj_box, text="Anti-jeu", variable=self.goto_backlash_enable_var).grid(row=5, column=0, padx=2, sticky="w")
-        ttk.Label(obj_box, text="AJ X (mm)").grid(row=5, column=1, sticky="e", padx=2)
-        ttk.Entry(obj_box, textvariable=self.goto_backlash_x_var, width=6).grid(row=5, column=2, padx=2)
-        ttk.Label(obj_box, text="AJ Y (mm)").grid(row=5, column=3, sticky="e", padx=2)
-        ttk.Entry(obj_box, textvariable=self.goto_backlash_y_var, width=6).grid(row=5, column=4, padx=2)
+        ttk.Label(obj_box, text="Corr Y+ (mm)").grid(row=5, column=0, sticky="w", padx=2)
+        ttk.Entry(obj_box, textvariable=self.goto_corr_yp_var, width=7).grid(row=5, column=1, padx=2)
+        ttk.Label(obj_box, text="Corr Y- (mm)").grid(row=5, column=2, sticky="w", padx=2)
+        ttk.Entry(obj_box, textvariable=self.goto_corr_ym_var, width=7).grid(row=5, column=3, padx=2)
 
-        ttk.Checkbutton(obj_box, text="Fin X+", variable=self.goto_approach_pos_x_var).grid(row=6, column=0, padx=2, sticky="w")
-        ttk.Checkbutton(obj_box, text="Fin Y+", variable=self.goto_approach_pos_y_var).grid(row=6, column=1, padx=2, sticky="w")
-        ttk.Button(obj_box, text="GoTo", width=8, command=self.on_arm_goto).grid(row=6, column=2, columnspan=2, padx=2, pady=(4, 0), sticky="w")
+        ttk.Label(obj_box, text="Vit. GoTo (mm/s)").grid(row=6, column=0, sticky="w", padx=2)
+        ttk.Entry(obj_box, textvariable=self.goto_velocity_var, width=7).grid(row=6, column=1, padx=2)
+        ttk.Button(obj_box, text="GoTo", width=8, command=self.on_arm_goto).grid(row=6, column=2, columnspan=2, padx=2, sticky="w")
         ttk.Label(obj_box, textvariable=self.goto_status_var, foreground="blue", font=("Segoe UI", 8)).grid(
-            row=6, column=4, columnspan=2, sticky="w", padx=2, pady=(4, 0)
+            row=6, column=4, columnspan=2, sticky="w", padx=2
         )
-
-        ttk.Label(obj_box, text="Vit. GoTo (mm/s)").grid(row=7, column=0, sticky="w", padx=2)
-        ttk.Entry(obj_box, textvariable=self.goto_velocity_var, width=6).grid(row=7, column=1, padx=2)
-        ttk.Label(obj_box, text="Stab. (ms)").grid(row=7, column=2, sticky="w", padx=2)
-        ttk.Entry(obj_box, textvariable=self.goto_settle_ms_var, width=6).grid(row=7, column=3, padx=2)
-
-        ttk.Label(obj_box, text="Rot. cam (°)").grid(row=8, column=0, sticky="w", padx=2)
-        ttk.Entry(obj_box, textvariable=self.goto_rotation_deg_var, width=6).grid(row=8, column=1, padx=2)
-        ttk.Label(obj_box, text="(essayer 90 / -90)", foreground="gray",
-                  font=("Segoe UI", 7)).grid(row=8, column=2, columnspan=4, sticky="w", padx=2)
 
         # ── Motor jog section ──
         motor_box = ttk.LabelFrame(outer, text="Moteurs", padding=4)
@@ -1159,14 +1139,11 @@ class MainApp(tk.Tk):
 
         goto_settings = data.get("goto_settings", {})
         if isinstance(goto_settings, dict):
-            self.goto_backlash_enable_var.set(bool(goto_settings.get("backlash_enable", False)))
-            self.goto_backlash_x_var.set(str(goto_settings.get("backlash_x_mm", self.goto_backlash_x_var.get())))
-            self.goto_backlash_y_var.set(str(goto_settings.get("backlash_y_mm", self.goto_backlash_y_var.get())))
-            self.goto_approach_pos_x_var.set(bool(goto_settings.get("approach_pos_x", False)))
-            self.goto_approach_pos_y_var.set(bool(goto_settings.get("approach_pos_y", False)))
             self.goto_velocity_var.set(str(goto_settings.get("goto_velocity_mm_s", self.goto_velocity_var.get())))
-            self.goto_settle_ms_var.set(str(int(goto_settings.get("goto_settle_ms", int(float(self.goto_settle_ms_var.get()))))))
-            self.goto_rotation_deg_var.set(str(goto_settings.get("goto_rotation_deg", float(self.goto_rotation_deg_var.get()))))
+            self.goto_corr_xp_var.set(str(goto_settings.get("corr_xp_mm", self.goto_corr_xp_var.get())))
+            self.goto_corr_xm_var.set(str(goto_settings.get("corr_xm_mm", self.goto_corr_xm_var.get())))
+            self.goto_corr_yp_var.set(str(goto_settings.get("corr_yp_mm", self.goto_corr_yp_var.get())))
+            self.goto_corr_ym_var.set(str(goto_settings.get("corr_ym_mm", self.goto_corr_ym_var.get())))
 
         for name, current in self.OBJECTIVE_PRESETS.items():
             incoming = presets.get(name)
@@ -1196,29 +1173,17 @@ class MainApp(tk.Tk):
                         current["mm_per_px_y"] = mmy
                 except Exception:
                     pass
-                try:
-                    current["goto_comp_px_x"] = int(incoming.get("goto_comp_px_x", current.get("goto_comp_px_x", 0)))
-                except Exception:
-                    pass
-                try:
-                    current["goto_comp_px_y"] = int(incoming.get("goto_comp_px_y", current.get("goto_comp_px_y", 0)))
-                except Exception:
-                    pass
-
             self._apply_objective_auto_scale_if_needed(name, current)
 
     def _save_laser_config(self):
         payload = {
             "objective_presets": {},
             "goto_settings": {
-                "backlash_enable": bool(self.goto_backlash_enable_var.get()),
-                "backlash_x_mm": float(self.goto_backlash_x_var.get()),
-                "backlash_y_mm": float(self.goto_backlash_y_var.get()),
-                "approach_pos_x": bool(self.goto_approach_pos_x_var.get()),
-                "approach_pos_y": bool(self.goto_approach_pos_y_var.get()),
                 "goto_velocity_mm_s": float(self.goto_velocity_var.get()),
-                "goto_settle_ms": int(float(self.goto_settle_ms_var.get())),
-                "goto_rotation_deg": float(self.goto_rotation_deg_var.get()),
+                "corr_xp_mm": float(self.goto_corr_xp_var.get()),
+                "corr_xm_mm": float(self.goto_corr_xm_var.get()),
+                "corr_yp_mm": float(self.goto_corr_yp_var.get()),
+                "corr_ym_mm": float(self.goto_corr_ym_var.get()),
             },
         }
         for name, preset in self.OBJECTIVE_PRESETS.items():
@@ -1228,8 +1193,6 @@ class MainApp(tk.Tk):
                 "size": max(1, int(preset.get("size", 6))),
                 "mm_per_px_x": float(preset.get("mm_per_px_x", DEFAULT_GOTO_MM_PER_PX)),
                 "mm_per_px_y": float(preset.get("mm_per_px_y", DEFAULT_GOTO_MM_PER_PX)),
-                "goto_comp_px_x": int(preset.get("goto_comp_px_x", 0)),
-                "goto_comp_px_y": int(preset.get("goto_comp_px_y", 0)),
             }
 
         self.laser_config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1270,15 +1233,6 @@ class MainApp(tk.Tk):
                 pass
 
         try:
-            preset["goto_comp_px_x"] = int(float(self.goto_comp_px_x_var.get()))
-        except Exception:
-            preset["goto_comp_px_x"] = int(preset.get("goto_comp_px_x", 0))
-        try:
-            preset["goto_comp_px_y"] = int(float(self.goto_comp_px_y_var.get()))
-        except Exception:
-            preset["goto_comp_px_y"] = int(preset.get("goto_comp_px_y", 0))
-
-        try:
             self._save_laser_config()
         except Exception as exc:
             self._log(f"Avert. sauvegarde laser impossible : {exc}")
@@ -1305,8 +1259,6 @@ class MainApp(tk.Tk):
         mmy = float(preset.get("mm_per_px_y", DEFAULT_GOTO_MM_PER_PX))
         self.goto_mm_per_px_x_var.set(self._format_mm_per_px(mmx))
         self.goto_mm_per_px_y_var.set(self._format_mm_per_px(mmy))
-        self.goto_comp_px_x_var.set(str(int(preset.get("goto_comp_px_x", 0))))
-        self.goto_comp_px_y_var.set(str(int(preset.get("goto_comp_px_y", 0))))
 
         self.laser_initialized = True
         self._update_laser_label()
@@ -1801,36 +1753,6 @@ class MainApp(tk.Tk):
         if self._last_image is not None:
             self._render_preview(self._last_image)
 
-    def _parse_goto_pixel_compensation(self) -> tuple[int, int]:
-        try:
-            comp_x = int(float(self.goto_comp_px_x_var.get()))
-        except Exception:
-            comp_x = 0
-        try:
-            comp_y = int(float(self.goto_comp_px_y_var.get()))
-        except Exception:
-            comp_y = 0
-        return comp_x, comp_y
-
-    def _parse_goto_backlash_config(self) -> tuple[bool, float, float, bool, bool]:
-        enabled = bool(self.goto_backlash_enable_var.get())
-        try:
-            backlash_x = max(0.0, float(self.goto_backlash_x_var.get()))
-        except Exception:
-            backlash_x = 0.0
-        try:
-            backlash_y = max(0.0, float(self.goto_backlash_y_var.get()))
-        except Exception:
-            backlash_y = 0.0
-        return enabled, backlash_x, backlash_y, bool(self.goto_approach_pos_x_var.get()), bool(self.goto_approach_pos_y_var.get())
-
-    def _goto_pre_target(self, target: float, backlash_mm: float, approach_positive: bool) -> float:
-        if backlash_mm <= 0:
-            return target
-        if approach_positive:
-            return max(ABS_MIN_MM, min(ABS_MAX_MM, target - backlash_mm))
-        return max(ABS_MIN_MM, min(ABS_MAX_MM, target + backlash_mm))
-
     def _execute_goto_move(self, ax, ay, target_x: float, target_y: float, timeout_s: float):
         # Vitesse réduite pour la précision du GoTo
         try:
@@ -1841,34 +1763,10 @@ class MainApp(tk.Tk):
         except Exception:
             pass
 
-        enabled, backlash_x, backlash_y, approach_pos_x, approach_pos_y = self._parse_goto_backlash_config()
-        if not enabled or (backlash_x <= 0 and backlash_y <= 0):
-            ax.move_absolute_no_wait(target_x)
-            ay.move_absolute_no_wait(target_y)
-            ax.wait_done(timeout_s=timeout_s)
-            ay.wait_done(timeout_s=timeout_s)
-        else:
-            pre_x = self._goto_pre_target(target_x, backlash_x, approach_pos_x)
-            pre_y = self._goto_pre_target(target_y, backlash_y, approach_pos_y)
-
-            if abs(pre_x - target_x) > 1e-9 or abs(pre_y - target_y) > 1e-9:
-                ax.move_absolute_no_wait(pre_x)
-                ay.move_absolute_no_wait(pre_y)
-                ax.wait_done(timeout_s=timeout_s)
-                ay.wait_done(timeout_s=timeout_s)
-
-            ax.move_absolute_no_wait(target_x)
-            ay.move_absolute_no_wait(target_y)
-            ax.wait_done(timeout_s=timeout_s)
-            ay.wait_done(timeout_s=timeout_s)
-
-        # Délai de stabilisation optionnel
-        try:
-            settle_ms = int(float(self.goto_settle_ms_var.get()))
-            if settle_ms > 0:
-                time.sleep(settle_ms / 1000.0)
-        except Exception:
-            pass
+        ax.move_absolute_no_wait(target_x)
+        ay.move_absolute_no_wait(target_y)
+        ax.wait_done(timeout_s=timeout_s)
+        ay.wait_done(timeout_s=timeout_s)
 
     def _parse_goto_config(self) -> tuple[float, float]:
         objective = self.objective_var.get()
@@ -1956,36 +1854,28 @@ class MainApp(tk.Tk):
             messagebox.showerror("GoTo", "Les valeurs mm/px X et Y doivent etre positives.")
             return
 
-        comp_x_px, comp_y_px = self._parse_goto_pixel_compensation()
-        adj_dx_px = dx_px + comp_x_px
-        adj_dy_px = dy_px + comp_y_px
+        move_x_mm = dx_px * scale_x
+        move_y_mm = dy_px * scale_y
 
-        # Rotation caméra→platine : corrige l'angle entre les axes image et les axes moteurs.
-        # Erreur typique : Y_erreur ∝ commande_X → rotation ~90°.
-        # Essayer 90 ou -90 si les axes semblent croisés.
+        # Corrections directionnelles empiriques (en mm)
         try:
-            import math
-            rot_rad = math.radians(float(self.goto_rotation_deg_var.get()))
-            if abs(rot_rad) > 1e-6:
-                cos_r = math.cos(rot_rad)
-                sin_r = math.sin(rot_rad)
-                adj_dx_px, adj_dy_px = (
-                    adj_dx_px * cos_r - adj_dy_px * sin_r,
-                    adj_dx_px * sin_r + adj_dy_px * cos_r,
-                )
+            if move_x_mm > 0:
+                move_x_mm += float(self.goto_corr_xp_var.get())
+            elif move_x_mm < 0:
+                move_x_mm += float(self.goto_corr_xm_var.get())
+        except Exception:
+            pass
+        try:
+            if move_y_mm > 0:
+                move_y_mm += float(self.goto_corr_yp_var.get())
+            elif move_y_mm < 0:
+                move_y_mm += float(self.goto_corr_ym_var.get())
         except Exception:
             pass
 
-        move_x_mm = adj_dx_px * scale_x
-        move_y_mm = adj_dy_px * scale_y
-
-        backlash_enabled, backlash_x_mm, backlash_y_mm, approach_pos_x, approach_pos_y = self._parse_goto_backlash_config()
         self._log(
             f"GoTo: cible px=({target_x_px},{target_y_px}) delta_px=({dx_px},{dy_px}) "
-            f"rot={self.goto_rotation_deg_var.get()}° corr_px=({comp_x_px},{comp_y_px}) "
-            f"delta_mm=({move_x_mm:.4f},{move_y_mm:.4f}) "
-            f"anti_jeu={int(backlash_enabled)} aj_mm=({backlash_x_mm:.4f},{backlash_y_mm:.4f}) "
-            f"fin_plus=({int(approach_pos_x)},{int(approach_pos_y)})"
+            f"delta_mm=({move_x_mm:.4f},{move_y_mm:.4f})"
         )
 
         def worker():
