@@ -379,6 +379,7 @@ class MainApp(tk.Tk):
         self.goto_approach_pos_y_var = tk.BooleanVar(value=False)
         self.goto_velocity_var = tk.StringVar(value="0.1")   # mm/s dédié aux déplacements GoTo
         self.goto_settle_ms_var = tk.StringVar(value="0")    # ms d'attente après fin de mouvement
+        self.goto_rotation_deg_var = tk.StringVar(value="0")  # rotation caméra→platine (degrés)
         self.goto_invert_x_var = tk.BooleanVar(value=False)
         self.goto_invert_y_var = tk.BooleanVar(value=False)
         self.goto_status_var = tk.StringVar(value="GoTo : inactif")
@@ -599,6 +600,11 @@ class MainApp(tk.Tk):
         ttk.Entry(obj_box, textvariable=self.goto_velocity_var, width=6).grid(row=7, column=1, padx=2)
         ttk.Label(obj_box, text="Stab. (ms)").grid(row=7, column=2, sticky="w", padx=2)
         ttk.Entry(obj_box, textvariable=self.goto_settle_ms_var, width=6).grid(row=7, column=3, padx=2)
+
+        ttk.Label(obj_box, text="Rot. cam (°)").grid(row=8, column=0, sticky="w", padx=2)
+        ttk.Entry(obj_box, textvariable=self.goto_rotation_deg_var, width=6).grid(row=8, column=1, padx=2)
+        ttk.Label(obj_box, text="(essayer 90 / -90)", foreground="gray",
+                  font=("Segoe UI", 7)).grid(row=8, column=2, columnspan=4, sticky="w", padx=2)
 
         # ── Motor jog section ──
         motor_box = ttk.LabelFrame(outer, text="Moteurs", padding=4)
@@ -1160,6 +1166,7 @@ class MainApp(tk.Tk):
             self.goto_approach_pos_y_var.set(bool(goto_settings.get("approach_pos_y", False)))
             self.goto_velocity_var.set(str(goto_settings.get("goto_velocity_mm_s", self.goto_velocity_var.get())))
             self.goto_settle_ms_var.set(str(int(goto_settings.get("goto_settle_ms", int(float(self.goto_settle_ms_var.get()))))))
+            self.goto_rotation_deg_var.set(str(goto_settings.get("goto_rotation_deg", float(self.goto_rotation_deg_var.get()))))
 
         for name, current in self.OBJECTIVE_PRESETS.items():
             incoming = presets.get(name)
@@ -1211,6 +1218,7 @@ class MainApp(tk.Tk):
                 "approach_pos_y": bool(self.goto_approach_pos_y_var.get()),
                 "goto_velocity_mm_s": float(self.goto_velocity_var.get()),
                 "goto_settle_ms": int(float(self.goto_settle_ms_var.get())),
+                "goto_rotation_deg": float(self.goto_rotation_deg_var.get()),
             },
         }
         for name, preset in self.OBJECTIVE_PRESETS.items():
@@ -1951,13 +1959,31 @@ class MainApp(tk.Tk):
         comp_x_px, comp_y_px = self._parse_goto_pixel_compensation()
         adj_dx_px = dx_px + comp_x_px
         adj_dy_px = dy_px + comp_y_px
+
+        # Rotation caméra→platine : corrige l'angle entre les axes image et les axes moteurs.
+        # Erreur typique : Y_erreur ∝ commande_X → rotation ~90°.
+        # Essayer 90 ou -90 si les axes semblent croisés.
+        try:
+            import math
+            rot_rad = math.radians(float(self.goto_rotation_deg_var.get()))
+            if abs(rot_rad) > 1e-6:
+                cos_r = math.cos(rot_rad)
+                sin_r = math.sin(rot_rad)
+                adj_dx_px, adj_dy_px = (
+                    adj_dx_px * cos_r - adj_dy_px * sin_r,
+                    adj_dx_px * sin_r + adj_dy_px * cos_r,
+                )
+        except Exception:
+            pass
+
         move_x_mm = adj_dx_px * scale_x
         move_y_mm = adj_dy_px * scale_y
 
         backlash_enabled, backlash_x_mm, backlash_y_mm, approach_pos_x, approach_pos_y = self._parse_goto_backlash_config()
         self._log(
             f"GoTo: cible px=({target_x_px},{target_y_px}) delta_px=({dx_px},{dy_px}) "
-            f"corr_px=({comp_x_px},{comp_y_px}) delta_mm=({move_x_mm:.4f},{move_y_mm:.4f}) "
+            f"rot={self.goto_rotation_deg_var.get()}° corr_px=({comp_x_px},{comp_y_px}) "
+            f"delta_mm=({move_x_mm:.4f},{move_y_mm:.4f}) "
             f"anti_jeu={int(backlash_enabled)} aj_mm=({backlash_x_mm:.4f},{backlash_y_mm:.4f}) "
             f"fin_plus=({int(approach_pos_x)},{int(approach_pos_y)})"
         )
