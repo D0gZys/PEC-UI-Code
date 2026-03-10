@@ -14,7 +14,6 @@ var/
 sdist/
 develop-eggs/
 .installed.cfg
-lib/
 lib64/
 
 # Virtual environments
@@ -34,7 +33,6 @@ env/
 Thumbs.db
 
 # Compiled files
-*.dll
 *.exe
 *.so
 *.pyc

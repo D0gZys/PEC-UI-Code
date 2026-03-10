@@ -8,10 +8,12 @@ Layout :
   - Barre de statut tout en bas
 """
 
-import os
+import importlib.util
 import json
+import os
 import queue
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -19,16 +21,67 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, ttk, simpledialog
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_PROJECT_THORLABS_ZIP = _PROJECT_ROOT / "Camera" / "SDK" / "Python Toolkit" / "thorlabs_tsi_camera_python_sdk_package.zip"
+
+
+def _ensure_python_dependency(module_name: str, install_args: list[str], display_name: str) -> str | None:
+    if importlib.util.find_spec(module_name) is not None:
+        return None
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", *install_args],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        return f"{display_name}: installation automatique impossible ({exc})"
+    if importlib.util.find_spec(module_name) is None:
+        return f"{display_name}: installe automatiquement mais introuvable apres installation"
+    return None
+
+
+def _bootstrap_startup_dependencies() -> list[str]:
+    errors: list[str] = []
+    for module_name, install_args, display_name in (
+        ("numpy", ["numpy"], "numpy"),
+        ("PIL", ["pillow"], "pillow"),
+        ("clr", ["pythonnet"], "pythonnet"),
+    ):
+        err = _ensure_python_dependency(module_name, install_args, display_name)
+        if err is not None:
+            errors.append(err)
+
+    if _PROJECT_THORLABS_ZIP.exists() and importlib.util.find_spec("thorlabs_tsi_sdk") is None:
+        err = _ensure_python_dependency(
+            "thorlabs_tsi_sdk",
+            [str(_PROJECT_THORLABS_ZIP)],
+            "SDK Python Thorlabs",
+        )
+        if err is not None:
+            errors.append(err)
+    return errors
+
+
+_STARTUP_DEP_ERRORS = _bootstrap_startup_dependencies()
+
 try:
     import numpy as np
     from PIL import Image, ImageDraw, ImageTk
 except Exception as _dep_exc:
-    print("Dépendances manquantes. Installer avec :")
-    print("  python -m pip install numpy pillow")
+    print("Dependances manquantes. Installer avec :")
+    print("  python -m pip install numpy pillow pythonnet")
+    if _PROJECT_THORLABS_ZIP.exists():
+        print(f"  python -m pip install \"{_PROJECT_THORLABS_ZIP}\"")
+    if _STARTUP_DEP_ERRORS:
+        print("Erreurs d'installation automatique :")
+        for _msg in _STARTUP_DEP_ERRORS:
+            print(f"  - {_msg}")
     raise SystemExit(_dep_exc) from _dep_exc
 
 from newport_conex_test_ui import (ConexAxis, ConexError, DEFAULT_DLL_CANDIDATES, load_conex_class,
                                    ABS_MIN_MM, ABS_MAX_MM)
+
 
 # ─────────────────────────── Constantes ───────────────────────────
 
@@ -439,6 +492,9 @@ class MainApp(tk.Tk):
         self.on_objective_change()
         self._bind_keyboard_controls()
         self._start_motor_pos_poll()
+        for _msg in _STARTUP_DEP_ERRORS:
+            self._log(f"Bootstrap d?pendances: {_msg}")
+        self.after(50, self._auto_prepare_runtime)
         self._log("Application prête.")
 
     # ═══════════════════════════ UI BUILD ═══════════════════════════
@@ -896,20 +952,48 @@ class MainApp(tk.Tk):
 
     # ═══════════════════════ MOTOR METHODS ═══════════════════════
 
-    def on_load_motor_dll(self):
-        path = self.motor_dll_var.get().strip()
+    def _ensure_motor_runtime_loaded(self):
+        if self.conex_class is not None:
+            return self.conex_class
+        path_hint = self.motor_dll_var.get().strip()
+        cls, loaded = load_conex_class(path_hint)
+        self.conex_class = cls
+        self.loaded_motor_dll = loaded
+        return cls
 
+    def _ensure_camera_runtime_loaded(self):
+        if self.TLCameraSDK is None:
+            self._load_camera_sdk_modules()
+        return self.TLCameraSDK
+
+    def _auto_prepare_runtime(self):
         def worker():
-            cls, loaded = load_conex_class(path)
-            self.conex_class = cls
-            self.loaded_motor_dll = loaded
-            self.after(0, lambda: self._log(f"DLL moteur chargée : {loaded}"))
+            messages = []
+            try:
+                self._ensure_motor_runtime_loaded()
+                messages.append(f"DLL moteur pr?charg?e : {self.loaded_motor_dll}")
+            except Exception as exc:
+                messages.append(f"Pr?chargement DLL moteur ignor? : {exc}")
+            try:
+                self._ensure_camera_runtime_loaded()
+                messages.append("SDK cam?ra pr?charg?.")
+            except Exception as exc:
+                messages.append(f"Pr?chargement SDK cam?ra ignor? : {exc}")
+            for msg in messages:
+                self.after(0, lambda m=msg: self._log(m))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_load_motor_dll(self):
+        def worker():
+            self._ensure_motor_runtime_loaded()
+            loaded = self.loaded_motor_dll
+            self.after(0, lambda: self._log(f"DLL moteur charg?e : {loaded}"))
         self._run_async("Charger DLL moteur", worker)
 
     def on_scan_motors(self, combo_x=None, combo_y=None):
         def worker():
-            if self.conex_class is None:
-                raise ConexError("Charger la DLL moteur d'abord")
+            self._ensure_motor_runtime_loaded()
             tmp = self.conex_class()
             devices = sorted(set(str(p).strip() for p in (tmp.GetDevices() or []) if str(p).strip()))
             self._motor_ports_list = devices
@@ -938,8 +1022,11 @@ class MainApp(tk.Tk):
         x_port = self.x_port_var.get().strip()
         y_port = self.y_port_var.get().strip()
         if self.conex_class is None:
-            messagebox.showerror("Erreur", "Charger la DLL moteur d'abord")
-            return
+            try:
+                self._ensure_motor_runtime_loaded()
+            except Exception as exc:
+                messagebox.showerror("Erreur", f"Chargement auto DLL moteur impossible: {exc}")
+                return
         if not x_port or not y_port:
             messagebox.showerror("Erreur", "Sélectionner les deux ports COM (X et Y)")
             return
@@ -1532,7 +1619,7 @@ class MainApp(tk.Tk):
 
     def on_load_camera_sdk(self):
         try:
-            self._load_camera_sdk_modules()
+            self._ensure_camera_runtime_loaded()
             self._set_status("SDK caméra chargé")
             self._log("SDK caméra chargé.")
         except Exception as exc:
@@ -1541,7 +1628,7 @@ class MainApp(tk.Tk):
     def on_discover_camera(self, combo=None):
         try:
             if self.TLCameraSDK is None:
-                self._load_camera_sdk_modules()
+                self._ensure_camera_runtime_loaded()
             if self.sdk is None:
                 self.sdk = self.TLCameraSDK()
             serials = list(self.sdk.discover_available_cameras())
