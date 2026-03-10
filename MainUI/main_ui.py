@@ -90,6 +90,9 @@ PREVIEW_RESIZE_DEBOUNCE_MS = 60
 FPS_UPDATE_INTERVAL = 1.0     # seconds between FPS label updates
 CAMERA_PIXEL_PITCH_UM = 3.45  # camera sensor pitch in um/pixel
 DEFAULT_GOTO_MM_PER_PX = 0.001  # legacy fallback
+MOTOR_POS_POLL_MS = 40        # faster stage tracking for overlay updates
+MOTOR_LABEL_UPDATE_MS = 200   # keep text refresh slower than position tracking
+OVERLAY_REDRAW_EPS_MM = 2e-5  # avoid jitter from tiny encoder noise
 
 # ───────────────────────── Camera stream ──────────────────────────
 
@@ -404,11 +407,15 @@ class MainApp(tk.Tk):
         self._jog_active: dict[str, bool] = {"X": False, "Y": False}
         self.motor_pos_x_var = tk.StringVar(value="X: -")
         self.motor_pos_y_var = tk.StringVar(value="Y: -")
-        self._motor_pos_poll_ms = 250
+        self._motor_pos_poll_ms = MOTOR_POS_POLL_MS
+        self._motor_label_update_ms = MOTOR_LABEL_UPDATE_MS
         self._motor_pos_stop_event = threading.Event()
         self._motor_pos_thread = None
         self._last_motor_pos_x_text = self.motor_pos_x_var.get()
         self._last_motor_pos_y_text = self.motor_pos_y_var.get()
+        self._cached_motor_pos_x: float | None = None
+        self._cached_motor_pos_y: float | None = None
+        self._overlay_refresh_pending = False
 
         self.serial_var = tk.StringVar(value="")
         self.exposure_var = tk.StringVar(value="0.01")  # en secondes
@@ -480,6 +487,14 @@ class MainApp(tk.Tk):
         self.seq_start_lbl_var = tk.StringVar(value="Départ  : –")
         self.seq_end_lbl_var   = tk.StringVar(value="Arrivée : –")
         self.seq_status_var    = tk.StringVar(value="")
+        self.seq_pick_status_var = tk.StringVar(value="Zone image : inactive")
+        self.seq_pick_btn_var = tk.StringVar(value="Zone image")
+        self._seq_select_armed = False
+        self._seq_select_first_frame: tuple[int, int] | None = None
+        self._seq_rect_start_frame: tuple[int, int] | None = None
+        self._seq_rect_end_frame: tuple[int, int] | None = None
+        self._seq_select_base_motor: tuple[float, float] | None = None
+        self._seq_rect_follow_sample = False
         self.seq_mode_var      = tk.StringVar(value="Linéaire")  # "Linéaire" ou "Rectangle"
         self._seq_stop_event   = threading.Event()
         self._seq_running      = False
@@ -493,7 +508,7 @@ class MainApp(tk.Tk):
         self._bind_keyboard_controls()
         self._start_motor_pos_poll()
         for _msg in _STARTUP_DEP_ERRORS:
-            self._log(f"Bootstrap d?pendances: {_msg}")
+            self._log(f"Bootstrap dependances: {_msg}")
         self.after(50, self._auto_prepare_runtime)
         self._log("Application prête.")
 
@@ -716,19 +731,24 @@ class MainApp(tk.Tk):
         ttk.Entry(seq_box, textvariable=self.seq_duration_var, width=5).grid(row=3, column=1, padx=2)
 
         # Ligne 4 : boutons
-        ttk.Button(seq_box, text="Set Départ",
+        ttk.Button(seq_box, text="Set Depart",
                    command=self.on_set_seq_start).grid(row=4, column=0, padx=2, pady=(4, 0))
-        ttk.Button(seq_box, text="Set Arrivée",
+        ttk.Button(seq_box, text="Set Arrivee",
                    command=self.on_set_seq_end).grid(row=4, column=1, padx=2, pady=(4, 0))
-        self._seq_run_btn = ttk.Button(seq_box, text="▶ Lancer",
+        self._seq_run_btn = ttk.Button(seq_box, text="Lancer",
                    command=self.on_run_sequence)
         self._seq_run_btn.grid(row=4, column=2, padx=2, pady=(4, 0))
-        ttk.Button(seq_box, text="■ Stop",
+        ttk.Button(seq_box, text="Stop",
                    command=self.on_stop_sequence).grid(row=4, column=3, padx=2, pady=(4, 0))
 
-        # Ligne 5 : statut séquence
+        ttk.Button(seq_box, textvariable=self.seq_pick_btn_var,
+                   command=self.on_arm_seq_rectangle).grid(row=5, column=0, columnspan=2, padx=2, pady=(4, 0), sticky="w")
+        ttk.Label(seq_box, textvariable=self.seq_pick_status_var, foreground="gray",
+                  font=("Segoe UI", 8)).grid(row=5, column=2, columnspan=2, sticky="w", pady=(4, 0))
+
+        # Ligne 6 : statut sequence
         ttk.Label(seq_box, textvariable=self.seq_status_var, foreground="blue",
-                  font=("Segoe UI", 8)).grid(row=5, column=0, columnspan=4, sticky="w", pady=(2, 0))
+                  font=("Segoe UI", 8)).grid(row=6, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
         # ── Camera params quick section ──
         cam_box = ttk.LabelFrame(outer, text="Caméra rapide", padding=4)
@@ -821,14 +841,24 @@ class MainApp(tk.Tk):
                 except Exception:
                     pass
 
+    def _refresh_preview_cursor(self):
+        if self._goto_armed or self._seq_select_armed:
+            self._set_preview_cursor("tcross")
+        else:
+            self._set_preview_cursor("")
+
     def _set_goto_armed(self, armed: bool):
         self._goto_armed = bool(armed)
         if self._goto_armed:
             self.goto_status_var.set("GoTo : clique dans l'image")
-            self._set_preview_cursor("tcross")
         else:
             self.goto_status_var.set("GoTo : inactif")
-            self._set_preview_cursor("")
+        self._refresh_preview_cursor()
+
+    def _set_seq_select_armed(self, armed: bool):
+        self._seq_select_armed = bool(armed)
+        self.seq_pick_btn_var.set("Annuler zone" if self._seq_select_armed else "Zone image")
+        self._refresh_preview_cursor()
 
     def _defocus_entry(self, event=None):
         """Retire le focus d'un champ texte et le donne ? la fen?tre principale."""
@@ -914,23 +944,54 @@ class MainApp(tk.Tk):
             raise ConexError(f"Axe {axis_name} non connecté")
         return axis
 
-    def _format_motor_position_label(self, name: str, axis):
+    def _format_motor_position_label(self, name: str, axis) -> tuple[str, float | None]:
         if axis is None or not axis.connected:
-            return f"{name}: -"
+            return f"{name}: -", None
         snap = axis.snapshot()
         if snap.position is not None:
-            return f"{name}: {snap.position:.4f} mm"
+            return f"{name}: {snap.position:.4f} mm", snap.position
         if snap.issue:
-            return f"{name}: {snap.issue}"
-        return f"{name}: -"
+            return f"{name}: {snap.issue}", None
+        return f"{name}: -", None
 
-    def _apply_motor_position_labels(self, x_text: str, y_text: str):
+    def _apply_motor_position_labels(
+        self,
+        x_text: str,
+        y_text: str,
+        x_pos: float | None,
+        y_pos: float | None,
+    ):
         if self._last_motor_pos_x_text != x_text:
             self.motor_pos_x_var.set(x_text)
             self._last_motor_pos_x_text = x_text
         if self._last_motor_pos_y_text != y_text:
             self.motor_pos_y_var.set(y_text)
             self._last_motor_pos_y_text = y_text
+        self._cached_motor_pos_x = x_pos
+        self._cached_motor_pos_y = y_pos
+
+    @staticmethod
+    def _motor_pos_changed(prev: float | None, curr: float | None, eps_mm: float = OVERLAY_REDRAW_EPS_MM) -> bool:
+        if prev is None or curr is None:
+            return prev != curr
+        return abs(curr - prev) >= eps_mm
+
+    def _request_overlay_refresh(self):
+        if self._overlay_refresh_pending:
+            return
+        if not self._seq_rect_follow_sample or self._last_image is None or self.stream_thread is None:
+            return
+        self._overlay_refresh_pending = True
+        try:
+            self.after(0, self._refresh_overlay_from_motor_poll)
+        except Exception:
+            self._overlay_refresh_pending = False
+
+    def _refresh_overlay_from_motor_poll(self):
+        self._overlay_refresh_pending = False
+        if not self._seq_rect_follow_sample or self._last_image is None or self.stream_thread is None:
+            return
+        self._render_preview(self._last_image)
 
     def _start_motor_pos_poll(self):
         if self._motor_pos_thread is not None and self._motor_pos_thread.is_alive():
@@ -940,11 +1001,27 @@ class MainApp(tk.Tk):
         self._motor_pos_thread.start()
 
     def _motor_pos_loop(self):
+        next_label_update = 0.0
+        prev_x_pos = None
+        prev_y_pos = None
         while not self._motor_pos_stop_event.is_set():
-            x_text = self._format_motor_position_label("X", self.axis_x)
-            y_text = self._format_motor_position_label("Y", self.axis_y)
+            x_text, x_pos = self._format_motor_position_label("X", self.axis_x)
+            y_text, y_pos = self._format_motor_position_label("Y", self.axis_y)
+            pos_changed = self._motor_pos_changed(prev_x_pos, x_pos) or self._motor_pos_changed(prev_y_pos, y_pos)
+            self._cached_motor_pos_x = x_pos
+            self._cached_motor_pos_y = y_pos
+            prev_x_pos = x_pos
+            prev_y_pos = y_pos
+            now = time.monotonic()
             try:
-                self.after(0, lambda x=x_text, y=y_text: self._apply_motor_position_labels(x, y))
+                if now >= next_label_update:
+                    self.after(
+                        0,
+                        lambda x=x_text, y=y_text, px=x_pos, py=y_pos: self._apply_motor_position_labels(x, y, px, py),
+                    )
+                    next_label_update = now + (self._motor_label_update_ms / 1000.0)
+                if pos_changed:
+                    self._request_overlay_refresh()
             except Exception:
                 return
             if self._motor_pos_stop_event.wait(self._motor_pos_poll_ms / 1000.0):
@@ -971,14 +1048,14 @@ class MainApp(tk.Tk):
             messages = []
             try:
                 self._ensure_motor_runtime_loaded()
-                messages.append(f"DLL moteur pr?charg?e : {self.loaded_motor_dll}")
+                messages.append(f"DLL moteur prechargee : {self.loaded_motor_dll}")
             except Exception as exc:
-                messages.append(f"Pr?chargement DLL moteur ignor? : {exc}")
+                messages.append(f"Prechargement DLL moteur ignore : {exc}")
             try:
                 self._ensure_camera_runtime_loaded()
-                messages.append("SDK cam?ra pr?charg?.")
+                messages.append("SDK camera precharge.")
             except Exception as exc:
-                messages.append(f"Pr?chargement SDK cam?ra ignor? : {exc}")
+                messages.append(f"Prechargement SDK camera ignore : {exc}")
             for msg in messages:
                 self.after(0, lambda m=msg: self._log(m))
 
@@ -988,7 +1065,7 @@ class MainApp(tk.Tk):
         def worker():
             self._ensure_motor_runtime_loaded()
             loaded = self.loaded_motor_dll
-            self.after(0, lambda: self._log(f"DLL moteur charg?e : {loaded}"))
+            self.after(0, lambda: self._log(f"DLL moteur chargee : {loaded}"))
         self._run_async("Charger DLL moteur", worker)
 
     def on_scan_motors(self, combo_x=None, combo_y=None):
@@ -1389,6 +1466,7 @@ class MainApp(tk.Tk):
             try:
                 x, y = self._read_motor_positions()
                 self.seq_start_motor = (x, y)
+                self.after(0, self._clear_sequence_preview_selection)
                 lbl = f"Départ  : X={x:.4f}  Y={y:.4f} mm"
                 self.after(0, lambda: self.seq_start_lbl_var.set(lbl))
                 self.after(0, lambda: self._log(f"Point de départ enregistré : X={x:.4f} Y={y:.4f} mm"))
@@ -1402,12 +1480,61 @@ class MainApp(tk.Tk):
             try:
                 x, y = self._read_motor_positions()
                 self.seq_end_motor = (x, y)
+                self.after(0, self._clear_sequence_preview_selection)
                 lbl = f"Arrivée : X={x:.4f}  Y={y:.4f} mm"
                 self.after(0, lambda: self.seq_end_lbl_var.set(lbl))
                 self.after(0, lambda: self._log(f"Point d'arrivée enregistré : X={x:.4f} Y={y:.4f} mm"))
             except ConexError as exc:
                 self.after(0, lambda: messagebox.showerror("Erreur", str(exc)))
         threading.Thread(target=worker, daemon=True).start()
+
+    def _clear_sequence_preview_selection(self):
+        self._seq_select_first_frame = None
+        self._seq_rect_start_frame = None
+        self._seq_rect_end_frame = None
+        self._seq_select_base_motor = None
+        self._seq_rect_follow_sample = False
+        if not self._seq_select_armed:
+            self.seq_pick_status_var.set("Zone image : inactive")
+        if self._last_image is not None:
+            self._render_preview(self._last_image)
+
+    def _update_sequence_labels(self, start_xy: tuple[float, float], end_xy: tuple[float, float]):
+        x0, y0 = start_xy
+        x1, y1 = end_xy
+        self.seq_start_motor = (x0, y0)
+        self.seq_end_motor = (x1, y1)
+        self.seq_start_lbl_var.set(f"Depart  : X={x0:.4f}  Y={y0:.4f} mm")
+        self.seq_end_lbl_var.set(f"Arrivee : X={x1:.4f}  Y={y1:.4f} mm")
+
+    def on_arm_seq_rectangle(self):
+        if self._seq_select_armed:
+            self._set_seq_select_armed(False)
+            self._clear_sequence_preview_selection()
+            self._log("Zone image annulee.")
+            return
+        if self.stream_thread is None:
+            messagebox.showerror("Zone image", "Demarrer d'abord le flux live.")
+            return
+        try:
+            base_x, base_y = self._read_motor_positions()
+            self._parse_goto_config()
+        except Exception as exc:
+            messagebox.showerror("Zone image", str(exc))
+            return
+        self._set_goto_armed(False)
+        self._seq_select_first_frame = None
+        self._seq_rect_start_frame = None
+        self._seq_rect_end_frame = None
+        self._seq_select_base_motor = (base_x, base_y)
+        self._seq_rect_follow_sample = False
+        self._cached_motor_pos_x = base_x
+        self._cached_motor_pos_y = base_y
+        self.seq_pick_status_var.set("Zone image : clic 1/2")
+        self._set_seq_select_armed(True)
+        self._log(f"Zone image armee depuis X={base_x:.4f} Y={base_y:.4f} mm.")
+        if self._last_image is not None:
+            self._render_preview(self._last_image)
 
     def on_stop_sequence(self):
         """Arrête la séquence en cours."""
@@ -1879,14 +2006,12 @@ class MainApp(tk.Tk):
         ax.wait_done(timeout_s=timeout_s)
         ay.wait_done(timeout_s=timeout_s)
 
-    def _parse_goto_config(self) -> tuple[float, float]:
+    def _current_goto_scale(self) -> tuple[float, float]:
         objective = self.objective_var.get()
         auto = self._auto_mm_per_px_for_objective(objective)
         if auto is not None and auto > 0:
             mm_per_px_x = auto
             mm_per_px_y = auto
-            self.goto_mm_per_px_x_var.set(self._format_mm_per_px(auto))
-            self.goto_mm_per_px_y_var.set(self._format_mm_per_px(auto))
         else:
             mm_per_px_x = float(self.goto_mm_per_px_x_var.get())
             mm_per_px_y = float(self.goto_mm_per_px_y_var.get())
@@ -1901,10 +2026,23 @@ class MainApp(tk.Tk):
             sx *= -1.0
         if self.goto_invert_y_var.get():
             sy *= -1.0
-        self._persist_current_laser_preset()
         return mm_per_px_x * sx, mm_per_px_y * sy
 
+    def _parse_goto_config(self) -> tuple[float, float]:
+        objective = self.objective_var.get()
+        auto = self._auto_mm_per_px_for_objective(objective)
+        if auto is not None and auto > 0:
+            auto_text = self._format_mm_per_px(auto)
+            self.goto_mm_per_px_x_var.set(auto_text)
+            self.goto_mm_per_px_y_var.set(auto_text)
+        scale_x, scale_y = self._current_goto_scale()
+        self._persist_current_laser_preset()
+        return scale_x, scale_y
+
     def on_arm_goto(self):
+        if self._seq_select_armed:
+            self._set_seq_select_armed(False)
+            self._clear_sequence_preview_selection()
         if self.stream_thread is None:
             self._set_goto_armed(False)
             messagebox.showerror("GoTo", "Demarrer d'abord le flux live.")
@@ -1938,7 +2076,65 @@ class MainApp(tk.Tk):
         frame_y = max(0, min(self._last_frame_height - 1, frame_y))
         return frame_x, frame_y
 
+    def _frame_point_to_motor_target(self, frame_x: int, frame_y: int, base_x: float, base_y: float) -> tuple[float, float]:
+        scale_x, scale_y = self._current_goto_scale()
+        dx_px = int(frame_x - int(self.laser_x))
+        dy_px = int(frame_y - int(self.laser_y))
+        target_x = base_x + dx_px * scale_x
+        target_y = base_y + dy_px * scale_y
+        if not (ABS_MIN_MM <= target_x <= ABS_MAX_MM):
+            raise ConexError(f"Zone X hors limites ({target_x:.4f} mm)")
+        if not (ABS_MIN_MM <= target_y <= ABS_MAX_MM):
+            raise ConexError(f"Zone Y hors limites ({target_y:.4f} mm)")
+        return target_x, target_y
+
+    def _handle_sequence_preview_click(self, event):
+        point = self._preview_to_frame_coords(event.x, event.y)
+        if point is None:
+            self._log("Zone image: clic en dehors de l'image")
+            return
+        if self._seq_select_base_motor is None:
+            self._set_seq_select_armed(False)
+            self.seq_pick_status_var.set("Zone image : inactive")
+            return
+        if self._seq_select_first_frame is None:
+            self._seq_select_first_frame = point
+            self._seq_rect_start_frame = point
+            self._seq_rect_end_frame = point
+            self.seq_pick_status_var.set("Zone image : clic 2/2")
+            self._log(f"Zone image: premier coin px={point}")
+            if self._last_image is not None:
+                self._render_preview(self._last_image)
+            return
+        first_point = self._seq_select_first_frame
+        base_x, base_y = self._seq_select_base_motor
+        try:
+            start_xy = self._frame_point_to_motor_target(first_point[0], first_point[1], base_x, base_y)
+            end_xy = self._frame_point_to_motor_target(point[0], point[1], base_x, base_y)
+        except Exception as exc:
+            self._set_seq_select_armed(False)
+            self._clear_sequence_preview_selection()
+            messagebox.showerror("Zone image", str(exc))
+            return
+        self._seq_rect_start_frame = first_point
+        self._seq_rect_end_frame = point
+        self._seq_select_first_frame = None
+        self._seq_select_base_motor = None
+        self._seq_rect_follow_sample = True
+        self._update_sequence_labels(start_xy, end_xy)
+        self.seq_mode_var.set("Rectangle")
+        self.seq_pick_status_var.set("Zone image : zone definie")
+        self._set_seq_select_armed(False)
+        self._log(
+            f"Zone image definie: ({start_xy[0]:.4f},{start_xy[1]:.4f}) -> ({end_xy[0]:.4f},{end_xy[1]:.4f}) mm"
+        )
+        if self._last_image is not None:
+            self._render_preview(self._last_image)
+
     def _on_preview_click(self, event):
+        if self._seq_select_armed:
+            self._handle_sequence_preview_click(event)
+            return
         if not self._goto_armed:
             return
         point = self._preview_to_frame_coords(event.x, event.y)
@@ -2162,6 +2358,83 @@ class MainApp(tk.Tk):
         draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=(255, 255, 255), outline=(255, 0, 0), width=1)
         return image
 
+    def _frame_to_preview_point(self, frame_pt: tuple[int, int], source_x0: int, source_y0: int, source_w: int, source_h: int, disp_w: int, disp_h: int) -> tuple[int, int]:
+        scale_x = source_w / disp_w if disp_w > 0 else 1.0
+        scale_y = source_h / disp_h if disp_h > 0 else 1.0
+        x = int(round((frame_pt[0] - source_x0) / scale_x)) if scale_x > 0 else 0
+        y = int(round((frame_pt[1] - source_y0) / scale_y)) if scale_y > 0 else 0
+        return x, y
+
+    def _motor_target_to_frame_point(
+        self,
+        motor_x: float,
+        motor_y: float,
+        current_x: float,
+        current_y: float,
+    ) -> tuple[int, int]:
+        scale_x, scale_y = self._current_goto_scale()
+        if scale_x == 0 or scale_y == 0:
+            raise ValueError("Echelle GoTo invalide")
+        frame_x = int(round(float(self.laser_x) + ((motor_x - current_x) / scale_x)))
+        frame_y = int(round(float(self.laser_y) + ((motor_y - current_y) / scale_y)))
+        return frame_x, frame_y
+
+    def _sequence_overlay_frame_points(self) -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
+        start_pt = self._seq_rect_start_frame or self._seq_select_first_frame
+        end_pt = self._seq_rect_end_frame
+        if not self._seq_rect_follow_sample:
+            return start_pt, end_pt
+        if self.seq_start_motor is None or self.seq_end_motor is None:
+            return start_pt, end_pt
+        current_x = self._cached_motor_pos_x
+        current_y = self._cached_motor_pos_y
+        if current_x is None or current_y is None:
+            return start_pt, end_pt
+        try:
+            start_pt = self._motor_target_to_frame_point(
+                self.seq_start_motor[0],
+                self.seq_start_motor[1],
+                current_x,
+                current_y,
+            )
+            end_pt = self._motor_target_to_frame_point(
+                self.seq_end_motor[0],
+                self.seq_end_motor[1],
+                current_x,
+                current_y,
+            )
+        except Exception:
+            return start_pt, end_pt
+        return start_pt, end_pt
+
+    def _draw_sequence_overlay_on_preview(
+        self,
+        image: Image.Image,
+        source_x0: int,
+        source_y0: int,
+        source_w: int,
+        source_h: int,
+    ) -> Image.Image:
+        start_pt, end_pt = self._sequence_overlay_frame_points()
+        if start_pt is None:
+            return image
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        draw = ImageDraw.Draw(image)
+        disp_w, disp_h = image.size
+        sx, sy = self._frame_to_preview_point(start_pt, source_x0, source_y0, source_w, source_h, disp_w, disp_h)
+        if end_pt is None or end_pt == start_pt:
+            r = 5
+            draw.ellipse((sx - r, sy - r, sx + r, sy + r), outline=(0, 255, 128), width=2)
+            return image
+        ex, ey = self._frame_to_preview_point(end_pt, source_x0, source_y0, source_w, source_h, disp_w, disp_h)
+        x0, x1 = sorted((sx, ex))
+        y0, y1 = sorted((sy, ey))
+        draw.rectangle((x0, y0, x1, y1), outline=(0, 255, 128), width=2)
+        for px, py in ((sx, sy), (ex, ey)):
+            draw.ellipse((px - 4, py - 4, px + 4, py + 4), fill=(0, 255, 128), outline=(0, 90, 40), width=1)
+        return image
+
     # ═══════════════════════ PREVIEW ═══════════════════════
 
     def _schedule_preview_update(self):
@@ -2184,6 +2457,7 @@ class MainApp(tk.Tk):
         else:
             fitted = cropped.copy()
         fitted = self._draw_laser_overlay_on_preview(fitted, x0, y0, source_w, source_h)
+        fitted = self._draw_sequence_overlay_on_preview(fitted, x0, y0, source_w, source_h)
         tw = max(self.preview_label.winfo_width(), 1)
         th = max(self.preview_label.winfo_height(), 1)
         self._preview_draw_w = fw

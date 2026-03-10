@@ -48,6 +48,8 @@ Le point rouge affiché dans l'image représente la position fixe du laser (réf
 - Live caméra (mono/couleur) + affichage FPS
 - Overlay laser: cercle rouge + mire centrale
 - `GoTo` sur clic image avec curseur en croix
+- Selection de zone image par 2 clics pour definir un balayage rectangle
+- Overlay rectangle qui suit la zone reelle pendant les mouvements de platine
 - Zoom numérique image (molette/trackpad selon driver)
 - Déplacement moteurs:
   - relatif (jog)
@@ -305,8 +307,25 @@ Paramètres:
 - `Pas (mm)`
 - `Durée/pt (s)`
 - positions départ/arrivée lues directement sur moteurs
+- possibilité de definir la zone rectangle directement dans l'image via `Zone image`
+
+Selection `Zone image`:
+
+1. demarrer le flux live
+2. cliquer `Zone image`
+3. cliquer un premier coin dans l'image
+4. cliquer le coin oppose
+5. le mode passe sur `Rectangle` et les champs depart/arrivee sont remplis automatiquement
+
+Notes:
+
+- le rectangle trace est une aide visuelle seulement: le balayage utilise des coordonnees moteur absolues
+- le rectangle affiche suit la zone reelle quand la platine bouge
+- le trace peut paraitre plus nerveux si les moteurs renvoient leurs positions lentement
+- en mode serpentin, chaque nouvelle ligne inverse le sens X; si seul le premier pas de ligne est faux, la cause la plus probable est mecanique (jeu / hysteresis)
 
 Exécution sur thread dédié avec arrêt propre via bouton `Stop`.
+
 
 ### 8) Raccourcis clavier
 
@@ -463,6 +482,19 @@ python -m pip install "Camera/SDK/Python Toolkit/thorlabs_tsi_camera_python_sdk_
 ### Erreur Tkinter liée au focus (`popdown`)
 
 Le code contient désormais une récupération de focus sécurisée pour éviter les crashes lors des interactions Combobox/clic global.
+
+### Rectangle de balayage visuellement decale
+
+- verifier que le flux live est bien actif
+- attendre quelques instants apres un grand deplacement pour laisser le suivi visuel se recaler
+- le rectangle suit la zone a partir de la position moteur courante, pas a partir d'un point fixe dans l'image
+- si le rectangle "saute", le probleme vient generalement de la remontee de position moteur et non du calcul de la zone
+
+### Premier pas de ligne incorrect en balayage rectangle
+
+- le mode `Rectangle` est un serpentin: le sens `X` s'inverse a chaque ligne
+- si seul le premier pas horizontal d'une nouvelle ligne est faux, suspecter d'abord un effet mecanique de changement de sens
+- dans ce cas, la geometrie du rectangle peut etre correcte alors que le mouvement reel reste imparfait
 
 ---
 
