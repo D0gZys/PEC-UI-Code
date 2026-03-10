@@ -33,6 +33,7 @@ from newport_conex_test_ui import (ConexAxis, ConexError, DEFAULT_DLL_CANDIDATES
 # ─────────────────────────── Constantes ───────────────────────────
 
 PREVIEW_POLL_MS = 15          # ~66 fps display polling
+PREVIEW_RESIZE_DEBOUNCE_MS = 60
 FPS_UPDATE_INTERVAL = 1.0     # seconds between FPS label updates
 CAMERA_PIXEL_PITCH_UM = 3.45  # camera sensor pitch in um/pixel
 DEFAULT_GOTO_MM_PER_PX = 0.001  # legacy fallback
@@ -301,10 +302,12 @@ class MainApp(tk.Tk):
         self.sdk = None
         self.camera = None
         self.stream_thread = None
-        self.image_queue = queue.Queue(maxsize=2)
+        self.image_queue = queue.Queue(maxsize=1)
         self.preview_photo = None
         self._last_image = None
         self._preview_job = None
+        self._preview_resize_job = None
+        self._preview_photo_size = None
         self._frame_counter = 0
         self._fps_t0 = time.monotonic()
         self._last_frame_width = 0
@@ -349,7 +352,10 @@ class MainApp(tk.Tk):
         self.motor_pos_x_var = tk.StringVar(value="X: -")
         self.motor_pos_y_var = tk.StringVar(value="Y: -")
         self._motor_pos_poll_ms = 250
-        self._motor_pos_job = None
+        self._motor_pos_stop_event = threading.Event()
+        self._motor_pos_thread = None
+        self._last_motor_pos_x_text = self.motor_pos_x_var.get()
+        self._last_motor_pos_y_text = self.motor_pos_y_var.get()
 
         self.serial_var = tk.StringVar(value="")
         self.exposure_var = tk.StringVar(value="0.01")  # en secondes
@@ -432,7 +438,7 @@ class MainApp(tk.Tk):
         self._build_ui()
         self.on_objective_change()
         self._bind_keyboard_controls()
-        self._schedule_motor_pos_poll()
+        self._start_motor_pos_poll()
         self._log("Application prête.")
 
     # ═══════════════════════════ UI BUILD ═══════════════════════════
@@ -852,28 +858,41 @@ class MainApp(tk.Tk):
             raise ConexError(f"Axe {axis_name} non connecté")
         return axis
 
-    def _update_motor_position_labels(self):
-        def fmt(name: str, axis):
-            if axis is None or not axis.connected:
-                return f"{name}: -"
-            snap = axis.snapshot()
-            if snap.position is not None:
-                return f"{name}: {snap.position:.4f} mm"
-            if snap.issue:
-                return f"{name}: {snap.issue}"
+    def _format_motor_position_label(self, name: str, axis):
+        if axis is None or not axis.connected:
             return f"{name}: -"
+        snap = axis.snapshot()
+        if snap.position is not None:
+            return f"{name}: {snap.position:.4f} mm"
+        if snap.issue:
+            return f"{name}: {snap.issue}"
+        return f"{name}: -"
 
-        self.motor_pos_x_var.set(fmt("X", self.axis_x))
-        self.motor_pos_y_var.set(fmt("Y", self.axis_y))
+    def _apply_motor_position_labels(self, x_text: str, y_text: str):
+        if self._last_motor_pos_x_text != x_text:
+            self.motor_pos_x_var.set(x_text)
+            self._last_motor_pos_x_text = x_text
+        if self._last_motor_pos_y_text != y_text:
+            self.motor_pos_y_var.set(y_text)
+            self._last_motor_pos_y_text = y_text
 
-    def _schedule_motor_pos_poll(self):
-        if self._motor_pos_job is None:
-            self._motor_pos_loop()
+    def _start_motor_pos_poll(self):
+        if self._motor_pos_thread is not None and self._motor_pos_thread.is_alive():
+            return
+        self._motor_pos_stop_event.clear()
+        self._motor_pos_thread = threading.Thread(target=self._motor_pos_loop, daemon=True)
+        self._motor_pos_thread.start()
 
     def _motor_pos_loop(self):
-        self._motor_pos_job = None
-        self._update_motor_position_labels()
-        self._motor_pos_job = self.after(self._motor_pos_poll_ms, self._motor_pos_loop)
+        while not self._motor_pos_stop_event.is_set():
+            x_text = self._format_motor_position_label("X", self.axis_x)
+            y_text = self._format_motor_position_label("Y", self.axis_y)
+            try:
+                self.after(0, lambda x=x_text, y=y_text: self._apply_motor_position_labels(x, y))
+            except Exception:
+                return
+            if self._motor_pos_stop_event.wait(self._motor_pos_poll_ms / 1000.0):
+                return
 
     # ═══════════════════════ MOTOR METHODS ═══════════════════════
 
@@ -1623,7 +1642,7 @@ class MainApp(tk.Tk):
             self.camera.image_poll_timeout_ms = 0
             self.camera.arm(2)
             self.camera.issue_software_trigger()
-            self.image_queue = queue.Queue(maxsize=2)
+            self.image_queue = queue.Queue(maxsize=1)
             self.stream_thread = CameraStreamThread(
                 camera=self.camera,
                 image_queue=self.image_queue,
@@ -1654,6 +1673,9 @@ class MainApp(tk.Tk):
         if self._preview_job is not None:
             self.after_cancel(self._preview_job)
             self._preview_job = None
+        if self._preview_resize_job is not None:
+            self.after_cancel(self._preview_resize_job)
+            self._preview_resize_job = None
         try:
             if self.camera is not None:
                 self.camera.disarm()
@@ -1676,9 +1698,11 @@ class MainApp(tk.Tk):
 
     def _update_laser_label(self):
         if not self.laser_initialized:
-            self.laser_coord_var.set("Point : X=– Y=–")
-            return
-        self.laser_coord_var.set(f"Point : X={self.laser_x} Y={self.laser_y}")
+            text = "Point : X=- Y=-"
+        else:
+            text = f"Point : X={self.laser_x} Y={self.laser_y}"
+        if self.laser_coord_var.get() != text:
+            self.laser_coord_var.set(text)
 
     def _clamp_laser_to_frame(self):
         if self._last_frame_width <= 0 or self._last_frame_height <= 0:
@@ -1965,12 +1989,12 @@ class MainApp(tk.Tk):
             self._render_preview(self._last_image)
         return "break"
 
-    def _apply_digital_zoom(self, image: Image.Image) -> Image.Image:
+    def _get_zoom_crop_box(self, image: Image.Image):
         w, h = image.size
         if w <= 1 or h <= 1:
             self._preview_source_x0 = 0
             self._preview_source_y0 = 0
-            return image
+            return 0, 0, w, h
 
         zoom = max(self._zoom_min, min(self._zoom_max, float(self._zoom_factor)))
         if zoom <= 1.0001:
@@ -1978,7 +2002,7 @@ class MainApp(tk.Tk):
             self.zoom_var.set("Zoom : 1.00x")
             self._preview_source_x0 = 0
             self._preview_source_y0 = 0
-            return image
+            return 0, 0, w, h
 
         crop_w = max(int(round(w / zoom)), 1)
         crop_h = max(int(round(h / zoom)), 1)
@@ -1995,10 +2019,61 @@ class MainApp(tk.Tk):
 
         self._preview_source_x0 = x0
         self._preview_source_y0 = y0
-        return image.crop((x0, y0, x1, y1))
+        return x0, y0, x1, y1
 
+    def _fit_size_to_preview(self, width: int, height: int) -> tuple[int, int]:
+        tw = max(self.preview_label.winfo_width(), 1)
+        th = max(self.preview_label.winfo_height(), 1)
+        sw, sh = int(width), int(height)
+        if sw <= 0 or sh <= 0:
+            return sw, sh
+        scale = min(tw / sw, th / sh)
+        if scale <= 0:
+            return sw, sh
+        nw = max(int(sw * scale), 1)
+        nh = max(int(sh * scale), 1)
+        return nw, nh
 
+    @staticmethod
+    def _preview_resample_filter():
+        try:
+            return Image.Resampling.BILINEAR
+        except AttributeError:
+            return Image.BILINEAR
 
+    def _draw_laser_overlay_on_preview(
+        self,
+        image: Image.Image,
+        source_x0: int,
+        source_y0: int,
+        source_w: int,
+        source_h: int,
+    ) -> Image.Image:
+        self._init_laser_if_needed()
+        if not self.laser_initialized:
+            return image
+        try:
+            radius = int(float(self.laser_size_var.get()))
+        except ValueError:
+            radius = 6
+        radius = max(radius, 1)
+        self._clamp_laser_to_frame()
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        draw = ImageDraw.Draw(image)
+        disp_w, disp_h = image.size
+        scale_x = source_w / disp_w if disp_w > 0 else 1.0
+        scale_y = source_h / disp_h if disp_h > 0 else 1.0
+        x = int(round((self.laser_x - source_x0) / scale_x)) if scale_x > 0 else 0
+        y = int(round((self.laser_y - source_y0) / scale_y)) if scale_y > 0 else 0
+        avg_scale = max((scale_x + scale_y) * 0.5, 1e-6)
+        disp_radius = max(int(round(radius / avg_scale)), 1)
+        draw.ellipse((x - disp_radius, y - disp_radius, x + disp_radius, y + disp_radius), outline=(255, 0, 0), width=2)
+        cross = max(4, min(10, disp_radius // 2))
+        draw.line((x - cross, y, x + cross, y), fill=(255, 255, 255), width=1)
+        draw.line((x, y - cross, x, y + cross), fill=(255, 255, 255), width=1)
+        draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=(255, 255, 255), outline=(255, 0, 0), width=1)
+        return image
 
     # ═══════════════════════ PREVIEW ═══════════════════════
 
@@ -2006,42 +2081,49 @@ class MainApp(tk.Tk):
         if self._preview_job is None:
             self._preview_loop()
 
-    def _fit_image_to_preview(self, image: Image.Image) -> Image.Image:
-        tw = max(self.preview_label.winfo_width(), 1)
-        th = max(self.preview_label.winfo_height(), 1)
-        sw, sh = image.size
-        if sw <= 0 or sh <= 0:
-            return image
-        scale = min(tw / sw, th / sh)
-        if scale <= 0:
-            return image
-        nw = max(int(sw * scale), 1)
-        nh = max(int(sh * scale), 1)
-        if nw == sw and nh == sh:
-            return image
-        try:
-            resample = Image.Resampling.LANCZOS
-        except AttributeError:
-            resample = Image.LANCZOS
-        return image.resize((nw, nh), resample)
-
     def _render_preview(self, image: Image.Image):
-        display_full = self._draw_laser_overlay(image.copy())
-        display = self._apply_digital_zoom(display_full)
-        fitted = self._fit_image_to_preview(display)
+        x0, y0, x1, y1 = self._get_zoom_crop_box(image)
+        source_w = max(x1 - x0, 1)
+        source_h = max(y1 - y0, 1)
+        if x0 == 0 and y0 == 0 and x1 == image.size[0] and y1 == image.size[1]:
+            cropped = image
+        else:
+            cropped = image.crop((x0, y0, x1, y1))
+        fw, fh = self._fit_size_to_preview(source_w, source_h)
+        if fw <= 0 or fh <= 0:
+            return
+        if cropped.size != (fw, fh):
+            fitted = cropped.resize((fw, fh), self._preview_resample_filter())
+        else:
+            fitted = cropped.copy()
+        fitted = self._draw_laser_overlay_on_preview(fitted, x0, y0, source_w, source_h)
         tw = max(self.preview_label.winfo_width(), 1)
         th = max(self.preview_label.winfo_height(), 1)
-        fw, fh = fitted.size
         self._preview_draw_w = fw
         self._preview_draw_h = fh
         self._preview_offset_x = max((tw - fw) // 2, 0)
         self._preview_offset_y = max((th - fh) // 2, 0)
-        self._preview_scale_x = (display.size[0] / fw) if fw > 0 else 1.0
-        self._preview_scale_y = (display.size[1] / fh) if fh > 0 else 1.0
-        self.preview_photo = ImageTk.PhotoImage(image=fitted)
-        self.preview_label.configure(image=self.preview_photo, text="")
+        self._preview_scale_x = (source_w / fw) if fw > 0 else 1.0
+        self._preview_scale_y = (source_h / fh) if fh > 0 else 1.0
+        if self.preview_photo is not None and self._preview_photo_size == (fw, fh):
+            try:
+                self.preview_photo.paste(fitted)
+            except Exception:
+                self.preview_photo = ImageTk.PhotoImage(image=fitted)
+                self._preview_photo_size = (fw, fh)
+                self.preview_label.configure(image=self.preview_photo, text="")
+        else:
+            self.preview_photo = ImageTk.PhotoImage(image=fitted)
+            self._preview_photo_size = (fw, fh)
+            self.preview_label.configure(image=self.preview_photo, text="")
 
     def _on_preview_resize(self, _event):
+        if self._preview_resize_job is not None:
+            self.after_cancel(self._preview_resize_job)
+        self._preview_resize_job = self.after(PREVIEW_RESIZE_DEBOUNCE_MS, self._flush_preview_resize)
+
+    def _flush_preview_resize(self):
+        self._preview_resize_job = None
         if self._last_image is not None:
             self._render_preview(self._last_image)
 
@@ -2049,8 +2131,13 @@ class MainApp(tk.Tk):
         self._preview_job = None
         if self.stream_thread is None:
             return
-        try:
-            image = self.image_queue.get_nowait()
+        image = None
+        while True:
+            try:
+                image = self.image_queue.get_nowait()
+            except queue.Empty:
+                break
+        if image is not None:
             self._last_image = image
             self._last_frame_width, self._last_frame_height = image.size
             self._init_laser_if_needed()
@@ -2063,8 +2150,6 @@ class MainApp(tk.Tk):
                 self.fps_var.set(f"FPS : {fps:.1f}")
                 self._frame_counter = 0
                 self._fps_t0 = time.monotonic()
-        except queue.Empty:
-            pass
         self._preview_job = self.after(PREVIEW_POLL_MS, self._preview_loop)
 
     # ═══════════════════════ CLEANUP ═══════════════════════
@@ -2077,9 +2162,16 @@ class MainApp(tk.Tk):
                 self.sdk = None
 
     def _on_close(self):
-        if self._motor_pos_job is not None:
-            self.after_cancel(self._motor_pos_job)
-            self._motor_pos_job = None
+        self._motor_pos_stop_event.set()
+        if self._motor_pos_thread is not None:
+            self._motor_pos_thread.join(timeout=1.0)
+            self._motor_pos_thread = None
+        if self._preview_job is not None:
+            self.after_cancel(self._preview_job)
+            self._preview_job = None
+        if self._preview_resize_job is not None:
+            self.after_cancel(self._preview_resize_job)
+            self._preview_resize_job = None
         try:
             self.on_disconnect_camera()
             self._disconnect_motors_impl(silent=True)

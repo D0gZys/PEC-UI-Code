@@ -265,7 +265,14 @@ Notes:
 
 - le point rouge reste fixe à l'écran (référence laser)
 - c'est l'échantillon qui se déplace via la platine
-- la précision dépend de l'étalonnage optique réel et du jeu mécanique
+- la précision dépend de l'étalonnage optique réel et du comportement mécanique de la platine
+- le `GoTo` utilise une vitesse dédiée `Vit. GoTo (mm/s)` pour améliorer la précision des petits déplacements
+- quatre corrections directionnelles sont disponibles en millimètres:
+- `Corr X+ (mm)` pour les mouvements finaux en `X positif`
+- `Corr X- (mm)` pour les mouvements finaux en `X negatif`
+- `Corr Y+ (mm)` pour les mouvements finaux en `Y positif`
+- `Corr Y- (mm)` pour les mouvements finaux en `Y negatif`
+- ces corrections sont utiles quand l'erreur n'est pas symétrique entre gauche/droite/haut/bas
 
 ### 5) Zoom numérique image
 
@@ -312,13 +319,32 @@ Exécution sur thread dédié avec arrêt propre via bouton `Stop`.
 
 Fichier: `MainUI/laser_presets.json`
 
-Contient, pour chaque objectif:
+Le fichier contient deux blocs principaux:
 
-- `x`, `y` (position du centre laser en pixels)
-- `size` (rayon du cercle)
-- `mm_per_px_x`, `mm_per_px_y`
+- `objective_presets`
+- `goto_settings`
 
-Mise à jour automatique lors des changements de position/taille et des actions GoTo.
+### `objective_presets`
+
+Pour chaque objectif (`4x`, `10x`, `50x`):
+
+- `x`, `y`: position du centre laser en pixels
+- `size`: rayon du cercle rouge
+- `mm_per_px_x`, `mm_per_px_y`: conversion image -> deplacement mecanique
+
+Ces valeurs sont mises a jour automatiquement quand on deplace ou redimensionne le marqueur laser.
+
+### `goto_settings`
+
+Reglages globaux du `GoTo`:
+
+- `goto_velocity_mm_s`: vitesse dediee aux deplacements `GoTo`
+- `corr_xp_mm`: correction appliquee si le deplacement final est en `X+`
+- `corr_xm_mm`: correction appliquee si le deplacement final est en `X-`
+- `corr_yp_mm`: correction appliquee si le deplacement final est en `Y+`
+- `corr_ym_mm`: correction appliquee si le deplacement final est en `Y-`
+
+Ces corrections sont exprimees en millimetres, car elles compensent un comportement mecanique de la platine et non un simple decalage d'affichage.
 
 Exemple:
 
@@ -331,7 +357,21 @@ Exemple:
       "size": 19,
       "mm_per_px_x": 0.0008625,
       "mm_per_px_y": 0.0008625
+    },
+    "10x": {
+      "x": 2624,
+      "y": 1294,
+      "size": 20,
+      "mm_per_px_x": 0.000345,
+      "mm_per_px_y": 0.000345
     }
+  },
+  "goto_settings": {
+    "goto_velocity_mm_s": 0.1,
+    "corr_xp_mm": -0.01,
+    "corr_xm_mm": 0.01,
+    "corr_yp_mm": -0.02,
+    "corr_ym_mm": 0.0
   }
 }
 ```
@@ -411,12 +451,14 @@ python -m pip install "Camera/SDK/Python Toolkit/thorlabs_tsi_camera_python_sdk_
 - vérifier adresse (default `1`)
 - tester d'abord `newport_conex_test_ui.py`
 
-### GoTo légèrement décalé
+### GoTo legerement decale
 
-- vérifier objectif actif (`4x/10x/50x`)
-- vérifier sens `Inv X` / `Inv Y`
-- réduire la taille visuelle du cercle pour mieux juger le centre
-- tenir compte des jeux mécaniques (backlash) et de l'optique intermédiaire éventuelle
+- verifier l'objectif actif (`4x/10x/50x`)
+- verifier les sens `Inv X` / `Inv Y`
+- reduire `Vit. GoTo (mm/s)` si la cible est depassee sur les petits deplacements
+- ajuster `Corr X+`, `Corr X-`, `Corr Y+`, `Corr Y-` si l'erreur depend du sens d'approche
+- garder en tete que ces corrections sont mecaniques, donc a regler en millimetres et non en pixels
+- utiliser la mire centrale et le curseur en croix pour juger le centre reel au clic
 
 ### Erreur Tkinter liée au focus (`popdown`)
 
@@ -466,3 +508,4 @@ git merge --no-ff codex/travail-mainui
 - Script principal à utiliser au quotidien: `MainUI/main_ui.py`
 - Fichier de configuration laser/objectifs: `MainUI/laser_presets.json`
 - Si vous voulez documenter uniquement la partie potentiostat, voir `MainUI/README_Potentiostat.md`
+
