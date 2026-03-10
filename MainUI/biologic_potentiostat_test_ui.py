@@ -273,9 +273,13 @@ class BiologicPotentiostatTestApp(tk.Tk):
 
     @staticmethod
     def _default_dll_path() -> str:
-        base = Path(r"C:\EC-Lab Development Package\lib")
-        if base.exists():
-            return str(base)
+        candidates = [
+            Path(__file__).resolve().parent.parent / "Potentiostat" / "lib",
+            Path(r"C:\EC-Lab Development Package\lib"),
+        ]
+        for base in candidates:
+            if base.exists():
+                return str(base)
         return ""
 
     # -----------------------------------------------------------------------

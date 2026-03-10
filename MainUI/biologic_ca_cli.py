@@ -71,8 +71,19 @@ CA_PARMS = {
 }
 
 # Valeurs par défaut identiques à l'interface graphique
+def _default_eclib_dir() -> str:
+    candidates = [
+        _PROJECT_ROOT / "Potentiostat" / "lib",
+        Path(r"C:\EC-Lab Development Package\lib"),
+    ]
+    for p in candidates:
+        if p.exists():
+            return str(p)
+    return r"C:\EC-Lab Development Package\lib"
+
+
 DEFAULTS = {
-    "dll_dir":      r"C:\EC-Lab Development Package\lib",
+    "dll_dir":      _default_eclib_dir(),
     "ip":           "169.254.3.150",
     "channel":      1,
     "voltage":      0.500,       # V

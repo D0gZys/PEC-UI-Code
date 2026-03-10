@@ -12,7 +12,10 @@ except ModuleNotFoundError:
     clr = None
 
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 DEFAULT_DLL_CANDIDATES = [
+    str(_PROJECT_ROOT / "MotorController" / "lib" / "Newport.CONEXCC.CommandInterface.dll"),
     r"C:\Windows\Microsoft.NET\assembly\GAC_64\Newport.CONEXCC.CommandInterface\v4.0_2.0.0.3__aab368c79b10b8be\Newport.CONEXCC.CommandInterface.dll",
     r"C:\Newport\Motion Control\CONEX-CC\Bin\64-bit\Newport.CONEXCC.CommandInterface.dll",
     r"C:\Newport\Motion Control\CONEX-CC\Bin\Newport.CONEXCC.CommandInterface.dll",
