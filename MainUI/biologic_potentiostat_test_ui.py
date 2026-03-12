@@ -274,13 +274,34 @@ class BiologicPotentiostatTestApp(tk.Tk):
     @staticmethod
     def _default_dll_path() -> str:
         candidates = [
-            Path(__file__).resolve().parent.parent / "Potentiostat" / "lib",
             Path(r"C:\EC-Lab Development Package\lib"),
+            Path(__file__).resolve().parent.parent / "Potentiostat" / "lib",
         ]
         for base in candidates:
             if base.exists():
                 return str(base)
         return ""
+
+    @staticmethod
+    def _resolve_resource_path(filename: str, dll_dir: str | None = None) -> str:
+        if not filename:
+            return ""
+        path = Path(filename)
+        if path.is_file():
+            return str(path)
+        candidates: list[Path] = []
+        if dll_dir:
+            candidates.append(Path(dll_dir))
+        for base in (Path(r"C:\EC-Lab Development Package\lib"), Path(__file__).resolve().parent.parent / "Potentiostat" / "lib"):
+            if base not in candidates:
+                candidates.append(base)
+        for base in candidates:
+            candidate = base / filename
+            if candidate.is_file():
+                return str(candidate)
+        if dll_dir:
+            return str(Path(dll_dir) / filename)
+        return filename
 
     # -----------------------------------------------------------------------
     # UI construction
@@ -655,9 +676,12 @@ class BiologicPotentiostatTestApp(tk.Tk):
                 case _:
                     raise RuntimeError(f"Type de carte inconnu ({bt}).")
 
-            self._log(f"Chargement firmware {fw} sur canal {ch}…")
+            dll_dir = self.dll_path_var.get().strip()
+            fw_path = self._resolve_resource_path(fw, dll_dir)
+            fpga_path = self._resolve_resource_path(fpga, dll_dir) if fpga else ""
+            self._log(f"Chargement firmware {fw_path} sur canal {ch}...")
             ch_map = self.api.channel_map({ch})
-            self.api.LoadFirmware(self.connection_id, ch_map, firmware=fw, fpga=fpga, force=True)
+            self.api.LoadFirmware(self.connection_id, ch_map, firmware=fw_path, fpga=fpga_path, force=True)
             self._log("Firmware chargé avec succès.")
 
             ch_info = self.api.GetChannelInfo(self.connection_id, ch)
@@ -742,7 +766,7 @@ class BiologicPotentiostatTestApp(tk.Tk):
     def _load_and_start_ca(self, steps, record_dt, n_cycles, i_range_val, e_range_val, bw_val):
         """Load a CA technique and start the channel. Returns the channel number."""
         ch = self.channel_var.get()
-        tech_file = self._select_tech_file()
+        tech_file = self._resolve_resource_path(self._select_tech_file(), self.dll_path_var.get().strip())
         self._log_safe(f"Technique : {tech_file}")
 
         ecc_parms = self._build_ecc_params(steps, record_dt, n_cycles, i_range_val, e_range_val, bw_val)
