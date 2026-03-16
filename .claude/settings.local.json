@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake --build LaserBenchC++/build --config Debug)",
+      "Bash(cmake --build \"c:/Users/thoma/Documents/Stage/Programme/LaserBenchC++/build\" --config Debug)",
+      "Bash(grep -E \"error C|error LNK|\\\\.exe$|FAILED\")"
+    ]
+  }
+}

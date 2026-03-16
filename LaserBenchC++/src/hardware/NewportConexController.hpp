@@ -29,6 +29,12 @@ QString axisIdLabel(AxisId axis);
 QString conexStateLabel(const QString& code);
 QString formatAxisState(const MotorAxisSnapshot& snapshot);
 
+struct BothAxesSnapshot
+{
+    MotorAxisSnapshot x {AxisId::X};
+    MotorAxisSnapshot y {AxisId::Y};
+};
+
 class NewportConexController final
 {
 public:
@@ -42,11 +48,13 @@ public:
     void homeAll(int timeoutMs = 90000);
     void setVelocity(AxisId axis, double speedMmPerS);
     void moveAbsoluteNoWait(AxisId axis, double positionMm);
+    void waitAxis(AxisId axis, int timeoutMs = 30000);
     void stopAxis(AxisId axis);
     void moveRelative(AxisId axis, double deltaMm, int timeoutMs = 30000);
     void moveAbsolute(AxisId axis, double positionMm, int timeoutMs = 30000);
 
     MotorAxisSnapshot snapshot(AxisId axis) const;
+    BothAxesSnapshot snapshotBoth() const;
     bool anyAxisConnected() const;
 
 private:

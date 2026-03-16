@@ -428,6 +428,22 @@ void NewportConexController::moveAbsoluteNoWait(AxisId axis, double positionMm)
     }
 }
 
+void NewportConexController::waitAxis(AxisId axis, int timeoutMs)
+{
+    if (timeoutMs <= 0) {
+        throwError(QString("Timeout for axis %1 must be > 0 ms").arg(axisIdLabel(axis)));
+    }
+
+    const QJsonObject response = impl_->sendCommand(QJsonObject {
+        {"cmd", "waitAxis"},
+        {"axis", axisIdToProtocol(axis)},
+        {"timeoutMs", timeoutMs}
+    });
+    if (!responseIsOk(response)) {
+        throwError(responseMessage(response));
+    }
+}
+
 void NewportConexController::stopAxis(AxisId axis)
 {
     const QJsonObject response = impl_->sendCommand(QJsonObject {
@@ -528,6 +544,41 @@ MotorAxisSnapshot NewportConexController::snapshot(AxisId axis) const
     snapshot.stateCode = axisObject.value("stateCode").toString();
     snapshot.issue = axisObject.value("issue").toString();
     return snapshot;
+}
+
+static MotorAxisSnapshot parseAxisObject(const QJsonObject& obj, AxisId axis)
+{
+    MotorAxisSnapshot s;
+    s.axis = axis;
+    s.connected = obj.value("connected").toBool(false);
+    s.port = obj.value("port").toString();
+    s.positionValid = obj.contains("position") && obj.value("position").isDouble();
+    s.positionMm = obj.value("position").toDouble();
+    s.errorCode = obj.value("errorCode").toString();
+    s.stateCode = obj.value("stateCode").toString();
+    s.issue = obj.value("issue").toString();
+    return s;
+}
+
+BothAxesSnapshot NewportConexController::snapshotBoth() const
+{
+    BothAxesSnapshot result;
+
+    if (!impl_->isRunning() && !impl_->connected) {
+        return result;
+    }
+
+    const QJsonObject response = impl_->sendCommand(QJsonObject {{"cmd", "snapshot"}});
+    if (!responseIsOk(response)) {
+        const QString issue = responseMessage(response);
+        result.x.issue = issue;
+        result.y.issue = issue;
+        return result;
+    }
+
+    result.x = parseAxisObject(response.value("x").toObject(), AxisId::X);
+    result.y = parseAxisObject(response.value("y").toObject(), AxisId::Y);
+    return result;
 }
 
 bool NewportConexController::anyAxisConnected() const

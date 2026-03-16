@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #include "hardware/DeviceContracts.hpp"
 
@@ -68,7 +69,7 @@ private:
     bool dllInitialized_ {false};
     bool sdkOpen_ {false};
     bool monoToColorSdkOpen_ {false};
-    bool live_ {false};
+    std::atomic<bool> live_ {false};
     int imageWidth_ {0};
     int imageHeight_ {0};
     int lastFrameCount_ {-1};
@@ -78,6 +79,7 @@ private:
     double exposureUs_ {10000.0};
     double gainDb_ {0.0};
     std::array<QImage, 2> frameBuffers_;
+    std::vector<unsigned short> acquisitionRawBuffer_;
     int activeFrameBufferIndex_ {0};
 
     std::uint64_t publishedFrameSerial_ {0};

@@ -1,0 +1,4 @@
+dessiner la zone de mesure a la main et pas en attribuant les position avec les moteurs
+
+Essayer de faire des plots en 3D --> bien pour les publication
+

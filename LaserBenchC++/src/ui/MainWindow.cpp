@@ -2,6 +2,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDialog>
@@ -41,6 +42,12 @@
 namespace laserbench::ui {
 
 namespace {
+
+constexpr double kCameraPixelPitchUm = 3.45;
+constexpr double kDefaultGotoMmPerPx = 0.001;
+constexpr int kDefaultMotorTimeoutMs = 30000;
+constexpr double kOverlayPredictionEpsilonMm = 0.002;
+constexpr double kOverlayStabilityDeadbandMm = 0.00075;
 
 QGroupBox* createGroupBox(const QString& title)
 {
@@ -107,18 +114,43 @@ QString axisConnectionSummary(const hardware::MotorAxisSnapshot& xSnapshot, cons
         .arg(ySnapshot.connected ? snapshotPositionText(ySnapshot) : QString("off"));
 }
 
+int motionDirection(double deltaMm)
+{
+    if (deltaMm > kOverlayPredictionEpsilonMm) {
+        return 1;
+    }
+    if (deltaMm < -kOverlayPredictionEpsilonMm) {
+        return -1;
+    }
+    return 0;
+}
+
+bool axisStateLooksMoving(const QString& stateCode)
+{
+    const QString upper = stateCode.trimmed().toUpper();
+    return upper == "1E"
+        || upper == "1F"
+        || upper == "28"
+        || upper == "29"
+        || upper == "2A"
+        || upper == "2B"
+        || upper == "46"
+        || upper == "47";
+}
+
 struct ObjectivePreset
 {
     const char* name;
+    double magnification;
     int laserX;
     int laserY;
     int laserRadiusPx;
 };
 
 constexpr std::array<ObjectivePreset, 3> kObjectivePresets {{
-    {"4x", 2588, 1350, 32},
-    {"10x", 2588, 1350, 32},
-    {"50x", 2588, 1350, 32},
+    {"4x", 4.0, 2588, 1350, 32},
+    {"10x", 10.0, 2588, 1350, 32},
+    {"50x", 50.0, 2588, 1350, 32},
 }};
 
 const ObjectivePreset* findObjectivePreset(const QString& name)
@@ -252,13 +284,14 @@ MainWindow::MainWindow(QWidget* parent)
     qApp->installEventFilter(this);
 
     motorPollTimer_ = new QTimer(this);
-    motorPollTimer_->setInterval(100);
+    motorPollTimer_->setTimerType(Qt::CoarseTimer);
+    motorPollTimer_->setInterval(33);
     connect(motorPollTimer_, &QTimer::timeout, this, &MainWindow::refreshSummaries);
     motorPollTimer_->start();
 
     cameraPollTimer_ = new QTimer(this);
-    cameraPollTimer_->setTimerType(Qt::PreciseTimer);
-    cameraPollTimer_->setInterval(16);
+    cameraPollTimer_->setTimerType(Qt::CoarseTimer);
+    cameraPollTimer_->setInterval(33);
     connect(cameraPollTimer_, &QTimer::timeout, this, &MainWindow::refreshCameraUi);
 
     appendLog("Interface moteurs Qt6 initialisee.");
@@ -268,6 +301,10 @@ MainWindow::MainWindow(QWidget* parent)
 
 MainWindow::~MainWindow()
 {
+    sequenceStopRequested_.store(true);
+    if (sequenceThread_.joinable()) {
+        sequenceThread_.join();
+    }
     if (motorPollTimer_ != nullptr) {
         motorPollTimer_->stop();
     }
@@ -285,7 +322,7 @@ MainWindow::~MainWindow()
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
-    if (motorTaskRunning_) {
+    if (motorTaskRunning_ || sequenceRunning_) {
         QMessageBox::warning(this, "LaserBench", "Une operation moteur est en cours. Attendre la fin avant de fermer.");
         event->ignore();
         return;
@@ -397,9 +434,17 @@ void MainWindow::buildMenus()
     auto* cameraDiscoverAction = cameraMenu->addAction("Chercher les cameras");
     auto* cameraConnectAction = cameraMenu->addAction("Connecter la camera");
     auto* cameraDisconnectAction = cameraMenu->addAction("Deconnecter la camera");
+    cameraMenu->addSeparator();
+    auto* cameraStartLiveAction = cameraMenu->addAction("Live");
+    auto* cameraStopLiveAction = cameraMenu->addAction("Stop");
+    cameraMenu->addSeparator();
+    auto* cameraSettingsAction = cameraMenu->addAction("Parametres...");
     connect(cameraConnectionAction, &QAction::triggered, this, &MainWindow::openCameraConnectionDialog);
     connect(cameraDiscoverAction, &QAction::triggered, this, &MainWindow::openCameraConnectionDialog);
     connect(cameraConnectAction, &QAction::triggered, this, &MainWindow::openCameraConnectionDialog);
+    connect(cameraStartLiveAction, &QAction::triggered, this, &MainWindow::startCameraLive);
+    connect(cameraStopLiveAction, &QAction::triggered, this, &MainWindow::stopCameraLive);
+    connect(cameraSettingsAction, &QAction::triggered, this, &MainWindow::openCameraSettingsDialog);
     connect(cameraDisconnectAction, &QAction::triggered, this, [this]() {
         try {
             stopCameraLive();
@@ -413,7 +458,9 @@ void MainWindow::buildMenus()
     });
 
     auto* helpMenu = menuBar()->addMenu("&Aide");
+    auto* calibrationAction = helpMenu->addAction("Calibrage");
     auto* aboutAction = helpMenu->addAction("A propos");
+    connect(calibrationAction, &QAction::triggered, this, &MainWindow::openCalibrationDialog);
     connect(aboutAction, &QAction::triggered, this, [this]() {
         QMessageBox::about(
             this,
@@ -485,50 +532,25 @@ QWidget* MainWindow::buildSetupTab()
     jogStepEdit_ = new QLineEdit("0.500");
     motorsLayout->addWidget(new QLabel("Vitesse jog (mm/s)"), 0, 0);
     motorsLayout->addWidget(jogStepEdit_, 0, 1);
-    auto* keyboardHint = new QLabel("Fleches clavier maintenues: gauche/droite = X, haut/bas = Y");
-    keyboardHint->setStyleSheet("color:#5c6570; font-size:9pt;");
-    motorsLayout->addWidget(keyboardHint, 0, 2, 1, 2);
-
-    motorsLayout->addWidget(new QLabel("Moteur X"), 1, 0);
-    motorsLayout->addWidget(new QLabel("Position live"), 1, 1);
+    motorsLayout->addWidget(new QLabel("Position X"), 1, 0);
     xPositionValueLabel_ = new QLabel("-");
     xPositionValueLabel_->setStyleSheet("font-size:18px; font-weight:600; color:#111927;");
-    motorsLayout->addWidget(xPositionValueLabel_, 1, 2, 1, 2);
-
-    motorsLayout->addWidget(new QLabel("Absolu X (mm)"), 2, 0);
-    auto* absXWrap = new QWidget;
-    auto* absXLayout = new QHBoxLayout(absXWrap);
-    absXLayout->setContentsMargins(0, 0, 0, 0);
-    absXLayout->setSpacing(6);
-    absXEdit_ = new QLineEdit("0.000");
-    moveAbsXButton_ = createActionButton("Aller X");
-    absXLayout->addWidget(absXEdit_, 1);
-    absXLayout->addWidget(moveAbsXButton_);
-    motorsLayout->addWidget(absXWrap, 2, 1, 1, 3);
-
-    motorsLayout->addWidget(new QLabel("Moteur Y"), 3, 0);
-    motorsLayout->addWidget(new QLabel("Position live"), 3, 1);
+    motorsLayout->addWidget(xPositionValueLabel_, 1, 1);
+    motorsLayout->addWidget(new QLabel("Position Y"), 1, 2);
     yPositionValueLabel_ = new QLabel("-");
     yPositionValueLabel_->setStyleSheet("font-size:18px; font-weight:600; color:#111927;");
-    motorsLayout->addWidget(yPositionValueLabel_, 3, 2, 1, 2);
+    motorsLayout->addWidget(yPositionValueLabel_, 1, 3);
 
-    motorsLayout->addWidget(new QLabel("Absolu Y (mm)"), 4, 0);
-    auto* absYWrap = new QWidget;
-    auto* absYLayout = new QHBoxLayout(absYWrap);
-    absYLayout->setContentsMargins(0, 0, 0, 0);
-    absYLayout->setSpacing(6);
+    motorsLayout->addWidget(new QLabel("Absolu X (mm)"), 2, 0);
+    absXEdit_ = new QLineEdit("0.000");
+    motorsLayout->addWidget(absXEdit_, 2, 1);
+    motorsLayout->addWidget(new QLabel("Absolu Y (mm)"), 2, 2);
     absYEdit_ = new QLineEdit("0.000");
-    moveAbsYButton_ = createActionButton("Aller Y");
-    absYLayout->addWidget(absYEdit_, 1);
-    absYLayout->addWidget(moveAbsYButton_);
-    motorsLayout->addWidget(absYWrap, 4, 1, 1, 3);
+    motorsLayout->addWidget(absYEdit_, 2, 3);
+    moveAbsXYButton_ = createActionButton("Aller XY");
+    motorsLayout->addWidget(moveAbsXYButton_, 3, 0, 1, 4);
 
-    auto* rangeLabel = new QLabel("Plage logicielle actuelle: 0.0 mm a 25.0 mm.");
-    rangeLabel->setStyleSheet("color:#5c6570; font-size:9pt;");
-    motorsLayout->addWidget(rangeLabel, 5, 0, 1, 4);
-
-    connect(moveAbsXButton_, &QPushButton::clicked, this, [this]() { onMoveAbsolute(hardware::AxisId::X); });
-    connect(moveAbsYButton_, &QPushButton::clicked, this, [this]() { onMoveAbsolute(hardware::AxisId::Y); });
+    connect(moveAbsXYButton_, &QPushButton::clicked, this, &MainWindow::onMoveAbsoluteBoth);
 
     leftLayout->addWidget(motorsBox);
 
@@ -540,46 +562,81 @@ QWidget* MainWindow::buildSetupTab()
         objectiveCombo_->addItem(QLatin1String(preset.name));
     }
     objectiveCombo_->setCurrentText("4x");
+    auto* applyObjectiveButton = createActionButton("Appliquer");
     laserLayout->addWidget(objectiveCombo_, 0, 1);
+    laserLayout->addWidget(applyObjectiveButton, 0, 2, 1, 2);
 
-    laserLayout->addWidget(new QLabel("Point laser"), 1, 0);
-    laserPointLabel_ = new QLabel("-");
-    laserPointLabel_->setStyleSheet("font-weight:600; color:#111927;");
-    laserLayout->addWidget(laserPointLabel_, 1, 1);
+    laserLayout->addWidget(new QLabel("Vit. GoTo (mm/s)"), 1, 0);
+    gotoVelocityEdit_ = new QLineEdit("0.1");
+    laserLayout->addWidget(gotoVelocityEdit_, 1, 1);
+    gotoButton_ = createActionButton("GoTo");
+    gotoButton_->setProperty("accent", true);
+    laserLayout->addWidget(gotoButton_, 1, 2, 1, 2);
+
+    gotoStatusLabel_ = new QLabel("GoTo : inactif");
+    gotoStatusLabel_->setStyleSheet("color:#1f6feb; font-size:9pt;");
+    laserLayout->addWidget(gotoStatusLabel_, 2, 0, 1, 4);
 
     connect(objectiveCombo_, &QComboBox::currentTextChanged, this, [this](const QString&) {
         applyObjectivePreset();
     });
+    connect(applyObjectiveButton, &QPushButton::clicked, this, &MainWindow::applyObjectivePreset);
+    connect(gotoButton_, &QPushButton::clicked, this, &MainWindow::onArmGoto);
 
     leftLayout->addWidget(laserBox);
 
-    auto* cameraBox = createGroupBox("Camera");
-    auto* cameraLayout = new QGridLayout(cameraBox);
-    cameraLayout->addWidget(new QLabel("Exposure Time (us)"), 0, 0);
-    cameraExposureEdit_ = new QLineEdit(QString::number(cameraController_->exposureTimeUs(), 'f', 0));
-    cameraLayout->addWidget(cameraExposureEdit_, 0, 1);
-    cameraLayout->addWidget(new QLabel("Gain"), 1, 0);
-    cameraGainEdit_ = new QLineEdit(QString::number(cameraController_->gain(), 'f', 1));
-    cameraLayout->addWidget(cameraGainEdit_, 1, 1);
+    auto* sequenceBox = createGroupBox("Sequence balayage");
+    auto* sequenceLayout = new QGridLayout(sequenceBox);
+    sequenceLayout->addWidget(new QLabel("Mode"), 0, 0);
+    sequenceModeCombo_ = new QComboBox;
+    sequenceModeCombo_->addItems({"Lineaire", "Rectangle"});
+    sequenceLayout->addWidget(sequenceModeCombo_, 0, 1);
+    sequenceLayout->addWidget(new QLabel("Pas (mm)"), 0, 2);
+    sequenceStepMmEdit_ = new QLineEdit("0.05");
+    sequenceLayout->addWidget(sequenceStepMmEdit_, 0, 3);
 
-    applyCameraSettingsButton_ = createActionButton("Appliquer");
-    applyCameraSettingsButton_->setProperty("accent", true);
-    startCameraLiveButton_ = createActionButton("Live");
-    stopCameraLiveButton_ = createActionButton("Stop");
-    cameraZoomLabel_ = new QLabel("Zoom: 1.00x");
-    cameraZoomLabel_->setStyleSheet("font-weight:600; color:#44515d;");
+    sequenceLayout->addWidget(new QLabel("Duree/pt (s)"), 1, 0);
+    sequenceDurationEdit_ = new QLineEdit("0.5");
+    sequenceLayout->addWidget(sequenceDurationEdit_, 1, 1);
 
-    cameraLayout->addWidget(applyCameraSettingsButton_, 2, 0, 1, 2);
-    cameraLayout->addWidget(startCameraLiveButton_, 3, 0, 1, 2);
-    cameraLayout->addWidget(stopCameraLiveButton_, 4, 0, 1, 2);
-    cameraLayout->addWidget(cameraZoomLabel_, 5, 0, 1, 2);
+    sequenceSetStartButton_ = createActionButton("Set Depart");
+    sequenceSetEndButton_ = createActionButton("Set Arrivee");
+    sequenceLayout->addWidget(sequenceSetStartButton_, 2, 0, 1, 2);
+    sequenceLayout->addWidget(sequenceSetEndButton_, 2, 2, 1, 2);
 
-    connect(applyCameraSettingsButton_, &QPushButton::clicked, this, &MainWindow::applyCameraSettings);
-    connect(cameraExposureEdit_, &QLineEdit::returnPressed, this, &MainWindow::applyCameraSettings);
-    connect(cameraGainEdit_, &QLineEdit::returnPressed, this, &MainWindow::applyCameraSettings);
-    connect(startCameraLiveButton_, &QPushButton::clicked, this, &MainWindow::startCameraLive);
-    connect(stopCameraLiveButton_, &QPushButton::clicked, this, &MainWindow::stopCameraLive);
-    leftLayout->addWidget(cameraBox);
+    sequenceRunButton_ = createActionButton("Lancer");
+    sequenceRunButton_->setProperty("accent", true);
+    sequenceStopButton_ = createActionButton("Stop");
+    sequenceLayout->addWidget(sequenceRunButton_, 3, 0, 1, 2);
+    sequenceLayout->addWidget(sequenceStopButton_, 3, 2, 1, 2);
+
+    sequencePickButton_ = createActionButton("Zone image");
+    sequencePickButton_->setProperty("accent", true);
+    sequenceLayout->addWidget(sequencePickButton_, 4, 0, 1, 2);
+    auto* zoneCheckWidget = new QWidget;
+    auto* zoneCheckLayout = new QVBoxLayout(zoneCheckWidget);
+    zoneCheckLayout->setContentsMargins(0, 0, 0, 0);
+    zoneCheckLayout->setSpacing(2);
+    showZoneCheck_ = new QCheckBox("Zone visible");
+    showZoneCheck_->setChecked(true);
+    showZoneCheck_->setStyleSheet("font-size:9pt;");
+    hideWaypointsCheck_ = new QCheckBox("Masquer points");
+    hideWaypointsCheck_->setStyleSheet("font-size:9pt;");
+    zoneCheckLayout->addWidget(showZoneCheck_);
+    zoneCheckLayout->addWidget(hideWaypointsCheck_);
+    sequenceLayout->addWidget(zoneCheckWidget, 4, 2, 1, 2);
+
+    sequenceStatusLabel_ = new QLabel;
+    sequenceStatusLabel_->setStyleSheet("color:#1f6feb; font-size:9pt;");
+    sequenceLayout->addWidget(sequenceStatusLabel_, 5, 0, 1, 4);
+
+    connect(sequenceSetStartButton_, &QPushButton::clicked, this, &MainWindow::onSetSequenceStart);
+    connect(sequenceSetEndButton_, &QPushButton::clicked, this, &MainWindow::onSetSequenceEnd);
+    connect(sequenceRunButton_, &QPushButton::clicked, this, &MainWindow::onRunSequence);
+    connect(sequenceStopButton_, &QPushButton::clicked, this, &MainWindow::onStopSequence);
+    connect(sequencePickButton_, &QPushButton::clicked, this, &MainWindow::onArmSequenceRectangle);
+
+    leftLayout->addWidget(sequenceBox);
     leftLayout->addStretch();
 
     auto* rightPanel = new QWidget;
@@ -596,6 +653,8 @@ QWidget* MainWindow::buildSetupTab()
             cameraZoomLabel_->setText(QString("Zoom: %1x").arg(zoomFactor, 0, 'f', 2));
         }
     });
+    connect(cameraPreviewWidget_, &CameraPreviewWidget::frameClicked, this, &MainWindow::onPreviewFrameClicked);
+    connect(cameraPreviewWidget_, &CameraPreviewWidget::backgroundClicked, this, &MainWindow::onPreviewBackgroundClicked);
     applyObjectivePreset();
 
     splitter->addWidget(leftPanel);
@@ -753,6 +812,139 @@ void MainWindow::openCameraConnectionDialog()
     cameraConnectionDialog_->activateWindow();
 }
 
+void MainWindow::openCameraSettingsDialog()
+{
+    if (cameraSettingsDialog_ == nullptr) {
+        cameraSettingsDialog_ = new QDialog(this);
+        cameraSettingsDialog_->setWindowTitle("Parametres camera");
+        cameraSettingsDialog_->setModal(false);
+        cameraSettingsDialog_->setMinimumWidth(420);
+
+        auto* layout = new QVBoxLayout(cameraSettingsDialog_);
+        layout->setContentsMargins(18, 18, 18, 18);
+        layout->setSpacing(10);
+
+        auto* box = createGroupBox("Camera");
+        auto* grid = new QGridLayout(box);
+        grid->addWidget(new QLabel("Exposure Time (us)"), 0, 0);
+        cameraExposureEdit_ = new QLineEdit(QString::number(cameraController_->exposureTimeUs(), 'f', 0));
+        grid->addWidget(cameraExposureEdit_, 0, 1);
+        grid->addWidget(new QLabel("Gain"), 1, 0);
+        cameraGainEdit_ = new QLineEdit(QString::number(cameraController_->gain(), 'f', 1));
+        grid->addWidget(cameraGainEdit_, 1, 1);
+
+        applyCameraSettingsButton_ = createActionButton("Appliquer");
+        applyCameraSettingsButton_->setProperty("accent", true);
+        grid->addWidget(applyCameraSettingsButton_, 2, 0, 1, 2);
+        layout->addWidget(box);
+
+        connect(applyCameraSettingsButton_, &QPushButton::clicked, this, &MainWindow::applyCameraSettings);
+        connect(cameraExposureEdit_, &QLineEdit::returnPressed, this, &MainWindow::applyCameraSettings);
+        connect(cameraGainEdit_, &QLineEdit::returnPressed, this, &MainWindow::applyCameraSettings);
+    }
+
+    if (cameraExposureEdit_ != nullptr && !cameraExposureEdit_->hasFocus()) {
+        cameraExposureEdit_->setText(QString::number(cameraController_->exposureTimeUs(), 'f', 0));
+    }
+    if (cameraGainEdit_ != nullptr && !cameraGainEdit_->hasFocus()) {
+        cameraGainEdit_->setText(QString::number(cameraController_->gain(), 'f', 1));
+    }
+
+    cameraSettingsDialog_->adjustSize();
+    cameraSettingsDialog_->show();
+    cameraSettingsDialog_->raise();
+    cameraSettingsDialog_->activateWindow();
+}
+
+void MainWindow::openCalibrationDialog()
+{
+    if (calibrationDialog_ == nullptr) {
+        calibrationDialog_ = new QDialog(this);
+        calibrationDialog_->setWindowTitle("Calibrage");
+        calibrationDialog_->setModal(false);
+        calibrationDialog_->setMinimumWidth(560);
+
+        auto* layout = new QVBoxLayout(calibrationDialog_);
+        layout->setContentsMargins(18, 18, 18, 18);
+        layout->setSpacing(12);
+
+        auto* gotoBox = createGroupBox("Corrections GoTo");
+        auto* gotoLayout = new QGridLayout(gotoBox);
+
+        gotoInvertXCheck_ = new QCheckBox("Inv X");
+        gotoInvertYCheck_ = new QCheckBox("Inv Y");
+        gotoLayout->addWidget(gotoInvertXCheck_, 0, 2);
+        gotoLayout->addWidget(gotoInvertYCheck_, 0, 3);
+
+        gotoLayout->addWidget(new QLabel("Corr X+"), 1, 0);
+        gotoCorrXpEdit_ = new QLineEdit("0");
+        gotoLayout->addWidget(gotoCorrXpEdit_, 1, 1);
+        gotoLayout->addWidget(new QLabel("Corr X-"), 1, 2);
+        gotoCorrXmEdit_ = new QLineEdit("0");
+        gotoLayout->addWidget(gotoCorrXmEdit_, 1, 3);
+
+        gotoLayout->addWidget(new QLabel("Corr Y+"), 2, 0);
+        gotoCorrYpEdit_ = new QLineEdit("0");
+        gotoLayout->addWidget(gotoCorrYpEdit_, 2, 1);
+        gotoLayout->addWidget(new QLabel("Corr Y-"), 2, 2);
+        gotoCorrYmEdit_ = new QLineEdit("0");
+        gotoLayout->addWidget(gotoCorrYmEdit_, 2, 3);
+
+        auto* laserBox = createGroupBox("Cible laser");
+        auto* laserLayout = new QGridLayout(laserBox);
+        laserLayout->addWidget(new QLabel("Pas (px)"), 0, 0);
+        laserMoveStepEdit_ = new QLineEdit("10");
+        laserLayout->addWidget(laserMoveStepEdit_, 0, 1);
+
+        auto* moveXMinusButton = createActionButton("X -");
+        auto* moveXPlusButton = createActionButton("X +");
+        auto* moveYMinusButton = createActionButton("Y -");
+        auto* moveYPlusButton = createActionButton("Y +");
+        auto* sizeMinusButton = createActionButton("Taille -");
+        auto* sizePlusButton = createActionButton("Taille +");
+        laserLayout->addWidget(moveXMinusButton, 1, 0);
+        laserLayout->addWidget(moveXPlusButton, 1, 1);
+        laserLayout->addWidget(moveYMinusButton, 1, 2);
+        laserLayout->addWidget(moveYPlusButton, 1, 3);
+        laserLayout->addWidget(sizeMinusButton, 2, 0, 1, 2);
+        laserLayout->addWidget(sizePlusButton, 2, 2, 1, 2);
+
+        laserLayout->addWidget(new QLabel("X cible"), 3, 0);
+        laserXEdit_ = new QLineEdit(QString::number(laserPointPx_.x()));
+        laserLayout->addWidget(laserXEdit_, 3, 1);
+        laserLayout->addWidget(new QLabel("Y cible"), 3, 2);
+        laserYEdit_ = new QLineEdit(QString::number(laserPointPx_.y()));
+        laserLayout->addWidget(laserYEdit_, 3, 3);
+
+        laserLayout->addWidget(new QLabel("Taille"), 4, 0);
+        laserSizeEdit_ = new QLineEdit(QString::number(laserRadiusPx_));
+        laserLayout->addWidget(laserSizeEdit_, 4, 1);
+        auto* applyLaserButton = createActionButton("Appliquer cible");
+        applyLaserButton->setProperty("accent", true);
+        laserLayout->addWidget(applyLaserButton, 4, 2, 1, 2);
+
+        layout->addWidget(gotoBox);
+        layout->addWidget(laserBox);
+
+        connect(moveXMinusButton, &QPushButton::clicked, this, [this]() { nudgeLaserTarget(-1, 0, 0); });
+        connect(moveXPlusButton, &QPushButton::clicked, this, [this]() { nudgeLaserTarget(1, 0, 0); });
+        connect(moveYMinusButton, &QPushButton::clicked, this, [this]() { nudgeLaserTarget(0, -1, 0); });
+        connect(moveYPlusButton, &QPushButton::clicked, this, [this]() { nudgeLaserTarget(0, 1, 0); });
+        connect(sizeMinusButton, &QPushButton::clicked, this, [this]() { nudgeLaserTarget(0, 0, -1); });
+        connect(sizePlusButton, &QPushButton::clicked, this, [this]() { nudgeLaserTarget(0, 0, 1); });
+        connect(applyLaserButton, &QPushButton::clicked, this, &MainWindow::applyLaserCalibrationEdits);
+        connect(laserXEdit_, &QLineEdit::returnPressed, this, &MainWindow::applyLaserCalibrationEdits);
+        connect(laserYEdit_, &QLineEdit::returnPressed, this, &MainWindow::applyLaserCalibrationEdits);
+        connect(laserSizeEdit_, &QLineEdit::returnPressed, this, &MainWindow::applyLaserCalibrationEdits);
+    }
+
+    syncCalibrationUi();
+    calibrationDialog_->adjustSize();
+    calibrationDialog_->show();
+    calibrationDialog_->raise();
+    calibrationDialog_->activateWindow();
+}
+
 void MainWindow::applyObjectivePreset()
 {
     const QString objectiveName = objectiveCombo_ != nullptr ? objectiveCombo_->currentText().trimmed() : QString("4x");
@@ -764,8 +956,10 @@ void MainWindow::applyObjectivePreset()
     laserPointPx_.setX(preset->laserX);
     laserPointPx_.setY(preset->laserY);
     laserRadiusPx_ = std::max(preset->laserRadiusPx, 1);
+    syncCalibrationUi();
     updateLaserLabel();
     syncLaserOverlay();
+    syncSequenceOverlay();
 }
 
 void MainWindow::syncLaserOverlay(const QSize& frameSize)
@@ -785,6 +979,7 @@ void MainWindow::syncLaserOverlay(const QSize& frameSize)
     }
 
     cameraPreviewWidget_->setLaserOverlay(QPointF(laserPointPx_), laserRadiusPx_, true);
+    syncCalibrationUi();
     updateLaserLabel();
 }
 
@@ -800,6 +995,1053 @@ void MainWindow::updateLaserLabel()
             .arg(laserPointPx_.y())
             .arg(laserRadiusPx_)
     );
+}
+
+void MainWindow::updatePreviewCursor()
+{
+    if (cameraPreviewWidget_ == nullptr) {
+        return;
+    }
+
+    cameraPreviewWidget_->setCursor((gotoArmed_ || sequenceSelectArmed_) ? Qt::CrossCursor : Qt::ArrowCursor);
+}
+
+void MainWindow::setGotoArmed(bool armed)
+{
+    gotoArmed_ = armed;
+    if (gotoStatusLabel_ != nullptr) {
+        gotoStatusLabel_->setText(gotoArmed_ ? "GoTo : clique dans l'image" : "GoTo : inactif");
+    }
+    updatePreviewCursor();
+}
+
+void MainWindow::setSequenceSelectArmed(bool armed)
+{
+    sequenceSelectArmed_ = armed;
+    if (sequencePickButton_ != nullptr) {
+        sequencePickButton_->setText(sequenceSelectArmed_ ? "Annuler zone" : "Zone image");
+    }
+    updatePreviewCursor();
+}
+
+void MainWindow::syncCalibrationUi()
+{
+    if (laserXEdit_ != nullptr && !laserXEdit_->hasFocus()) {
+        laserXEdit_->setText(QString::number(laserPointPx_.x()));
+    }
+    if (laserYEdit_ != nullptr && !laserYEdit_->hasFocus()) {
+        laserYEdit_->setText(QString::number(laserPointPx_.y()));
+    }
+    if (laserSizeEdit_ != nullptr && !laserSizeEdit_->hasFocus()) {
+        laserSizeEdit_->setText(QString::number(laserRadiusPx_));
+    }
+}
+
+void MainWindow::clearSequencePreviewSelection()
+{
+    sequenceFirstFramePoint_.reset();
+    sequenceRectStartFrame_.reset();
+    sequenceRectEndFrame_.reset();
+    sequenceBaseMotorMm_.reset();
+    sequenceRectFollowSample_ = false;
+    waypointsMm_.clear();
+    currentWaypointIndex_ = -1;
+    syncSequenceOverlay();
+}
+
+void MainWindow::updateSequenceLabels(const QPointF& startMm, const QPointF& endMm)
+{
+    sequenceStartMotorMm_ = startMm;
+    sequenceEndMotorMm_ = endMm;
+    if (sequenceStartLabel_ != nullptr) {
+        sequenceStartLabel_->setText(QString("Depart  : X=%1  Y=%2 mm").arg(startMm.x(), 0, 'f', 4).arg(startMm.y(), 0, 'f', 4));
+    }
+    if (sequenceEndLabel_ != nullptr) {
+        sequenceEndLabel_->setText(QString("Arrivee : X=%1  Y=%2 mm").arg(endMm.x(), 0, 'f', 4).arg(endMm.y(), 0, 'f', 4));
+    }
+}
+
+void MainWindow::setSequenceRunning(bool running)
+{
+    sequenceRunning_ = running;
+    if (sequenceRunButton_ != nullptr) {
+        sequenceRunButton_->setEnabled(!sequenceRunning_);
+    }
+    if (sequenceStopButton_ != nullptr) {
+        sequenceStopButton_->setEnabled(sequenceRunning_);
+    }
+}
+
+std::optional<QPointF> MainWindow::latestPolledMotorPosition()
+{
+    std::lock_guard<std::mutex> lock(motorSnapshotMutex_);
+    if (polledXSnapshot_.positionValid && polledYSnapshot_.positionValid) {
+        return QPointF(polledXSnapshot_.positionMm, polledYSnapshot_.positionMm);
+    }
+    if (cachedMotorMm_.has_value()) {
+        return cachedMotorMm_;
+    }
+    return std::nullopt;
+}
+
+void MainWindow::startPredictedMotorMotion(
+    std::optional<double> startXmm,
+    std::optional<double> startYmm,
+    std::optional<double> targetXmm,
+    std::optional<double> targetYmm,
+    std::optional<double> speedXmmPerS,
+    std::optional<double> speedYmmPerS
+)
+{
+    const auto now = std::chrono::steady_clock::now();
+
+    auto startAxis = [now](AxisMotionPrediction& prediction,
+                           std::optional<double> startMm,
+                           std::optional<double> targetMm,
+                           std::optional<double> speedMmPerS) {
+        if (!startMm.has_value()) {
+            return;
+        }
+
+        prediction.basePositionMm = *startMm;
+        prediction.targetPositionMm = targetMm;
+        prediction.velocityMmPerS = std::max(0.0, speedMmPerS.value_or(prediction.velocityMmPerS));
+        prediction.direction = targetMm.has_value() ? motionDirection(*targetMm - *startMm) : 0;
+        prediction.baseTimestamp = now;
+        prediction.active = targetMm.has_value() || prediction.velocityMmPerS > 0.0;
+
+        if (targetMm.has_value() && prediction.direction == 0) {
+            prediction.basePositionMm = *targetMm;
+            prediction.targetPositionMm = *targetMm;
+            prediction.velocityMmPerS = 0.0;
+            prediction.active = true;
+        }
+    };
+
+    std::lock_guard<std::mutex> lock(predictedMotionMutex_);
+    startAxis(predictedXMotion_, startXmm, targetXmm, speedXmmPerS);
+    startAxis(predictedYMotion_, startYmm, targetYmm, speedYmmPerS);
+}
+
+void MainWindow::stopPredictedMotorMotion(std::optional<double> holdXmm, std::optional<double> holdYmm)
+{
+    const auto now = std::chrono::steady_clock::now();
+    const bool affectAllAxes = !holdXmm.has_value() && !holdYmm.has_value();
+
+    auto holdAxis = [now](AxisMotionPrediction& prediction, std::optional<double> holdMm) {
+        if (!holdMm.has_value()) {
+            if (!prediction.active) {
+                prediction.targetPositionMm.reset();
+                prediction.velocityMmPerS = 0.0;
+                prediction.direction = 0;
+                return;
+            }
+
+            holdMm = prediction.basePositionMm;
+            if (prediction.velocityMmPerS > 0.0) {
+                const double elapsedS = std::max(0.0, std::chrono::duration<double>(now - prediction.baseTimestamp).count());
+                double estimate = prediction.basePositionMm + (prediction.direction * prediction.velocityMmPerS * elapsedS);
+                if (prediction.targetPositionMm.has_value()) {
+                    const double low = std::min(prediction.basePositionMm, *prediction.targetPositionMm);
+                    const double high = std::max(prediction.basePositionMm, *prediction.targetPositionMm);
+                    estimate = std::clamp(estimate, low, high);
+                }
+                holdMm = estimate;
+            }
+        }
+
+        prediction.basePositionMm = *holdMm;
+        prediction.targetPositionMm = *holdMm;
+        prediction.velocityMmPerS = 0.0;
+        prediction.direction = 0;
+        prediction.baseTimestamp = now;
+        prediction.active = true;
+    };
+
+    std::lock_guard<std::mutex> lock(predictedMotionMutex_);
+    if (affectAllAxes || holdXmm.has_value()) {
+        holdAxis(predictedXMotion_, holdXmm);
+    }
+    if (affectAllAxes || holdYmm.has_value()) {
+        holdAxis(predictedYMotion_, holdYmm);
+    }
+}
+
+void MainWindow::updatePredictedMotorMotion(const hardware::MotorAxisSnapshot& xSnapshot, const hardware::MotorAxisSnapshot& ySnapshot)
+{
+    if (!xSnapshot.positionValid || !ySnapshot.positionValid) {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(predictedMotionMutex_);
+
+    const std::optional<QPointF> previousMeasured = lastMeasuredMotorMm_;
+    const std::optional<std::chrono::steady_clock::time_point> previousTimestamp = lastMeasuredMotorTimestamp_;
+
+    auto updateAxis = [now, previousMeasured, previousTimestamp](AxisMotionPrediction& prediction,
+                                                                 double currentMm,
+                                                                 std::optional<double> previousMm) {
+        if (!prediction.active) {
+            return;
+        }
+
+        if (prediction.targetPositionMm.has_value() && prediction.direction == 0) {
+            prediction.direction = motionDirection(*prediction.targetPositionMm - currentMm);
+        }
+
+        if (previousMm.has_value() && previousTimestamp.has_value()) {
+            const double dtS = std::chrono::duration<double>(now - *previousTimestamp).count();
+            if (dtS > 1e-4) {
+                const double measuredSpeed = std::abs(currentMm - *previousMm) / dtS;
+                if (measuredSpeed > 1e-4) {
+                    prediction.velocityMmPerS = measuredSpeed;
+                }
+            }
+        }
+
+        prediction.basePositionMm = currentMm;
+        prediction.baseTimestamp = now;
+
+        if (prediction.targetPositionMm.has_value()) {
+            if (std::abs(*prediction.targetPositionMm - currentMm) <= kOverlayPredictionEpsilonMm) {
+                prediction.basePositionMm = *prediction.targetPositionMm;
+                prediction.velocityMmPerS = 0.0;
+                prediction.direction = 0;
+                prediction.active = false;
+            } else if (prediction.direction == 0) {
+                prediction.direction = motionDirection(*prediction.targetPositionMm - currentMm);
+            }
+        }
+    };
+
+    updateAxis(
+        predictedXMotion_,
+        xSnapshot.positionMm,
+        previousMeasured.has_value() ? std::optional<double>(previousMeasured->x()) : std::nullopt
+    );
+    updateAxis(
+        predictedYMotion_,
+        ySnapshot.positionMm,
+        previousMeasured.has_value() ? std::optional<double>(previousMeasured->y()) : std::nullopt
+    );
+
+    lastMeasuredMotorMm_ = QPointF(xSnapshot.positionMm, ySnapshot.positionMm);
+    lastMeasuredMotorTimestamp_ = now;
+}
+
+std::optional<QPointF> MainWindow::estimatedMotorPositionForOverlay() const
+{
+    QPointF displayPosition;
+    if (cachedMotorMm_.has_value()) {
+        displayPosition = *cachedMotorMm_;
+    } else if (lastMeasuredMotorMm_.has_value()) {
+        displayPosition = *lastMeasuredMotorMm_;
+    } else {
+        return std::nullopt;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(predictedMotionMutex_);
+
+    auto estimateAxis = [now](const AxisMotionPrediction& prediction, double fallbackMm) {
+        if (!prediction.active) {
+            return fallbackMm;
+        }
+
+        double estimate = prediction.basePositionMm;
+        if (prediction.velocityMmPerS > 0.0 && prediction.direction != 0) {
+            const double elapsedS = std::max(0.0, std::chrono::duration<double>(now - prediction.baseTimestamp).count());
+            estimate += prediction.direction * prediction.velocityMmPerS * elapsedS;
+        }
+
+        if (prediction.targetPositionMm.has_value()) {
+            const double low = std::min(prediction.basePositionMm, *prediction.targetPositionMm);
+            const double high = std::max(prediction.basePositionMm, *prediction.targetPositionMm);
+            estimate = std::clamp(estimate, low, high);
+        }
+        return estimate;
+    };
+
+    displayPosition.setX(estimateAxis(predictedXMotion_, displayPosition.x()));
+    displayPosition.setY(estimateAxis(predictedYMotion_, displayPosition.y()));
+    return displayPosition;
+}
+
+std::optional<QPointF> MainWindow::overlayMotorPositionForDisplay() const
+{
+    if (stableOverlayMotorMm_.has_value()) {
+        return stableOverlayMotorMm_;
+    }
+    return estimatedMotorPositionForOverlay();
+}
+
+void MainWindow::syncSequenceOverlay()
+{
+    if (cameraPreviewWidget_ == nullptr) {
+        return;
+    }
+
+    const bool showZone = !sequenceRunning_ || (showZoneCheck_ == nullptr || showZoneCheck_->isChecked());
+    const bool showWaypoints = !waypointsMm_.empty()
+        && (!sequenceRunning_ || (hideWaypointsCheck_ == nullptr || !hideWaypointsCheck_->isChecked()));
+
+    const std::optional<QPointF> displayMotorMm = cachedMotorMm_;
+
+    // Zone rect
+    if (!showZone) {
+        cameraPreviewWidget_->clearSequenceOverlay();
+    } else {
+        std::optional<QPoint> startPoint = sequenceRectStartFrame_.has_value() ? sequenceRectStartFrame_ : sequenceFirstFramePoint_;
+        std::optional<QPoint> endPoint = sequenceRectEndFrame_;
+
+        if (sequenceRectFollowSample_ && sequenceStartMotorMm_.has_value() && sequenceEndMotorMm_.has_value() && displayMotorMm.has_value()) {
+            try {
+                startPoint = motorTargetToFramePoint(*sequenceStartMotorMm_, *displayMotorMm);
+                endPoint = motorTargetToFramePoint(*sequenceEndMotorMm_, *displayMotorMm);
+            } catch (...) {
+            }
+        }
+
+        if (!startPoint.has_value()) {
+            cameraPreviewWidget_->clearSequenceOverlay();
+        } else {
+            cameraPreviewWidget_->setSequenceOverlay(
+                QPointF(*startPoint),
+                true,
+                endPoint.has_value() ? QPointF(*endPoint) : QPointF(*startPoint),
+                endPoint.has_value()
+            );
+        }
+    }
+
+    // Waypoint dots
+    if (!showWaypoints || !displayMotorMm.has_value()) {
+        cameraPreviewWidget_->clearWaypointOverlay();
+    } else {
+        std::vector<QPointF> donePx, remainingPx;
+        const int splitIdx = std::max(0, currentWaypointIndex_);
+        for (int i = 0; i < static_cast<int>(waypointsMm_.size()); ++i) {
+            try {
+                const QPoint px = motorTargetToFramePoint(waypointsMm_[static_cast<std::size_t>(i)], *displayMotorMm);
+                if (i < splitIdx) {
+                    donePx.emplace_back(px.x(), px.y());
+                } else {
+                    remainingPx.emplace_back(px.x(), px.y());
+                }
+            } catch (...) {
+            }
+        }
+        cameraPreviewWidget_->setWaypointOverlay(std::move(donePx), std::move(remainingPx));
+    }
+}
+
+void MainWindow::applyLaserCalibrationEdits()
+{
+    if (laserXEdit_ == nullptr || laserYEdit_ == nullptr || laserSizeEdit_ == nullptr) {
+        return;
+    }
+
+    bool xOk = false;
+    bool yOk = false;
+    bool sizeOk = false;
+    const int targetX = laserXEdit_->text().trimmed().toInt(&xOk);
+    const int targetY = laserYEdit_->text().trimmed().toInt(&yOk);
+    const int targetSize = laserSizeEdit_->text().trimmed().toInt(&sizeOk);
+
+    if (!xOk || !yOk || !sizeOk || targetSize <= 0) {
+        QMessageBox::warning(this, "Calibrage", "Les valeurs X, Y et Taille doivent etre des entiers valides.");
+        syncCalibrationUi();
+        return;
+    }
+
+    laserPointPx_.setX(targetX);
+    laserPointPx_.setY(targetY);
+    laserRadiusPx_ = std::max(targetSize, 1);
+    syncLaserOverlay();
+    appendLog(QString("Cible laser calibree: X=%1 Y=%2 Taille=%3").arg(laserPointPx_.x()).arg(laserPointPx_.y()).arg(laserRadiusPx_));
+}
+
+void MainWindow::nudgeLaserTarget(int dxPx, int dyPx, int dRadiusPx)
+{
+    int stepPx = 1;
+    if (laserMoveStepEdit_ != nullptr) {
+        bool ok = false;
+        const int parsed = laserMoveStepEdit_->text().trimmed().toInt(&ok);
+        if (ok && parsed > 0) {
+            stepPx = parsed;
+        }
+    }
+
+    laserPointPx_.setX(laserPointPx_.x() + (dxPx * stepPx));
+    laserPointPx_.setY(laserPointPx_.y() + (dyPx * stepPx));
+    if (dRadiusPx != 0) {
+        laserRadiusPx_ = std::max(1, laserRadiusPx_ + (dRadiusPx * stepPx));
+    }
+    syncLaserOverlay();
+}
+
+double MainWindow::autoMmPerPxForObjective(const QString& objectiveName) const
+{
+    const ObjectivePreset* preset = findObjectivePreset(objectiveName.trimmed());
+    if (preset == nullptr || preset->magnification <= 0.0) {
+        return kDefaultGotoMmPerPx;
+    }
+
+    return kCameraPixelPitchUm / (preset->magnification * 1000.0);
+}
+
+std::pair<double, double> MainWindow::currentGotoScale() const
+{
+    const QString objectiveName = objectiveCombo_ != nullptr ? objectiveCombo_->currentText().trimmed() : QString("4x");
+    const double mmPerPx = autoMmPerPxForObjective(objectiveName);
+    if (mmPerPx <= 0.0) {
+        throw std::runtime_error("Les valeurs mm/px X et Y doivent etre positives.");
+    }
+
+    double sx = -1.0;
+    double sy = 1.0;
+    if (gotoInvertXCheck_ != nullptr && gotoInvertXCheck_->isChecked()) {
+        sx *= -1.0;
+    }
+    if (gotoInvertYCheck_ != nullptr && gotoInvertYCheck_->isChecked()) {
+        sy *= -1.0;
+    }
+
+    return {mmPerPx * sx, mmPerPx * sy};
+}
+
+QPointF MainWindow::readMotorPositionsOrThrow() const
+{
+    hardware::MotorAxisSnapshot xSnapshot;
+    hardware::MotorAxisSnapshot ySnapshot;
+    {
+        std::lock_guard<std::mutex> lock(motorSnapshotMutex_);
+        xSnapshot = polledXSnapshot_;
+        ySnapshot = polledYSnapshot_;
+    }
+    if (!xSnapshot.connected || !ySnapshot.connected) {
+        throw std::runtime_error("Les moteurs X et Y doivent etre connectes.");
+    }
+    if (!xSnapshot.positionValid || !ySnapshot.positionValid) {
+        throw std::runtime_error("Impossible de lire la position courante des moteurs.");
+    }
+
+    return QPointF(xSnapshot.positionMm, ySnapshot.positionMm);
+}
+
+QPointF MainWindow::framePointToMotorTarget(const QPoint& framePointPx, const QPointF& baseMotorMm) const
+{
+    const auto scale = currentGotoScale();
+    const int deltaXPx = framePointPx.x() - laserPointPx_.x();
+    const int deltaYPx = framePointPx.y() - laserPointPx_.y();
+
+    const double targetX = baseMotorMm.x() + (static_cast<double>(deltaXPx) * scale.first);
+    const double targetY = baseMotorMm.y() + (static_cast<double>(deltaYPx) * scale.second);
+    if (targetX < 0.0 || targetX > 25.0) {
+        throw std::runtime_error(QString("Zone X hors limites (%1 mm)").arg(targetX, 0, 'f', 4).toStdString());
+    }
+    if (targetY < 0.0 || targetY > 25.0) {
+        throw std::runtime_error(QString("Zone Y hors limites (%1 mm)").arg(targetY, 0, 'f', 4).toStdString());
+    }
+
+    return QPointF(targetX, targetY);
+}
+
+QPoint MainWindow::motorTargetToFramePoint(const QPointF& motorTargetMm, const QPointF& currentMotorMm) const
+{
+    const auto scale = currentGotoScale();
+    if (scale.first == 0.0 || scale.second == 0.0) {
+        throw std::runtime_error("Echelle GoTo invalide");
+    }
+
+    const int frameX = static_cast<int>(std::lround(static_cast<double>(laserPointPx_.x()) + ((motorTargetMm.x() - currentMotorMm.x()) / scale.first)));
+    const int frameY = static_cast<int>(std::lround(static_cast<double>(laserPointPx_.y()) + ((motorTargetMm.y() - currentMotorMm.y()) / scale.second)));
+    return QPoint(frameX, frameY);
+}
+
+std::vector<QPointF> MainWindow::buildWaypointsLinear(const QPointF& startMm, const QPointF& endMm, double stepMm) const
+{
+    const double dx = endMm.x() - startMm.x();
+    const double dy = endMm.y() - startMm.y();
+    const double distance = std::hypot(dx, dy);
+    if (distance < 1e-9) {
+        return {startMm};
+    }
+
+    const int steps = std::max(1, static_cast<int>(std::lround(distance / stepMm)));
+    std::vector<QPointF> waypoints;
+    waypoints.reserve(static_cast<std::size_t>(steps + 1));
+    for (int i = 0; i <= steps; ++i) {
+        const double t = static_cast<double>(i) / static_cast<double>(steps);
+        waypoints.emplace_back(startMm.x() + (dx * t), startMm.y() + (dy * t));
+    }
+    return waypoints;
+}
+
+std::vector<QPointF> MainWindow::buildWaypointsRect(const QPointF& startMm, const QPointF& endMm, double stepMm) const
+{
+    const double xMin = std::min(startMm.x(), endMm.x());
+    const double xMax = std::max(startMm.x(), endMm.x());
+    const double yMin = std::min(startMm.y(), endMm.y());
+    const double yMax = std::max(startMm.y(), endMm.y());
+
+    const int cols = std::max(1, static_cast<int>(std::lround((xMax - xMin) / stepMm))) + 1;
+    const int rows = std::max(1, static_cast<int>(std::lround((yMax - yMin) / stepMm))) + 1;
+
+    std::vector<double> xRange;
+    xRange.reserve(static_cast<std::size_t>(cols));
+    for (int i = 0; i < cols; ++i) {
+        const double t = cols <= 1 ? 0.0 : static_cast<double>(i) / static_cast<double>(cols - 1);
+        xRange.push_back(xMin + ((xMax - xMin) * t));
+    }
+
+    std::vector<double> yRange;
+    yRange.reserve(static_cast<std::size_t>(rows));
+    for (int j = 0; j < rows; ++j) {
+        const double t = rows <= 1 ? 0.0 : static_cast<double>(j) / static_cast<double>(rows - 1);
+        yRange.push_back(yMin + ((yMax - yMin) * t));
+    }
+
+    std::vector<QPointF> waypoints;
+    waypoints.reserve(static_cast<std::size_t>(rows * cols));
+    for (int row = 0; row < rows; ++row) {
+        const double y = yRange[static_cast<std::size_t>(row)];
+        if ((row % 2) == 0) {
+            for (double x : xRange) {
+                waypoints.emplace_back(x, y);
+            }
+        } else {
+            for (auto it = xRange.rbegin(); it != xRange.rend(); ++it) {
+                waypoints.emplace_back(*it, y);
+            }
+        }
+    }
+
+    return waypoints;
+}
+
+void MainWindow::onArmGoto()
+{
+    if (sequenceSelectArmed_) {
+        setSequenceSelectArmed(false);
+        clearSequencePreviewSelection();
+    }
+
+    if (!cameraController_->isLive()) {
+        setGotoArmed(false);
+        QMessageBox::warning(this, "GoTo", "Demarrer d'abord le flux live.");
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(motorSnapshotMutex_);
+        if (!polledXSnapshot_.connected || !polledYSnapshot_.connected) {
+            setGotoArmed(false);
+            QMessageBox::warning(this, "GoTo", "Connecter d'abord les moteurs X et Y.");
+            return;
+        }
+    }
+
+    try {
+        currentGotoScale();
+    } catch (const std::exception& ex) {
+        setGotoArmed(false);
+        QMessageBox::warning(this, "GoTo", QString::fromUtf8(ex.what()));
+        return;
+    }
+
+    setGotoArmed(true);
+    statusBar()->showMessage("GoTo arme : cliquer dans l'image", 3000);
+    appendLog("GoTo arme. Clique dans l'image pour deplacer la platine.");
+}
+
+void MainWindow::onSetSequenceStart()
+{
+    try {
+        const QPointF positionMm = readMotorPositionsOrThrow();
+        sequenceStartMotorMm_ = positionMm;
+        clearSequencePreviewSelection();
+        if (sequenceStartLabel_ != nullptr) {
+            sequenceStartLabel_->setText(QString("Depart  : X=%1  Y=%2 mm").arg(positionMm.x(), 0, 'f', 4).arg(positionMm.y(), 0, 'f', 4));
+        }
+        appendLog(QString("Point de depart enregistre : X=%1 Y=%2 mm").arg(positionMm.x(), 0, 'f', 4).arg(positionMm.y(), 0, 'f', 4));
+    } catch (const std::exception& ex) {
+        QMessageBox::warning(this, "Zone image", QString::fromUtf8(ex.what()));
+    }
+}
+
+void MainWindow::onSetSequenceEnd()
+{
+    try {
+        const QPointF positionMm = readMotorPositionsOrThrow();
+        sequenceEndMotorMm_ = positionMm;
+        clearSequencePreviewSelection();
+        if (sequenceEndLabel_ != nullptr) {
+            sequenceEndLabel_->setText(QString("Arrivee : X=%1  Y=%2 mm").arg(positionMm.x(), 0, 'f', 4).arg(positionMm.y(), 0, 'f', 4));
+        }
+        appendLog(QString("Point d'arrivee enregistre : X=%1 Y=%2 mm").arg(positionMm.x(), 0, 'f', 4).arg(positionMm.y(), 0, 'f', 4));
+    } catch (const std::exception& ex) {
+        QMessageBox::warning(this, "Zone image", QString::fromUtf8(ex.what()));
+    }
+}
+
+void MainWindow::onArmSequenceRectangle()
+{
+    if (sequenceSelectArmed_) {
+        setSequenceSelectArmed(false);
+        clearSequencePreviewSelection();
+        appendLog("Zone image annulee.");
+        return;
+    }
+
+    if (!cameraController_->isLive()) {
+        QMessageBox::warning(this, "Zone image", "Demarrer d'abord le flux live.");
+        return;
+    }
+
+    try {
+        const QPointF baseMotorMm = readMotorPositionsOrThrow();
+        currentGotoScale();
+        setGotoArmed(false);
+        sequenceFirstFramePoint_.reset();
+        sequenceRectStartFrame_.reset();
+        sequenceRectEndFrame_.reset();
+        sequenceBaseMotorMm_ = baseMotorMm;
+        sequenceRectFollowSample_ = false;
+        cachedMotorMm_ = baseMotorMm;
+        stableOverlayMotorMm_ = baseMotorMm;
+        statusBar()->showMessage("Zone image : cliquer le 1er coin", 4000);
+        setSequenceSelectArmed(true);
+        appendLog(QString("Zone image armee depuis X=%1 Y=%2 mm.").arg(baseMotorMm.x(), 0, 'f', 4).arg(baseMotorMm.y(), 0, 'f', 4));
+        syncSequenceOverlay();
+    } catch (const std::exception& ex) {
+        QMessageBox::warning(this, "Zone image", QString::fromUtf8(ex.what()));
+    }
+}
+
+void MainWindow::onRunSequence()
+{
+    if (sequenceRunning_) {
+        QMessageBox::warning(this, "Sequence", "Une sequence est deja en cours.");
+        return;
+    }
+    if (motorTaskRunning_) {
+        QMessageBox::warning(this, "Sequence", "Une autre operation moteur est en cours.");
+        return;
+    }
+    if (!sequenceStartMotorMm_.has_value()) {
+        QMessageBox::warning(this, "Sequence", "Definir d'abord le point de depart.");
+        return;
+    }
+    if (!sequenceEndMotorMm_.has_value()) {
+        QMessageBox::warning(this, "Sequence", "Definir d'abord le point d'arrivee.");
+        return;
+    }
+
+    bool stepOk = false;
+    bool durationOk = false;
+    const double stepMm = sequenceStepMmEdit_ != nullptr ? sequenceStepMmEdit_->text().trimmed().toDouble(&stepOk) : 0.0;
+    const double durationS = sequenceDurationEdit_ != nullptr ? sequenceDurationEdit_->text().trimmed().toDouble(&durationOk) : 0.0;
+    if (!stepOk || !durationOk || stepMm <= 0.0 || durationS <= 0.0) {
+        QMessageBox::warning(this, "Sequence", "Pas (mm) et Duree/pt doivent etre des nombres positifs.");
+        return;
+    }
+
+    const QPointF startMm = *sequenceStartMotorMm_;
+    const QPointF endMm = *sequenceEndMotorMm_;
+    const QString mode = sequenceModeCombo_ != nullptr ? sequenceModeCombo_->currentText() : QString("Lineaire");
+    std::vector<QPointF> waypoints = mode == "Rectangle"
+        ? buildWaypointsRect(startMm, endMm, stepMm)
+        : buildWaypointsLinear(startMm, endMm, stepMm);
+
+    if (waypoints.empty()) {
+        QMessageBox::warning(this, "Sequence", "Depart et arrivee sont au meme endroit.");
+        return;
+    }
+
+    double stageSpeedMmPerS = 0.0;
+    try {
+        stageSpeedMmPerS = readJogSpeedMmPerS();
+    } catch (const std::exception& ex) {
+        QMessageBox::warning(this, "Sequence", QString::fromUtf8(ex.what()));
+        return;
+    }
+
+    waypointsMm_ = waypoints;
+    currentWaypointIndex_ = 0;
+    sequenceStopRequested_.store(false);
+    setSequenceRunning(true);
+    const int total = static_cast<int>(waypoints.size());
+    if (sequenceStatusLabel_ != nullptr) {
+        sequenceStatusLabel_->setText(QString("0 / %1 points").arg(total));
+    }
+    appendLog(
+        QString("Sequence %1 : (%2,%3) -> (%4,%5) | %6 points | pas=%7 mm | %8 s/pt")
+            .arg(mode == "Rectangle" ? "rectangle (serpentin)" : "lineaire")
+            .arg(startMm.x(), 0, 'f', 4)
+            .arg(startMm.y(), 0, 'f', 4)
+            .arg(endMm.x(), 0, 'f', 4)
+            .arg(endMm.y(), 0, 'f', 4)
+            .arg(total)
+            .arg(stepMm, 0, 'f', 4)
+            .arg(durationS, 0, 'f', 3)
+    );
+
+    if (sequenceThread_.joinable()) {
+        sequenceThread_.join();
+    }
+
+    auto controller = motorController_;
+    sequenceThread_ = std::thread([this, controller, waypoints = std::move(waypoints), durationS, total, stageSpeedMmPerS]() mutable {
+        using namespace std::chrono_literals;
+        try {
+            const QPointF firstPoint = waypoints.front();
+            const auto initialBoth = controller->snapshotBoth();
+            const hardware::MotorAxisSnapshot& initialXSnapshot = initialBoth.x;
+            const hardware::MotorAxisSnapshot& initialYSnapshot = initialBoth.y;
+            controller->setVelocity(hardware::AxisId::X, stageSpeedMmPerS);
+            controller->setVelocity(hardware::AxisId::Y, stageSpeedMmPerS);
+            if (initialXSnapshot.positionValid && initialYSnapshot.positionValid) {
+                startPredictedMotorMotion(
+                    initialXSnapshot.positionMm,
+                    initialYSnapshot.positionMm,
+                    firstPoint.x(),
+                    firstPoint.y(),
+                    stageSpeedMmPerS,
+                    stageSpeedMmPerS
+                );
+            }
+            QMetaObject::invokeMethod(this, [this, firstPoint]() {
+                if (sequenceStatusLabel_ != nullptr) {
+                    sequenceStatusLabel_->setText("Mise en position...");
+                }
+                appendLog(QString("Mise en position vers depart (%1, %2) mm...").arg(firstPoint.x(), 0, 'f', 4).arg(firstPoint.y(), 0, 'f', 4));
+            }, Qt::QueuedConnection);
+
+            controller->moveAbsoluteNoWait(hardware::AxisId::X, firstPoint.x());
+            controller->moveAbsoluteNoWait(hardware::AxisId::Y, firstPoint.y());
+            controller->waitAxis(hardware::AxisId::X, kDefaultMotorTimeoutMs);
+            controller->waitAxis(hardware::AxisId::Y, kDefaultMotorTimeoutMs);
+            stopPredictedMotorMotion(firstPoint.x(), firstPoint.y());
+
+            if (sequenceStopRequested_.load()) {
+                stopPredictedMotorMotion();
+                QMetaObject::invokeMethod(this, [this]() {
+                    if (sequenceStatusLabel_ != nullptr) {
+                        sequenceStatusLabel_->setText("Arrete.");
+                    }
+                    appendLog("Sequence arretee par l'utilisateur.");
+                    setSequenceRunning(false);
+                }, Qt::QueuedConnection);
+                return;
+            }
+
+            QMetaObject::invokeMethod(this, [this]() {
+                appendLog("Point de depart atteint. Debut du balayage.");
+            }, Qt::QueuedConnection);
+
+            for (int index = 0; index < total; ++index) {
+                if (sequenceStopRequested_.load()) {
+                    stopPredictedMotorMotion();
+                    QMetaObject::invokeMethod(this, [this]() {
+                        if (sequenceStatusLabel_ != nullptr) {
+                            sequenceStatusLabel_->setText("Arrete.");
+                        }
+                        appendLog("Sequence arretee par l'utilisateur.");
+                        setSequenceRunning(false);
+                    }, Qt::QueuedConnection);
+                    return;
+                }
+
+                const QPointF waypoint = waypoints[static_cast<std::size_t>(index)];
+                QMetaObject::invokeMethod(this, [this, index, total, waypoint]() {
+                    currentWaypointIndex_ = index;
+                    if (sequenceStatusLabel_ != nullptr) {
+                        sequenceStatusLabel_->setText(QString("%1 / %2 - (%3, %4)")
+                            .arg(index + 1)
+                            .arg(total)
+                            .arg(waypoint.x(), 0, 'f', 4)
+                            .arg(waypoint.y(), 0, 'f', 4));
+                    }
+                }, Qt::QueuedConnection);
+
+                const auto stepBoth = controller->snapshotBoth();
+                if (stepBoth.x.positionValid && stepBoth.y.positionValid) {
+                    startPredictedMotorMotion(
+                        stepBoth.x.positionMm,
+                        stepBoth.y.positionMm,
+                        waypoint.x(),
+                        waypoint.y(),
+                        stageSpeedMmPerS,
+                        stageSpeedMmPerS
+                    );
+                }
+
+                controller->moveAbsoluteNoWait(hardware::AxisId::X, waypoint.x());
+                controller->moveAbsoluteNoWait(hardware::AxisId::Y, waypoint.y());
+                controller->waitAxis(hardware::AxisId::X, kDefaultMotorTimeoutMs);
+                controller->waitAxis(hardware::AxisId::Y, kDefaultMotorTimeoutMs);
+                stopPredictedMotorMotion(waypoint.x(), waypoint.y());
+
+                if (sequenceStopRequested_.load()) {
+                    stopPredictedMotorMotion();
+                    QMetaObject::invokeMethod(this, [this]() {
+                        if (sequenceStatusLabel_ != nullptr) {
+                            sequenceStatusLabel_->setText("Arrete.");
+                        }
+                        setSequenceRunning(false);
+                    }, Qt::QueuedConnection);
+                    return;
+                }
+
+                const auto dwell = std::chrono::duration<double>(durationS);
+                const auto dwellStart = std::chrono::steady_clock::now();
+                while (std::chrono::steady_clock::now() - dwellStart < dwell) {
+                    if (sequenceStopRequested_.load()) {
+                        stopPredictedMotorMotion();
+                        QMetaObject::invokeMethod(this, [this]() {
+                            if (sequenceStatusLabel_ != nullptr) {
+                                sequenceStatusLabel_->setText("Arrete.");
+                            }
+                            appendLog("Sequence arretee par l'utilisateur.");
+                            setSequenceRunning(false);
+                        }, Qt::QueuedConnection);
+                        return;
+                    }
+                    std::this_thread::sleep_for(20ms);
+                }
+            }
+
+            QMetaObject::invokeMethod(this, [this, total]() {
+                currentWaypointIndex_ = total;
+                if (sequenceStatusLabel_ != nullptr) {
+                    sequenceStatusLabel_->setText(QString("Termine (%1 points).").arg(total));
+                }
+                appendLog("Sequence terminee.");
+                setSequenceRunning(false);
+            }, Qt::QueuedConnection);
+        } catch (const std::exception& ex) {
+            stopPredictedMotorMotion();
+            QMetaObject::invokeMethod(this, [this, message = QString::fromUtf8(ex.what())]() {
+                if (sequenceStatusLabel_ != nullptr) {
+                    sequenceStatusLabel_->setText("ERREUR : " + message);
+                }
+                appendLog("Sequence echouee : " + message);
+                setSequenceRunning(false);
+            }, Qt::QueuedConnection);
+        }
+    });
+}
+
+void MainWindow::onStopSequence()
+{
+    if (!sequenceRunning_) {
+        return;
+    }
+
+    sequenceStopRequested_.store(true);
+    if (const auto estimatedPosition = estimatedMotorPositionForOverlay(); estimatedPosition.has_value()) {
+        stopPredictedMotorMotion(estimatedPosition->x(), estimatedPosition->y());
+    } else {
+        stopPredictedMotorMotion();
+    }
+    try {
+        motorController_->stopAxis(hardware::AxisId::X);
+        motorController_->stopAxis(hardware::AxisId::Y);
+    } catch (...) {
+    }
+    if (sequenceStatusLabel_ != nullptr) {
+        sequenceStatusLabel_->setText("Arret demande...");
+    }
+}
+
+void MainWindow::onPreviewFrameClicked(const QPoint& framePointPx)
+{
+    if (sequenceSelectArmed_) {
+        if (!sequenceBaseMotorMm_.has_value()) {
+            setSequenceSelectArmed(false);
+            return;
+        }
+
+        if (!sequenceFirstFramePoint_.has_value()) {
+            sequenceFirstFramePoint_ = framePointPx;
+            sequenceRectStartFrame_ = framePointPx;
+            sequenceRectEndFrame_ = framePointPx;
+            statusBar()->showMessage("Zone image : cliquer le 2ème coin", 4000);
+            appendLog(QString("Zone image: premier coin px=(%1,%2)").arg(framePointPx.x()).arg(framePointPx.y()));
+            syncSequenceOverlay();
+            return;
+        }
+
+        try {
+            const QPointF startMm = framePointToMotorTarget(*sequenceFirstFramePoint_, *sequenceBaseMotorMm_);
+            const QPointF endMm = framePointToMotorTarget(framePointPx, *sequenceBaseMotorMm_);
+            sequenceRectStartFrame_ = *sequenceFirstFramePoint_;
+            sequenceRectEndFrame_ = framePointPx;
+            sequenceFirstFramePoint_.reset();
+            sequenceBaseMotorMm_.reset();
+            sequenceRectFollowSample_ = true;
+            updateSequenceLabels(startMm, endMm);
+            if (sequenceModeCombo_ != nullptr) {
+                sequenceModeCombo_->setCurrentText("Rectangle");
+            }
+            statusBar()->showMessage("Zone image : zone definie", 3000);
+            setSequenceSelectArmed(false);
+            appendLog(
+                QString("Zone image definie: (%1,%2) -> (%3,%4) mm")
+                    .arg(startMm.x(), 0, 'f', 4)
+                    .arg(startMm.y(), 0, 'f', 4)
+                    .arg(endMm.x(), 0, 'f', 4)
+                    .arg(endMm.y(), 0, 'f', 4)
+            );
+            syncSequenceOverlay();
+        } catch (const std::exception& ex) {
+            setSequenceSelectArmed(false);
+            clearSequencePreviewSelection();
+            QMessageBox::warning(this, "Zone image", QString::fromUtf8(ex.what()));
+        }
+        return;
+    }
+
+    if (!gotoArmed_) {
+        return;
+    }
+
+    setGotoArmed(false);
+
+    const int targetXPx = framePointPx.x();
+    const int targetYPx = framePointPx.y();
+    const int deltaXPx = targetXPx - laserPointPx_.x();
+    const int deltaYPx = targetYPx - laserPointPx_.y();
+
+    if (deltaXPx == 0 && deltaYPx == 0) {
+        appendLog("GoTo: le point clique est deja sur le laser");
+        return;
+    }
+
+    double scaleX = 0.0;
+    double scaleY = 0.0;
+    try {
+        const auto scale = currentGotoScale();
+        scaleX = scale.first;
+        scaleY = scale.second;
+    } catch (const std::exception& ex) {
+        QMessageBox::warning(this, "GoTo", QString::fromUtf8(ex.what()));
+        return;
+    }
+
+    double moveXMm = static_cast<double>(deltaXPx) * scaleX;
+    double moveYMm = static_cast<double>(deltaYPx) * scaleY;
+
+    bool ok = false;
+    if (gotoCorrXpEdit_ != nullptr && moveXMm > 0.0) {
+        const double correction = gotoCorrXpEdit_->text().trimmed().toDouble(&ok);
+        if (ok) {
+            moveXMm += correction;
+        }
+    } else if (gotoCorrXmEdit_ != nullptr && moveXMm < 0.0) {
+        const double correction = gotoCorrXmEdit_->text().trimmed().toDouble(&ok);
+        if (ok) {
+            moveXMm += correction;
+        }
+    }
+
+    ok = false;
+    if (gotoCorrYpEdit_ != nullptr && moveYMm > 0.0) {
+        const double correction = gotoCorrYpEdit_->text().trimmed().toDouble(&ok);
+        if (ok) {
+            moveYMm += correction;
+        }
+    } else if (gotoCorrYmEdit_ != nullptr && moveYMm < 0.0) {
+        const double correction = gotoCorrYmEdit_->text().trimmed().toDouble(&ok);
+        if (ok) {
+            moveYMm += correction;
+        }
+    }
+
+    appendLog(
+        QString("GoTo: cible px=(%1,%2) delta_px=(%3,%4) delta_mm=(%5,%6)")
+            .arg(targetXPx)
+            .arg(targetYPx)
+            .arg(deltaXPx)
+            .arg(deltaYPx)
+            .arg(moveXMm, 0, 'f', 4)
+            .arg(moveYMm, 0, 'f', 4)
+    );
+
+    bool velocityOk = false;
+    const double gotoVelocityMmPerS = gotoVelocityEdit_ != nullptr ? gotoVelocityEdit_->text().trimmed().toDouble(&velocityOk) : 0.0;
+    if (const auto currentPosition = latestPolledMotorPosition(); currentPosition.has_value()) {
+        startPredictedMotorMotion(
+            currentPosition->x(),
+            currentPosition->y(),
+            currentPosition->x() + moveXMm,
+            currentPosition->y() + moveYMm,
+            velocityOk && gotoVelocityMmPerS > 0.0 ? std::optional<double>(gotoVelocityMmPerS) : std::nullopt,
+            velocityOk && gotoVelocityMmPerS > 0.0 ? std::optional<double>(gotoVelocityMmPerS) : std::nullopt
+        );
+    }
+    auto controller = motorController_;
+
+    runMotorTask("GoTo", [controller, moveXMm, moveYMm, gotoVelocityMmPerS, velocityOk, this]() {
+        const auto gotoBoth = controller->snapshotBoth();
+        const hardware::MotorAxisSnapshot& xSnapshot = gotoBoth.x;
+        const hardware::MotorAxisSnapshot& ySnapshot = gotoBoth.y;
+
+        if (!xSnapshot.connected || !ySnapshot.connected) {
+            throw std::runtime_error("Les moteurs X et Y doivent etre connectes.");
+        }
+        if (!xSnapshot.positionValid || !ySnapshot.positionValid) {
+            throw std::runtime_error("Impossible de lire la position courante des moteurs.");
+        }
+
+        const double targetX = xSnapshot.positionMm + moveXMm;
+        const double targetY = ySnapshot.positionMm + moveYMm;
+        if (targetX < 0.0 || targetX > 25.0) {
+            throw std::runtime_error(QString("GoTo X hors limites (%1 mm)").arg(targetX, 0, 'f', 4).toStdString());
+        }
+        if (targetY < 0.0 || targetY > 25.0) {
+            throw std::runtime_error(QString("GoTo Y hors limites (%1 mm)").arg(targetY, 0, 'f', 4).toStdString());
+        }
+
+        startPredictedMotorMotion(
+            xSnapshot.positionMm,
+            ySnapshot.positionMm,
+            targetX,
+            targetY,
+            velocityOk && gotoVelocityMmPerS > 0.0 ? std::optional<double>(gotoVelocityMmPerS) : std::nullopt,
+            velocityOk && gotoVelocityMmPerS > 0.0 ? std::optional<double>(gotoVelocityMmPerS) : std::nullopt
+        );
+
+        if (velocityOk && gotoVelocityMmPerS > 0.0) {
+            controller->setVelocity(hardware::AxisId::X, gotoVelocityMmPerS);
+            controller->setVelocity(hardware::AxisId::Y, gotoVelocityMmPerS);
+        }
+
+        controller->moveAbsoluteNoWait(hardware::AxisId::X, targetX);
+        controller->moveAbsoluteNoWait(hardware::AxisId::Y, targetY);
+        controller->waitAxis(hardware::AxisId::X, kDefaultMotorTimeoutMs);
+        controller->waitAxis(hardware::AxisId::Y, kDefaultMotorTimeoutMs);
+        stopPredictedMotorMotion(targetX, targetY);
+
+        return MotorTaskResult {
+            true,
+            QString("GoTo termine: X=%1 Y=%2 mm (point rouge fixe)")
+                .arg(targetX, 0, 'f', 4)
+                .arg(targetY, 0, 'f', 4),
+            {}
+        };
+    });
+}
+
+void MainWindow::onPreviewBackgroundClicked()
+{
+    if (!gotoArmed_ && !sequenceSelectArmed_) {
+        return;
+    }
+
+    appendLog(sequenceSelectArmed_ ? "Zone image: clic en dehors de l'image" : "GoTo: clic en dehors de l'image affichee");
 }
 
 QWidget* MainWindow::buildMeasureTab()
@@ -820,25 +2062,43 @@ QWidget* MainWindow::buildMeasureTab()
 
 void MainWindow::refreshSummaries()
 {
-    refreshMotorUi();
+    using namespace std::chrono_literals;
+    const auto now = std::chrono::steady_clock::now();
+    const bool refreshMotorPanel = !lastMotorUiRefresh_.has_value() || (now - *lastMotorUiRefresh_) >= 66ms;
+    const bool refreshCameraPanel = !cameraController_->isLive()
+        && (!lastCameraUiRefresh_.has_value() || (now - *lastCameraUiRefresh_) >= 150ms);
+    const bool refreshStatusBar = !lastStatusRefresh_.has_value() || (now - *lastStatusRefresh_) >= 250ms;
 
-    if (!cameraController_->isLive()) {
-        refreshCameraUi();
+    if (refreshMotorPanel) {
+        refreshMotorUi();
+        lastMotorUiRefresh_ = now;
+    } else {
+        syncSequenceOverlay();
     }
 
-    cameraSummaryLabel_->setText(
-        QString("Camera: %1 | %2 | Exp %3 us | Gain %4")
+    if (refreshCameraPanel) {
+        refreshCameraUi();
+        lastCameraUiRefresh_ = now;
+    }
+
+    if (refreshStatusBar) {
+        const QString cameraSummary = QString("Camera: %1 | %2 | Exp %3 us | Gain %4")
             .arg(core::deviceStateLabel(cameraController_->state()))
             .arg(cameraController_->cameraIdentifier())
             .arg(cameraController_->exposureTimeUs(), 0, 'f', 0)
-            .arg(cameraController_->gain(), 0, 'f', 1)
-    );
-    potentiostatSummaryLabel_->setText(
-        QString("Potentiostat: %1 | %2")
+            .arg(cameraController_->gain(), 0, 'f', 1);
+        const QString potentiostatSummary = QString("Potentiostat: %1 | %2")
             .arg(core::deviceStateLabel(potentiostatController_->state()))
-            .arg(potentiostatController_->channelSummary())
-    );
+            .arg(potentiostatController_->channelSummary());
 
+        if (cameraSummaryLabel_ != nullptr && cameraSummaryLabel_->text() != cameraSummary) {
+            cameraSummaryLabel_->setText(cameraSummary);
+        }
+        if (potentiostatSummaryLabel_ != nullptr && potentiostatSummaryLabel_->text() != potentiostatSummary) {
+            potentiostatSummaryLabel_->setText(potentiostatSummary);
+        }
+        lastStatusRefresh_ = now;
+    }
 }
 
 void MainWindow::refreshMotorUi()
@@ -867,23 +2127,69 @@ void MainWindow::refreshMotorUi()
         statusBar()->showMessage(pollError, 5000);
     }
 
-    if (xPositionValueLabel_ != nullptr) xPositionValueLabel_->setText(snapshotPositionText(xSnapshot));
-    if (yPositionValueLabel_ != nullptr) yPositionValueLabel_->setText(snapshotPositionText(ySnapshot));
-    if (stageSummaryLabel_ != nullptr) stageSummaryLabel_->setText(axisConnectionSummary(xSnapshot, ySnapshot));
+    const QString xText = snapshotPositionText(xSnapshot);
+    const QString yText = snapshotPositionText(ySnapshot);
+    const QString stageSummary = axisConnectionSummary(xSnapshot, ySnapshot);
+    auto setLabelTextIfChanged = [](QLabel* label, const QString& text) {
+        if (label != nullptr && label->text() != text) {
+            label->setText(text);
+        }
+    };
+    auto setWidgetEnabledIfChanged = [](QWidget* widget, bool enabled) {
+        if (widget != nullptr && widget->isEnabled() != enabled) {
+            widget->setEnabled(enabled);
+        }
+    };
+
+    setLabelTextIfChanged(xPositionValueLabel_, xText);
+    setLabelTextIfChanged(yPositionValueLabel_, yText);
+    setLabelTextIfChanged(stageSummaryLabel_, stageSummary);
+    if (xSnapshot.positionValid && ySnapshot.positionValid) {
+        cachedMotorMm_ = QPointF(xSnapshot.positionMm, ySnapshot.positionMm);
+        updatePredictedMotorMotion(xSnapshot, ySnapshot);
+
+        bool predictedMotionActive = false;
+        {
+            std::lock_guard<std::mutex> lock(predictedMotionMutex_);
+            predictedMotionActive = predictedXMotion_.active || predictedYMotion_.active;
+        }
+
+        const bool motorsMoving = axisStateLooksMoving(xSnapshot.stateCode)
+            || axisStateLooksMoving(ySnapshot.stateCode)
+            || predictedMotionActive;
+
+        if (const auto estimatedMotorMm = estimatedMotorPositionForOverlay(); estimatedMotorMm.has_value()) {
+            if (!stableOverlayMotorMm_.has_value()) {
+                stableOverlayMotorMm_ = *estimatedMotorMm;
+            } else if (motorsMoving) {
+                stableOverlayMotorMm_ = *estimatedMotorMm;
+            } else {
+                const double dx = estimatedMotorMm->x() - stableOverlayMotorMm_->x();
+                const double dy = estimatedMotorMm->y() - stableOverlayMotorMm_->y();
+                if (std::hypot(dx, dy) >= kOverlayStabilityDeadbandMm) {
+                    stableOverlayMotorMm_ = *estimatedMotorMm;
+                }
+            }
+        }
+    }
+    syncSequenceOverlay();
 
     const bool anyConnected = xSnapshot.connected || ySnapshot.connected;
     const bool bothConnected = xSnapshot.connected && ySnapshot.connected;
-    const bool enableCommands = bothConnected && !motorTaskRunning_;
+    const bool enableCommands = bothConnected && !motorTaskRunning_ && !sequenceRunning_;
 
-    if (scanPortsButton_ != nullptr) scanPortsButton_->setEnabled(!motorTaskRunning_);
-    if (connectAxesButton_ != nullptr) connectAxesButton_->setEnabled(!motorTaskRunning_);
-    if (homeAxesButton_ != nullptr) homeAxesButton_->setEnabled(bothConnected && !motorTaskRunning_);
-    if (disconnectAxesButton_ != nullptr) disconnectAxesButton_->setEnabled(anyConnected && !motorTaskRunning_);
-    if (moveAbsXButton_ != nullptr) moveAbsXButton_->setEnabled(enableCommands);
-    if (moveAbsYButton_ != nullptr) moveAbsYButton_->setEnabled(enableCommands);
-    if (jogStepEdit_ != nullptr) jogStepEdit_->setEnabled(!motorTaskRunning_);
-    if (absXEdit_ != nullptr) absXEdit_->setEnabled(enableCommands);
-    if (absYEdit_ != nullptr) absYEdit_->setEnabled(enableCommands);
+    setWidgetEnabledIfChanged(scanPortsButton_, !motorTaskRunning_ && !sequenceRunning_);
+    setWidgetEnabledIfChanged(connectAxesButton_, !motorTaskRunning_ && !sequenceRunning_);
+    setWidgetEnabledIfChanged(homeAxesButton_, bothConnected && !motorTaskRunning_ && !sequenceRunning_);
+    setWidgetEnabledIfChanged(disconnectAxesButton_, anyConnected && !motorTaskRunning_ && !sequenceRunning_);
+    setWidgetEnabledIfChanged(moveAbsXYButton_, enableCommands);
+    setWidgetEnabledIfChanged(gotoButton_, !motorTaskRunning_ && !sequenceRunning_);
+    setWidgetEnabledIfChanged(sequenceSetStartButton_, !motorTaskRunning_ && !sequenceRunning_);
+    setWidgetEnabledIfChanged(sequenceSetEndButton_, !motorTaskRunning_ && !sequenceRunning_);
+    setWidgetEnabledIfChanged(sequencePickButton_, !motorTaskRunning_ && !sequenceRunning_);
+    setWidgetEnabledIfChanged(jogStepEdit_, !motorTaskRunning_ && !sequenceRunning_);
+    setWidgetEnabledIfChanged(absXEdit_, enableCommands);
+    setWidgetEnabledIfChanged(absYEdit_, enableCommands);
 }
 
 void MainWindow::refreshCameraUi()
@@ -895,6 +2201,7 @@ void MainWindow::refreshCameraUi()
         const QImage frame = cameraController_->previewFrame();
         cameraPreviewWidget_->setFrame(frame);
         syncLaserOverlay(frame.size());
+        syncSequenceOverlay();
     }
 
     // In live mode this method is called at ~60 Hz; avoid property churn on widgets.
@@ -902,17 +2209,28 @@ void MainWindow::refreshCameraUi()
         return;
     }
 
+    auto setLineEditTextIfChanged = [](QLineEdit* edit, const QString& text) {
+        if (edit != nullptr && edit->text() != text) {
+            edit->setText(text);
+        }
+    };
+    auto setWidgetEnabledIfChanged = [](QWidget* widget, bool enabled) {
+        if (widget != nullptr && widget->isEnabled() != enabled) {
+            widget->setEnabled(enabled);
+        }
+    };
+
     if (cameraExposureEdit_ != nullptr && !cameraExposureEdit_->hasFocus()) {
-        cameraExposureEdit_->setText(QString::number(cameraController_->exposureTimeUs(), 'f', 0));
+        setLineEditTextIfChanged(cameraExposureEdit_, QString::number(cameraController_->exposureTimeUs(), 'f', 0));
     }
     if (cameraGainEdit_ != nullptr && !cameraGainEdit_->hasFocus()) {
-        cameraGainEdit_->setText(QString::number(cameraController_->gain(), 'f', 1));
+        setLineEditTextIfChanged(cameraGainEdit_, QString::number(cameraController_->gain(), 'f', 1));
     }
-    if (scanCameraButton_ != nullptr) scanCameraButton_->setEnabled(true);
-    if (connectCameraButton_ != nullptr) connectCameraButton_->setEnabled(!cameraController_->isConnected());
-    if (disconnectCameraButton_ != nullptr) disconnectCameraButton_->setEnabled(cameraController_->isConnected());
-    if (startCameraLiveButton_ != nullptr) startCameraLiveButton_->setEnabled(cameraController_->isConnected() && !live);
-    if (stopCameraLiveButton_ != nullptr) stopCameraLiveButton_->setEnabled(live);
+    setWidgetEnabledIfChanged(scanCameraButton_, true);
+    setWidgetEnabledIfChanged(connectCameraButton_, !cameraController_->isConnected());
+    setWidgetEnabledIfChanged(disconnectCameraButton_, cameraController_->isConnected());
+    setWidgetEnabledIfChanged(startCameraLiveButton_, cameraController_->isConnected() && !live);
+    setWidgetEnabledIfChanged(stopCameraLiveButton_, live);
 }
 
 void MainWindow::flushLatestCameraFrameToUi()
@@ -947,15 +2265,22 @@ void MainWindow::flushLatestCameraFrameToUi()
     if (frameUpdated && cameraPreviewWidget_ != nullptr) {
         cameraPreviewWidget_->setFrame(latestFrame);
         syncLaserOverlay(latestFrame.size());
+        syncSequenceOverlay();
     }
 }
 
 void MainWindow::applyCameraSettings()
 {
-    bool exposureOk = false;
-    bool gainOk = false;
-    const double exposureUs = cameraExposureEdit_ != nullptr ? cameraExposureEdit_->text().trimmed().toDouble(&exposureOk) : 0.0;
-    const double gain = cameraGainEdit_ != nullptr ? cameraGainEdit_->text().trimmed().toDouble(&gainOk) : 0.0;
+    bool exposureOk = true;
+    bool gainOk = true;
+    double exposureUs = cameraController_->exposureTimeUs();
+    double gain = cameraController_->gain();
+    if (cameraExposureEdit_ != nullptr) {
+        exposureUs = cameraExposureEdit_->text().trimmed().toDouble(&exposureOk);
+    }
+    if (cameraGainEdit_ != nullptr) {
+        gain = cameraGainEdit_->text().trimmed().toDouble(&gainOk);
+    }
 
     if (!exposureOk || exposureUs <= 0.0) {
         QMessageBox::warning(this, "Camera", "Exposure Time doit etre un nombre strictement positif en microsecondes.");
@@ -993,6 +2318,9 @@ void MainWindow::startCameraLive()
 void MainWindow::stopCameraLive()
 {
     try {
+        setGotoArmed(false);
+        setSequenceSelectArmed(false);
+        clearSequencePreviewSelection();
         if (cameraPollTimer_ != nullptr) {
             cameraPollTimer_->stop();
         }
@@ -1058,6 +2386,11 @@ void MainWindow::runMotorTask(const QString& label, std::function<MotorTaskResul
                     self->statusBar()->showMessage(result.message, 3500);
                 }
             } else {
+                if (const auto currentPosition = self->latestPolledMotorPosition(); currentPosition.has_value()) {
+                    self->stopPredictedMotorMotion(currentPosition->x(), currentPosition->y());
+                } else {
+                    self->stopPredictedMotorMotion();
+                }
                 self->appendLog("Erreur: " + result.message);
                 self->statusBar()->showMessage(result.message, 6000);
             }
@@ -1070,6 +2403,7 @@ void MainWindow::startMotorPolling()
 {
     stopMotorPolling();
     motorPollStopRequested_.store(false);
+    motorUiUpdatePending_.store(false);
     motorPollThread_ = std::thread(&MainWindow::motorPollingLoop, this);
 }
 
@@ -1080,6 +2414,7 @@ void MainWindow::stopMotorPolling()
         motorPollThread_.join();
     }
     motorPollStopRequested_.store(false);
+    motorUiUpdatePending_.store(false);
 }
 
 void MainWindow::startCameraPolling()
@@ -1172,8 +2507,9 @@ void MainWindow::motorPollingLoop()
         QString errorMessage;
 
         try {
-            xSnapshot = motorController_->snapshot(hardware::AxisId::X);
-            ySnapshot = motorController_->snapshot(hardware::AxisId::Y);
+            const auto both = motorController_->snapshotBoth();
+            xSnapshot = both.x;
+            ySnapshot = both.y;
         } catch (const std::exception& ex) {
             errorMessage = QString::fromUtf8(ex.what());
         }
@@ -1188,7 +2524,16 @@ void MainWindow::motorPollingLoop()
             }
         }
 
-        std::this_thread::sleep_for(100ms);
+        if ((sequenceRectFollowSample_ || sequenceRunning_) && !motorUiUpdatePending_.exchange(true)) {
+            QMetaObject::invokeMethod(this, [this]() {
+                motorUiUpdatePending_.store(false);
+                if (!cameraController_->isLive()) {
+                    syncSequenceOverlay();
+                }
+            }, Qt::QueuedConnection);
+        }
+
+        std::this_thread::sleep_for((sequenceRectFollowSample_ || sequenceRunning_) ? 10ms : 33ms);
     }
 }
 
@@ -1216,6 +2561,27 @@ void MainWindow::startContinuousJog(hardware::AxisId axis, int direction)
     }
 
     const double limitMm = direction > 0 ? 25.0 : 0.0;
+    if (const auto currentPosition = latestPolledMotorPosition(); currentPosition.has_value()) {
+        if (axis == hardware::AxisId::X) {
+            startPredictedMotorMotion(
+                currentPosition->x(),
+                std::nullopt,
+                limitMm,
+                std::nullopt,
+                speedMmPerS,
+                std::nullopt
+            );
+        } else {
+            startPredictedMotorMotion(
+                std::nullopt,
+                currentPosition->y(),
+                std::nullopt,
+                limitMm,
+                std::nullopt,
+                speedMmPerS
+            );
+        }
+    }
     auto controller = motorController_;
     std::mutex* axisMutex = axis == hardware::AxisId::X ? &xContinuousJogMutex_ : &yContinuousJogMutex_;
     const std::uint64_t generation = axis == hardware::AxisId::X
@@ -1286,6 +2652,16 @@ void MainWindow::stopContinuousJog(hardware::AxisId axis)
 
     if (!wasActive) {
         return;
+    }
+
+    if (const auto estimatedPosition = estimatedMotorPositionForOverlay(); estimatedPosition.has_value()) {
+        if (axis == hardware::AxisId::X) {
+            stopPredictedMotorMotion(estimatedPosition->x(), std::nullopt);
+        } else {
+            stopPredictedMotorMotion(std::nullopt, estimatedPosition->y());
+        }
+    } else {
+        stopPredictedMotorMotion();
     }
 
     auto controller = motorController_;
@@ -1404,6 +2780,7 @@ void MainWindow::onHomeAxes()
 {
     stopContinuousJog(hardware::AxisId::X);
     stopContinuousJog(hardware::AxisId::Y);
+    stopPredictedMotorMotion();
 
     auto controller = motorController_;
     runMotorTask("Initialisation / homing X+Y", [controller]() {
@@ -1414,12 +2791,16 @@ void MainWindow::onHomeAxes()
 
 void MainWindow::onDisconnectAxes()
 {
+    setGotoArmed(false);
+    setSequenceSelectArmed(false);
+    clearSequencePreviewSelection();
     leftKeyHeld_ = false;
     rightKeyHeld_ = false;
     upKeyHeld_ = false;
     downKeyHeld_ = false;
     stopContinuousJog(hardware::AxisId::X);
     stopContinuousJog(hardware::AxisId::Y);
+    stopPredictedMotorMotion();
 
     auto controller = motorController_;
     runMotorTask("Deconnexion moteurs", [controller]() {
@@ -1441,16 +2822,58 @@ void MainWindow::onJogAxis(hardware::AxisId axis, int direction)
     });
 }
 
-void MainWindow::onMoveAbsolute(hardware::AxisId axis)
+void MainWindow::onMoveAbsoluteBoth()
 {
-    stopContinuousJog(axis);
-    const double targetMm = readAbsoluteTargetMm(axis);
-    const QString axisLabel = hardware::axisIdLabel(axis);
+    stopContinuousJog(hardware::AxisId::X);
+    stopContinuousJog(hardware::AxisId::Y);
+    double targetXmm = 0.0;
+    double targetYmm = 0.0;
+    double stageSpeedMmPerS = 0.0;
+    try {
+        targetXmm = readAbsoluteTargetMm(hardware::AxisId::X);
+        targetYmm = readAbsoluteTargetMm(hardware::AxisId::Y);
+        stageSpeedMmPerS = readJogSpeedMmPerS();
+    } catch (const std::exception& ex) {
+        QMessageBox::warning(this, "Mouvement absolu XY", QString::fromUtf8(ex.what()));
+        return;
+    }
+
+    if (const auto currentPosition = latestPolledMotorPosition(); currentPosition.has_value()) {
+        startPredictedMotorMotion(
+            currentPosition->x(),
+            currentPosition->y(),
+            targetXmm,
+            targetYmm,
+            stageSpeedMmPerS,
+            stageSpeedMmPerS
+        );
+    }
     auto controller = motorController_;
 
-    runMotorTask(QString("Mouvement absolu %1").arg(axisLabel), [controller, axis, axisLabel, targetMm]() {
-        controller->moveAbsolute(axis, targetMm, 30000);
-        return MotorTaskResult {true, QString("Mouvement absolu %1 -> %2 mm").arg(axisLabel).arg(targetMm, 0, 'f', 3), {}};
+    runMotorTask("Mouvement absolu XY", [controller, targetXmm, targetYmm, stageSpeedMmPerS, this]() {
+        const auto absBoth = controller->snapshotBoth();
+        if (absBoth.x.positionValid && absBoth.y.positionValid) {
+            startPredictedMotorMotion(
+                absBoth.x.positionMm,
+                absBoth.y.positionMm,
+                targetXmm,
+                targetYmm,
+                stageSpeedMmPerS,
+                stageSpeedMmPerS
+            );
+        }
+        controller->setVelocity(hardware::AxisId::X, stageSpeedMmPerS);
+        controller->setVelocity(hardware::AxisId::Y, stageSpeedMmPerS);
+        controller->moveAbsoluteNoWait(hardware::AxisId::X, targetXmm);
+        controller->moveAbsoluteNoWait(hardware::AxisId::Y, targetYmm);
+        controller->waitAxis(hardware::AxisId::X, 30000);
+        controller->waitAxis(hardware::AxisId::Y, 30000);
+        stopPredictedMotorMotion(targetXmm, targetYmm);
+        return MotorTaskResult {
+            true,
+            QString("Mouvement absolu XY -> X=%1 mm | Y=%2 mm").arg(targetXmm, 0, 'f', 3).arg(targetYmm, 0, 'f', 3),
+            {}
+        };
     });
 }
 

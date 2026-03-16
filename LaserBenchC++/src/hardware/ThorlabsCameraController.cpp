@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <stdexcept>
 #include <thread>
 
@@ -118,8 +119,7 @@ bool ThorlabsCameraController::isConnected() const
 
 bool ThorlabsCameraController::isLive() const
 {
-    std::lock_guard<std::mutex> lock(cameraMutex_);
-    return live_;
+    return live_.load(std::memory_order_relaxed);
 }
 
 void ThorlabsCameraController::connectCamera(const QString& cameraId)
@@ -261,7 +261,7 @@ void ThorlabsCameraController::startLive()
         }
 
         lastFrameCount_ = -1;
-        live_ = true;
+        live_.store(true, std::memory_order_release);
         state_ = core::DeviceState::Connected;
     }
 
@@ -281,13 +281,13 @@ void ThorlabsCameraController::stopLive()
     stopAcquisitionLoop();
 
     std::lock_guard<std::mutex> lock(cameraMutex_);
-    if (cameraHandle_ == nullptr || !live_) {
-        live_ = false;
+    if (cameraHandle_ == nullptr || !live_.load(std::memory_order_acquire)) {
+        live_.store(false, std::memory_order_release);
         return;
     }
 
     tl_camera_disarm(cameraHandle_);
-    live_ = false;
+    live_.store(false, std::memory_order_release);
     state_ = core::DeviceState::Connected;
 }
 
@@ -519,7 +519,7 @@ void ThorlabsCameraController::acquisitionLoop()
     while (!acquisitionStopRequested_.load()) {
         try {
             if (!captureFrame()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                std::this_thread::sleep_for(std::chrono::microseconds(500));
             }
         } catch (const std::exception& ex) {
             std::lock_guard<std::mutex> frameLock(frameMutex_);
@@ -531,11 +531,16 @@ void ThorlabsCameraController::acquisitionLoop()
 
 bool ThorlabsCameraController::captureFrame()
 {
-    QImage completedFrame;
+    // ---- Step 1: hold cameraMutex_ only long enough to get the raw pixel pointer
+    //              and memcpy it to our private buffer. --------------------------------
+    int capturedWidth = 0;
+    int capturedHeight = 0;
+    int capturedBitDepth = 0;
+    bool capturedColorReady = false;
 
     {
         std::lock_guard<std::mutex> lock(cameraMutex_);
-        if (cameraHandle_ == nullptr || !live_) {
+        if (cameraHandle_ == nullptr || !live_.load(std::memory_order_relaxed)) {
             return false;
         }
 
@@ -558,46 +563,60 @@ bool ThorlabsCameraController::captureFrame()
         if (frameCount == lastFrameCount_) {
             return false;
         }
-
-        const int nextBufferIndex = 1 - activeFrameBufferIndex_;
-        if (frameBuffers_[nextBufferIndex].isNull()
-            || frameBuffers_[nextBufferIndex].size() != QSize(imageWidth_, imageHeight_)
-            || frameBuffers_[nextBufferIndex].format() != QImage::Format_RGB888) {
-            frameBuffers_[nextBufferIndex] = QImage(imageWidth_, imageHeight_, QImage::Format_RGB888);
-        }
-
-        unsigned char* rgbBuffer = frameBuffers_[nextBufferIndex].bits();
-
-        if (colorFrameReady_ && monoToColorProcessor_ != nullptr) {
-            if (tl_mono_to_color_transform_to_24(
-                    monoToColorProcessor_,
-                    imageBuffer,
-                    imageWidth_,
-                    imageHeight_,
-                    rgbBuffer) != 0) {
-                state_ = core::DeviceState::Error;
-                throwColorError("Camera color transform failed");
-            }
-        } else {
-            const int shift = std::max(bitDepth_ - 8, 0);
-            for (int y = 0; y < imageHeight_; ++y) {
-                auto* line = frameBuffers_[nextBufferIndex].scanLine(y);
-                const auto* src = imageBuffer + (y * imageWidth_);
-                for (int x = 0; x < imageWidth_; ++x) {
-                    const unsigned char value = static_cast<unsigned char>(src[x] >> shift);
-                    line[(x * 3) + 0] = value;
-                    line[(x * 3) + 1] = value;
-                    line[(x * 3) + 2] = value;
-                }
-            }
-        }
-
-        activeFrameBufferIndex_ = nextBufferIndex;
         lastFrameCount_ = frameCount;
-        completedFrame = frameBuffers_[activeFrameBufferIndex_];
+
+        // Copy raw pixels while holding the lock (fast memcpy, ~1 ms for a 5 MP sensor).
+        // The conversion happens outside the lock so isLive() / setExposure() / etc.
+        // are never blocked during the expensive colour-transform step.
+        const std::size_t pixelCount = static_cast<std::size_t>(imageWidth_) * static_cast<std::size_t>(imageHeight_);
+        acquisitionRawBuffer_.resize(pixelCount);
+        std::memcpy(acquisitionRawBuffer_.data(), imageBuffer, pixelCount * sizeof(unsigned short));
+
+        capturedWidth = imageWidth_;
+        capturedHeight = imageHeight_;
+        capturedBitDepth = bitDepth_;
+        capturedColorReady = colorFrameReady_ && (monoToColorProcessor_ != nullptr);
     }
 
-    publishFrame(completedFrame);
+    // ---- Step 2: convert outside the lock. -----------------------------------------
+    // monoToColorProcessor_, frameBuffers_, activeFrameBufferIndex_ are only touched
+    // by this thread during live mode, so no lock needed here.
+    const int nextBufferIndex = 1 - activeFrameBufferIndex_;
+    if (frameBuffers_[nextBufferIndex].isNull()
+        || frameBuffers_[nextBufferIndex].size() != QSize(capturedWidth, capturedHeight)
+        || frameBuffers_[nextBufferIndex].format() != QImage::Format_RGB888) {
+        frameBuffers_[nextBufferIndex] = QImage(capturedWidth, capturedHeight, QImage::Format_RGB888);
+    }
+
+    unsigned char* rgbBuffer = frameBuffers_[nextBufferIndex].bits();
+
+    if (capturedColorReady) {
+        if (tl_mono_to_color_transform_to_24(
+                monoToColorProcessor_,
+                acquisitionRawBuffer_.data(),
+                capturedWidth,
+                capturedHeight,
+                rgbBuffer) != 0) {
+            std::lock_guard<std::mutex> lock(cameraMutex_);
+            state_ = core::DeviceState::Error;
+            throwColorError("Camera color transform failed");
+        }
+    } else {
+        const int shift = std::max(capturedBitDepth - 8, 0);
+        for (int y = 0; y < capturedHeight; ++y) {
+            auto* line = frameBuffers_[nextBufferIndex].scanLine(y);
+            const auto* src = acquisitionRawBuffer_.data() + (static_cast<std::size_t>(y) * static_cast<std::size_t>(capturedWidth));
+            for (int x = 0; x < capturedWidth; ++x) {
+                const unsigned char value = static_cast<unsigned char>(src[x] >> shift);
+                line[(x * 3) + 0] = value;
+                line[(x * 3) + 1] = value;
+                line[(x * 3) + 2] = value;
+            }
+        }
+    }
+
+    activeFrameBufferIndex_ = nextBufferIndex;
+    publishFrame(frameBuffers_[activeFrameBufferIndex_]);
     return true;
 }
 

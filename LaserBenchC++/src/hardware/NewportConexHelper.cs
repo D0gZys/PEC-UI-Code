@@ -70,6 +70,8 @@ internal static class Program
                 return SetVelocity(ReadString(request, "axis"), ReadDouble(request, "speed"));
             case "moveAbsoluteNoWait":
                 return MoveAbsoluteNoWait(ReadString(request, "axis"), ReadDouble(request, "position"));
+            case "waitAxis":
+                return WaitAxis(ReadString(request, "axis"), ReadInt(request, "timeoutMs", 30000));
             case "stopAxis":
                 return StopAxis(ReadString(request, "axis"));
             case "moveRelative":
@@ -224,6 +226,12 @@ internal static class Program
         }
         AxisOrThrow(axis).MoveAbsoluteNoWait(position);
         return Ok("MoveAbsoluteNoWait sent for " + axis);
+    }
+
+    private static Dictionary<string, object> WaitAxis(string axis, int timeoutMs)
+    {
+        AxisOrThrow(axis).WaitDone(timeoutMs);
+        return Ok("Motion complete for " + axis);
     }
 
     private static Dictionary<string, object> StopAxis(string axis)
@@ -544,7 +552,7 @@ internal static class Program
             return position;
         }
 
-        private void WaitDone(int timeoutMs)
+        public void WaitDone(int timeoutMs)
         {
             DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
             string lastState = string.Empty;
