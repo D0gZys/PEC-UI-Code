@@ -56,6 +56,8 @@ qt_add_executable(LaserBench
     src/core/AppState.cpp
     src/core/AppState.hpp
     src/hardware/DeviceContracts.hpp
+    src/hardware/BioLogicController.cpp
+    src/hardware/BioLogicController.hpp
     src/hardware/MockHardware.cpp
     src/hardware/MockHardware.hpp
     src/hardware/NewportConexController.cpp
@@ -66,6 +68,10 @@ qt_add_executable(LaserBench
     src/ui/CameraPreviewWidget.hpp
     src/ui/MainWindow.cpp
     src/ui/MainWindow.hpp
+    src/ui/PotentiostatGraphWidget.cpp
+    src/ui/PotentiostatGraphWidget.hpp
+    src/ui/PotentiostatHeatmapWidget.cpp
+    src/ui/PotentiostatHeatmapWidget.hpp
     "${THORLABS_CAMERA_LOAD_C}"
     "${THORLABS_CAMERA_LOAD_H}"
     "${THORLABS_MONO_TO_COLOR_LOAD_C}"

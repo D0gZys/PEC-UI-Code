@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(taskkill //F //IM LaserBench.exe)",
+      "Bash(find c:UsersthomaDocumentsStageProgrammePotentiostat -type f -name *.py)",
+      "Bash(grep -E \"\\\\.py$\")",
+      "Bash(xargs grep:*)",
+      "Bash(cmake --build build --config Release)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\thoma\\Documents\\Stage\\Programme\\LaserBenchC++"
+    ]
+  }
+}

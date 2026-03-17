@@ -5,8 +5,11 @@
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDialog>
+#include <QDir>
 #include <QEvent>
+#include <QFileDialog>
 #include <QFormLayout>
 #include <QFrame>
 #include <QGridLayout>
@@ -36,6 +39,9 @@
 #include <thread>
 
 #include "ui/CameraPreviewWidget.hpp"
+#include "ui/PotentiostatGraphWidget.hpp"
+#include "ui/PotentiostatHeatmapWidget.hpp"
+#include "hardware/BioLogicController.hpp"
 #include "hardware/MockHardware.hpp"
 #include "hardware/ThorlabsCameraController.hpp"
 
@@ -170,7 +176,11 @@ MainWindow::MainWindow(QWidget* parent)
     , snapshot_(core::makeDefaultSnapshot())
     , motorController_(std::make_shared<hardware::NewportConexController>())
     , cameraController_(std::make_unique<hardware::ThorlabsCameraController>())
-    , potentiostatController_(std::make_unique<hardware::MockPotentiostatController>())
+    , potentiostatController_([]{
+        const QString appDir = QCoreApplication::applicationDirPath();
+        const QString helperPath = QDir::cleanPath(appDir + "/../../helpers/PotentiostatHelper.py");
+        return std::make_shared<hardware::BioLogicController>(helperPath);
+    }())
 {
     setWindowTitle("LaserBench");
     resize(1500, 920);
@@ -304,6 +314,9 @@ MainWindow::~MainWindow()
     sequenceStopRequested_.store(true);
     if (sequenceThread_.joinable()) {
         sequenceThread_.join();
+    }
+    if (potentiostatThread_.joinable()) {
+        potentiostatThread_.join();
     }
     if (motorPollTimer_ != nullptr) {
         motorPollTimer_->stop();
@@ -477,26 +490,15 @@ void MainWindow::buildUi()
     mainLayout->setContentsMargins(18, 12, 18, 14);
     mainLayout->setSpacing(10);
 
-    auto* verticalSplitter = new QSplitter(Qt::Vertical);
-    verticalSplitter->setChildrenCollapsible(false);
+    logView_ = new QPlainTextEdit;
+    logView_->setReadOnly(true);
+    logView_->setMaximumBlockCount(1000);
+    logView_->hide();
 
     tabWidget_ = new QTabWidget;
     tabWidget_->addTab(buildSetupTab(), "Parametrage");
     tabWidget_->addTab(buildMeasureTab(), "Mesure");
-    verticalSplitter->addWidget(tabWidget_);
-
-    auto* journalBox = createGroupBox("Journal");
-    auto* journalLayout = new QVBoxLayout(journalBox);
-    logView_ = new QPlainTextEdit;
-    logView_->setReadOnly(true);
-    logView_->setMaximumBlockCount(600);
-    journalLayout->addWidget(logView_);
-    verticalSplitter->addWidget(journalBox);
-    verticalSplitter->setStretchFactor(0, 1);
-    verticalSplitter->setStretchFactor(1, 0);
-    verticalSplitter->setSizes({760, 190});
-
-    mainLayout->addWidget(verticalSplitter, 1);
+    mainLayout->addWidget(tabWidget_, 1);
 
     setCentralWidget(central);
 
@@ -520,42 +522,122 @@ QWidget* MainWindow::buildSetupTab()
     auto* splitter = new QSplitter(Qt::Horizontal);
     layout->addWidget(splitter, 1);
 
+    // ── Left panel ────────────────────────────────────────────────
     auto* leftPanel = new QWidget;
-    leftPanel->setMinimumWidth(430);
+    leftPanel->setMinimumWidth(300);
     auto* leftLayout = new QVBoxLayout(leftPanel);
     leftLayout->setContentsMargins(0, 0, 0, 0);
-    leftLayout->setSpacing(10);
+    leftLayout->setSpacing(4);
 
-    auto* motorsBox = createGroupBox("Controle moteur");
-    auto* motorsLayout = new QGridLayout(motorsBox);
+    // Potentiostat configuration
+    auto* potBox = createGroupBox("Potentiostat");
+    auto* potLayout = new QGridLayout(potBox);
+    potLayout->setSpacing(3);
+    potLayout->setContentsMargins(6, 4, 6, 4);
 
-    jogStepEdit_ = new QLineEdit("0.500");
-    motorsLayout->addWidget(new QLabel("Vitesse jog (mm/s)"), 0, 0);
-    motorsLayout->addWidget(jogStepEdit_, 0, 1);
-    motorsLayout->addWidget(new QLabel("Position X"), 1, 0);
-    xPositionValueLabel_ = new QLabel("-");
-    xPositionValueLabel_->setStyleSheet("font-size:18px; font-weight:600; color:#111927;");
-    motorsLayout->addWidget(xPositionValueLabel_, 1, 1);
-    motorsLayout->addWidget(new QLabel("Position Y"), 1, 2);
-    yPositionValueLabel_ = new QLabel("-");
-    yPositionValueLabel_->setStyleSheet("font-size:18px; font-weight:600; color:#111927;");
-    motorsLayout->addWidget(yPositionValueLabel_, 1, 3);
+    // Row 0 : DLL path + browse
+    potLayout->addWidget(new QLabel("Chemin DLL"), 0, 0);
+    potentiostatDllPathEdit_ = new QLineEdit("C:\\EC-Lab Development Package\\lib");
+    potentiostatDllPathEdit_->setPlaceholderText("Chemin vers EClib64.dll...");
+    potLayout->addWidget(potentiostatDllPathEdit_, 0, 1, 1, 2);
+    auto* browseDllButton = createActionButton("...");
+    browseDllButton->setMaximumWidth(30);
+    potLayout->addWidget(browseDllButton, 0, 3);
 
-    motorsLayout->addWidget(new QLabel("Absolu X (mm)"), 2, 0);
-    absXEdit_ = new QLineEdit("0.000");
-    motorsLayout->addWidget(absXEdit_, 2, 1);
-    motorsLayout->addWidget(new QLabel("Absolu Y (mm)"), 2, 2);
-    absYEdit_ = new QLineEdit("0.000");
-    motorsLayout->addWidget(absYEdit_, 2, 3);
-    moveAbsXYButton_ = createActionButton("Aller XY");
-    motorsLayout->addWidget(moveAbsXYButton_, 3, 0, 1, 4);
+    // Row 1 : IP + channel
+    potLayout->addWidget(new QLabel("IP"), 1, 0);
+    potentiostatAddressEdit_ = new QLineEdit("169.254.3.150");
+    potLayout->addWidget(potentiostatAddressEdit_, 1, 1);
+    potLayout->addWidget(new QLabel("Canal"), 1, 2);
+    potentiostatChannelCombo_ = new QComboBox;
+    for (int i = 1; i <= 16; ++i) {
+        potentiostatChannelCombo_->addItem(QString::number(i));
+    }
+    potLayout->addWidget(potentiostatChannelCombo_, 1, 3);
 
-    connect(moveAbsXYButton_, &QPushButton::clicked, this, &MainWindow::onMoveAbsoluteBoth);
+    // Row 2 : Connect / Firmware / Disconnect
+    potentiostatConnectButton_ = createActionButton("Connecter");
+    potentiostatConnectButton_->setProperty("accent", true);
+    potentiostatFirmwareButton_ = createActionButton("Firmware");
+    potentiostatFirmwareButton_->setEnabled(false);
+    potentiostatDisconnectButton_ = createActionButton("Deconnecter");
+    potentiostatDisconnectButton_->setEnabled(false);
+    potLayout->addWidget(potentiostatConnectButton_,    2, 0, 1, 2);
+    potLayout->addWidget(potentiostatFirmwareButton_,   2, 2);
+    potLayout->addWidget(potentiostatDisconnectButton_, 2, 3);
 
-    leftLayout->addWidget(motorsBox);
+    // Row 3 : status
+    potentiostatStatusLabel_ = new QLabel("Deconnecte");
+    potentiostatStatusLabel_->setStyleSheet("color:#5c6570; font-size:9pt;");
+    potLayout->addWidget(potentiostatStatusLabel_, 3, 0, 1, 4);
 
-    auto* laserBox = createGroupBox("Objectif / Laser");
+    // -- Parametres CA --
+    auto* caHeaderLabel = new QLabel("Parametres CA");
+    caHeaderLabel->setStyleSheet("font-weight:600; font-size:9pt; color:#1f6feb; margin-top:4px;");
+    potLayout->addWidget(caHeaderLabel, 4, 0, 1, 4);
+
+    // Row 5 : Ewe (V) + vs reference
+    potLayout->addWidget(new QLabel("Ewe (V)"), 5, 0);
+    potentiostatVoltageEdit_ = new QLineEdit("0.500");
+    potLayout->addWidget(potentiostatVoltageEdit_, 5, 1);
+    potLayout->addWidget(new QLabel("vs"), 5, 2);
+    potentiostatVsCombo_ = new QComboBox;
+    potentiostatVsCombo_->addItems({"Ref", "Pref"});
+    potLayout->addWidget(potentiostatVsCombo_, 5, 3);
+
+    // Row 6 : E Range
+    potLayout->addWidget(new QLabel("E Range"), 6, 0);
+    potentiostatErangeCombo_ = new QComboBox;
+    potentiostatErangeCombo_->addItems({"-2,5 V; 2,5 V", "-5 V; 5 V", "-10 V; 10 V", "Auto"});
+    potentiostatErangeCombo_->setCurrentIndex(0);
+    potLayout->addWidget(potentiostatErangeCombo_, 6, 1, 1, 3);
+
+    // Row 7 : I Range
+    potLayout->addWidget(new QLabel("I Range"), 7, 0);
+    potentiostatCurrentRangeCombo_ = new QComboBox;
+    potentiostatCurrentRangeCombo_->addItems({
+        "100 pA", "1 nA", "10 nA", "100 nA",
+        "1 uA", "10 uA", "100 uA",
+        "1 mA", "10 mA", "100 mA", "1 A",
+        "Booster", "Auto"
+    });
+    potentiostatCurrentRangeCombo_->setCurrentText("Auto");
+    potLayout->addWidget(potentiostatCurrentRangeCombo_, 7, 1, 1, 3);
+
+    // Row 8 : Bandwidth + Record dT
+    potLayout->addWidget(new QLabel("Bandwidth"), 8, 0);
+    potentiostatBandwidthCombo_ = new QComboBox;
+    for (int i = 1; i <= 9; ++i) {
+        potentiostatBandwidthCombo_->addItem(QString::number(i));
+    }
+    potentiostatBandwidthCombo_->setCurrentText("8");
+    potLayout->addWidget(potentiostatBandwidthCombo_, 8, 1);
+    // record_dt is derived from sequence duration — no separate field
+
+    // Row 9 : N Cycles
+    potLayout->addWidget(new QLabel("Cycles"), 9, 0);
+    potentiostatNbCyclesEdit_ = new QLineEdit("0");
+    potentiostatNbCyclesEdit_->setMaximumWidth(60);
+    potLayout->addWidget(potentiostatNbCyclesEdit_, 9, 1);
+
+    // Wire up connect/disconnect/firmware/browse buttons
+    connect(browseDllButton, &QPushButton::clicked, this, [this]() {
+        const QString path = QFileDialog::getOpenFileName(this, "Selectionner EClib64.dll", QString(), "DLL (*.dll)");
+        if (!path.isEmpty() && potentiostatDllPathEdit_ != nullptr) {
+            potentiostatDllPathEdit_->setText(QDir::toNativeSeparators(path));
+        }
+    });
+    connect(potentiostatConnectButton_,    &QPushButton::clicked, this, &MainWindow::onConnectPotentiostat);
+    connect(potentiostatFirmwareButton_,   &QPushButton::clicked, this, &MainWindow::onLoadFirmware);
+    connect(potentiostatDisconnectButton_, &QPushButton::clicked, this, &MainWindow::onDisconnectPotentiostat);
+
+    leftLayout->addWidget(potBox);
+
+    // Objectif / GoTo
+    auto* laserBox = createGroupBox("Objectif / GoTo");
     auto* laserLayout = new QGridLayout(laserBox);
+    laserLayout->setSpacing(3);
+    laserLayout->setContentsMargins(6, 4, 6, 4);
     laserLayout->addWidget(new QLabel("Objectif"), 0, 0);
     objectiveCombo_ = new QComboBox;
     for (const ObjectivePreset& preset : kObjectivePresets) {
@@ -585,8 +667,11 @@ QWidget* MainWindow::buildSetupTab()
 
     leftLayout->addWidget(laserBox);
 
+    // Sequence
     auto* sequenceBox = createGroupBox("Sequence balayage");
     auto* sequenceLayout = new QGridLayout(sequenceBox);
+    sequenceLayout->setSpacing(3);
+    sequenceLayout->setContentsMargins(6, 4, 6, 4);
     sequenceLayout->addWidget(new QLabel("Mode"), 0, 0);
     sequenceModeCombo_ = new QComboBox;
     sequenceModeCombo_->addItems({"Lineaire", "Rectangle"});
@@ -598,51 +683,45 @@ QWidget* MainWindow::buildSetupTab()
     sequenceLayout->addWidget(new QLabel("Duree/pt (s)"), 1, 0);
     sequenceDurationEdit_ = new QLineEdit("0.5");
     sequenceLayout->addWidget(sequenceDurationEdit_, 1, 1);
+    auto* durationHintLabel = new QLabel("= duree CA/OCV par point");
+    durationHintLabel->setStyleSheet("color:#5c6570; font-size:8pt;");
+    sequenceLayout->addWidget(durationHintLabel, 1, 2, 1, 2);
+
+    sequenceStartLabel_ = new QLabel("Depart  : ---");
+    sequenceStartLabel_->setStyleSheet("color:#1a7f37; font-size:9pt;");
+    sequenceLayout->addWidget(sequenceStartLabel_, 2, 0, 1, 4);
+    sequenceEndLabel_ = new QLabel("Arrivee : ---");
+    sequenceEndLabel_->setStyleSheet("color:#8b2020; font-size:9pt;");
+    sequenceLayout->addWidget(sequenceEndLabel_, 3, 0, 1, 4);
 
     sequenceSetStartButton_ = createActionButton("Set Depart");
     sequenceSetEndButton_ = createActionButton("Set Arrivee");
-    sequenceLayout->addWidget(sequenceSetStartButton_, 2, 0, 1, 2);
-    sequenceLayout->addWidget(sequenceSetEndButton_, 2, 2, 1, 2);
+    sequenceLayout->addWidget(sequenceSetStartButton_, 4, 0, 1, 2);
+    sequenceLayout->addWidget(sequenceSetEndButton_, 4, 2, 1, 2);
 
     sequenceRunButton_ = createActionButton("Lancer");
     sequenceRunButton_->setProperty("accent", true);
     sequenceStopButton_ = createActionButton("Stop");
-    sequenceLayout->addWidget(sequenceRunButton_, 3, 0, 1, 2);
-    sequenceLayout->addWidget(sequenceStopButton_, 3, 2, 1, 2);
-
-    sequencePickButton_ = createActionButton("Zone image");
-    sequencePickButton_->setProperty("accent", true);
-    sequenceLayout->addWidget(sequencePickButton_, 4, 0, 1, 2);
-    auto* zoneCheckWidget = new QWidget;
-    auto* zoneCheckLayout = new QVBoxLayout(zoneCheckWidget);
-    zoneCheckLayout->setContentsMargins(0, 0, 0, 0);
-    zoneCheckLayout->setSpacing(2);
-    showZoneCheck_ = new QCheckBox("Zone visible");
-    showZoneCheck_->setChecked(true);
-    showZoneCheck_->setStyleSheet("font-size:9pt;");
-    hideWaypointsCheck_ = new QCheckBox("Masquer points");
-    hideWaypointsCheck_->setStyleSheet("font-size:9pt;");
-    zoneCheckLayout->addWidget(showZoneCheck_);
-    zoneCheckLayout->addWidget(hideWaypointsCheck_);
-    sequenceLayout->addWidget(zoneCheckWidget, 4, 2, 1, 2);
+    sequenceLayout->addWidget(sequenceRunButton_, 5, 0, 1, 2);
+    sequenceLayout->addWidget(sequenceStopButton_, 5, 2, 1, 2);
 
     sequenceStatusLabel_ = new QLabel;
     sequenceStatusLabel_->setStyleSheet("color:#1f6feb; font-size:9pt;");
-    sequenceLayout->addWidget(sequenceStatusLabel_, 5, 0, 1, 4);
+    sequenceLayout->addWidget(sequenceStatusLabel_, 6, 0, 1, 4);
 
     connect(sequenceSetStartButton_, &QPushButton::clicked, this, &MainWindow::onSetSequenceStart);
     connect(sequenceSetEndButton_, &QPushButton::clicked, this, &MainWindow::onSetSequenceEnd);
     connect(sequenceRunButton_, &QPushButton::clicked, this, &MainWindow::onRunSequence);
     connect(sequenceStopButton_, &QPushButton::clicked, this, &MainWindow::onStopSequence);
-    connect(sequencePickButton_, &QPushButton::clicked, this, &MainWindow::onArmSequenceRectangle);
 
     leftLayout->addWidget(sequenceBox);
     leftLayout->addStretch();
 
+    // ── Right area ────────────────────────────────────────────────
     auto* rightPanel = new QWidget;
     auto* rightLayout = new QVBoxLayout(rightPanel);
     rightLayout->setContentsMargins(0, 0, 0, 0);
-    rightLayout->setSpacing(0);
+    rightLayout->setSpacing(6);
 
     cameraPreviewWidget_ = new CameraPreviewWidget;
     cameraPreviewWidget_->setStyleSheet("background:#0b1120; border:1px solid #d8e0e8; border-radius:16px;");
@@ -657,11 +736,84 @@ QWidget* MainWindow::buildSetupTab()
     connect(cameraPreviewWidget_, &CameraPreviewWidget::backgroundClicked, this, &MainWindow::onPreviewBackgroundClicked);
     applyObjectivePreset();
 
+    // Bottom strip: motor controls + zone selection
+    auto* bottomStrip = new QWidget;
+    auto* bottomLayout = new QHBoxLayout(bottomStrip);
+    bottomLayout->setContentsMargins(0, 0, 0, 0);
+    bottomLayout->setSpacing(8);
+
+    // Motor controls
+    auto* motorBox = createGroupBox("Moteurs");
+    auto* motorLayout = new QGridLayout(motorBox);
+
+    motorLayout->addWidget(new QLabel("X :"), 0, 0);
+    xPositionValueLabel_ = new QLabel("-");
+    xPositionValueLabel_->setStyleSheet("font-size:16px; font-weight:600; color:#111927; min-width:64px;");
+    motorLayout->addWidget(xPositionValueLabel_, 0, 1);
+    motorLayout->addWidget(new QLabel("mm"), 0, 2);
+    motorLayout->addWidget(new QLabel("Y :"), 0, 3);
+    yPositionValueLabel_ = new QLabel("-");
+    yPositionValueLabel_->setStyleSheet("font-size:16px; font-weight:600; color:#111927; min-width:64px;");
+    motorLayout->addWidget(yPositionValueLabel_, 0, 4);
+    motorLayout->addWidget(new QLabel("mm"), 0, 5);
+
+    motorLayout->addWidget(new QLabel("Vit. (mm/s)"), 1, 0);
+    jogStepEdit_ = new QLineEdit("0.500");
+    jogStepEdit_->setMaximumWidth(66);
+    motorLayout->addWidget(jogStepEdit_, 1, 1, 1, 2);
+    auto* xMinBtn = createActionButton("X-");
+    auto* xPlusBtn = createActionButton("X+");
+    auto* yMinBtn = createActionButton("Y-");
+    auto* yPlusBtn = createActionButton("Y+");
+    motorLayout->addWidget(xMinBtn, 1, 3);
+    motorLayout->addWidget(xPlusBtn, 1, 4);
+    motorLayout->addWidget(yMinBtn, 1, 5);
+    motorLayout->addWidget(yPlusBtn, 1, 6);
+
+    motorLayout->addWidget(new QLabel("Abs X"), 2, 0);
+    absXEdit_ = new QLineEdit("0.000");
+    absXEdit_->setMaximumWidth(66);
+    motorLayout->addWidget(absXEdit_, 2, 1, 1, 2);
+    motorLayout->addWidget(new QLabel("Y"), 2, 3);
+    absYEdit_ = new QLineEdit("0.000");
+    absYEdit_->setMaximumWidth(66);
+    motorLayout->addWidget(absYEdit_, 2, 4, 1, 2);
+    moveAbsXYButton_ = createActionButton("Aller XY");
+    motorLayout->addWidget(moveAbsXYButton_, 2, 6);
+
+    connect(xMinBtn, &QPushButton::clicked, this, [this]() { onJogAxis(hardware::AxisId::X, -1); });
+    connect(xPlusBtn, &QPushButton::clicked, this, [this]() { onJogAxis(hardware::AxisId::X, +1); });
+    connect(yMinBtn, &QPushButton::clicked, this, [this]() { onJogAxis(hardware::AxisId::Y, -1); });
+    connect(yPlusBtn, &QPushButton::clicked, this, [this]() { onJogAxis(hardware::AxisId::Y, +1); });
+    connect(moveAbsXYButton_, &QPushButton::clicked, this, &MainWindow::onMoveAbsoluteBoth);
+
+    bottomLayout->addWidget(motorBox, 1);
+
+    // Zone selection
+    auto* zoneBox = createGroupBox("Zone image");
+    auto* zoneLayout = new QVBoxLayout(zoneBox);
+    sequencePickButton_ = createActionButton("Definir zone");
+    sequencePickButton_->setProperty("accent", true);
+    zoneLayout->addWidget(sequencePickButton_);
+    showZoneCheck_ = new QCheckBox("Zone visible");
+    showZoneCheck_->setChecked(true);
+    showZoneCheck_->setStyleSheet("font-size:9pt;");
+    hideWaypointsCheck_ = new QCheckBox("Masquer points");
+    hideWaypointsCheck_->setStyleSheet("font-size:9pt;");
+    zoneLayout->addWidget(showZoneCheck_);
+    zoneLayout->addWidget(hideWaypointsCheck_);
+
+    connect(sequencePickButton_, &QPushButton::clicked, this, &MainWindow::onArmSequenceRectangle);
+
+    bottomLayout->addWidget(zoneBox);
+
+    rightLayout->addWidget(bottomStrip);
+
     splitter->addWidget(leftPanel);
     splitter->addWidget(rightPanel);
     splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
-    splitter->setSizes({430, 1020});
+    splitter->setSizes({340, 1020});
 
     return page;
 }
@@ -2047,17 +2199,215 @@ void MainWindow::onPreviewBackgroundClicked()
 QWidget* MainWindow::buildMeasureTab()
 {
     auto* page = new QWidget;
-    auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(10, 10, 10, 10);
-    layout->setSpacing(10);
+    auto* outerLayout = new QHBoxLayout(page);
+    outerLayout->setContentsMargins(10, 10, 10, 10);
+    outerLayout->setSpacing(10);
 
-    auto* placeholder = createPlaceholderPanel(
-        "Mesure et cartographie",
-        "Cet onglet recevra ensuite l'acquisition potentiostat, la grille de balayage, le graphe temps / courant et la carte 2D de l'echantillon."
-    );
-    layout->addWidget(placeholder, 1);
+    auto* splitter = new QSplitter(Qt::Horizontal);
+    outerLayout->addWidget(splitter, 1);
+
+    // ── Left: acquisition controls ────────────────────────────────
+    auto* leftPanel = new QWidget;
+    leftPanel->setMinimumWidth(280);
+    auto* leftLayout = new QVBoxLayout(leftPanel);
+    leftLayout->setContentsMargins(0, 0, 0, 0);
+    leftLayout->setSpacing(8);
+
+    // Potentiostat status
+    auto* potStatusBox = createGroupBox("Potentiostat – Acquisition");
+    auto* potStatusLayout = new QGridLayout(potStatusBox);
+
+    potentiostatRunButton_ = createActionButton("Lancer CA");
+    potentiostatRunButton_->setProperty("accent", true);
+    potentiostatStopButton_ = createActionButton("Arreter");
+    potStatusLayout->addWidget(potentiostatRunButton_, 0, 0, 1, 2);
+    potStatusLayout->addWidget(potentiostatStopButton_, 0, 2, 1, 2);
+
+    potStatusLayout->addWidget(new QLabel("Courant mesure :"), 1, 0, 1, 2);
+    potentiostatCurrentLabel_ = new QLabel("---  A");
+    potentiostatCurrentLabel_->setStyleSheet("font-size:20px; font-weight:700; color:#1f6feb;");
+    potStatusLayout->addWidget(potentiostatCurrentLabel_, 1, 2, 1, 2);
+
+    potentiostatMeasureStateLabel_ = new QLabel("Etat : non connecte");
+    potentiostatMeasureStateLabel_->setStyleSheet("color:#5c6570; font-size:9pt;");
+    potStatusLayout->addWidget(potentiostatMeasureStateLabel_, 2, 0, 1, 4);
+
+    potStatusLayout->addWidget(new QLabel("Points acquis :"), 3, 0, 1, 2);
+    potentiostatPointCountLabel_ = new QLabel("0");
+    potentiostatPointCountLabel_->setStyleSheet("font-weight:600; color:#111927;");
+    potStatusLayout->addWidget(potentiostatPointCountLabel_, 3, 2, 1, 2);
+
+    potStatusLayout->addWidget(new QLabel("Progression :"), 4, 0, 1, 2);
+    potentiostatProgressLabel_ = new QLabel("En attente");
+    potentiostatProgressLabel_->setStyleSheet("font-weight:600; color:#111927;");
+    potStatusLayout->addWidget(potentiostatProgressLabel_, 4, 2, 1, 2);
+
+    connect(potentiostatRunButton_,  &QPushButton::clicked, this, &MainWindow::onStartCaPotentiostat);
+    connect(potentiostatStopButton_, &QPushButton::clicked, this, &MainWindow::onStopCaPotentiostat);
+    potentiostatRunButton_->setEnabled(false);
+    potentiostatStopButton_->setEnabled(false);
+
+    leftLayout->addWidget(potStatusBox);
+
+    auto* graphModeBox = createGroupBox("Graphe");
+    auto* graphModeLayout = new QGridLayout(graphModeBox);
+    graphModeLayout->addWidget(new QLabel("Type"), 0, 0);
+    potentiostatGraphTypeCombo_ = new QComboBox;
+    potentiostatGraphTypeCombo_->addItems({"I = f(t)", "Ewe = f(t)", "I = f(Ewe)", "Ewe = f(I)"});
+    graphModeLayout->addWidget(potentiostatGraphTypeCombo_, 0, 1);
+    connect(potentiostatGraphTypeCombo_, &QComboBox::currentIndexChanged, this, [this](int) {
+        refreshPotentiostatVisualization();
+    });
+    leftLayout->addWidget(graphModeBox);
+
+    // Acquisition log
+    auto* logBox = createGroupBox("Journal d'acquisition");
+    auto* logBoxLayout = new QVBoxLayout(logBox);
+    logView_->setParent(logBox);
+    logView_->setVisible(true);
+    logView_->setMaximumHeight(220);
+    logBoxLayout->addWidget(logView_);
+    leftLayout->addWidget(logBox, 1);
+
+    // ── Right: graphs / map placeholders ─────────────────────────
+    auto* rightPanel = new QWidget;
+    auto* rightLayout = new QVBoxLayout(rightPanel);
+    rightLayout->setContentsMargins(0, 0, 0, 0);
+    rightLayout->setSpacing(8);
+
+    auto* graphBox = createGroupBox("Courbes");
+    auto* graphLayout = new QVBoxLayout(graphBox);
+    potentiostatGraphWidget_ = new PotentiostatGraphWidget;
+    graphLayout->addWidget(potentiostatGraphWidget_, 1);
+    rightLayout->addWidget(graphBox, 1);
+
+    auto* mapBox = createGroupBox("Cartographie");
+    auto* mapLayout = new QVBoxLayout(mapBox);
+    potentiostatHeatmapWidget_ = new PotentiostatHeatmapWidget;
+    mapLayout->addWidget(potentiostatHeatmapWidget_, 1);
+    rightLayout->addWidget(mapBox, 1);
+
+    splitter->addWidget(leftPanel);
+    splitter->addWidget(rightPanel);
+    splitter->setStretchFactor(0, 0);
+    splitter->setStretchFactor(1, 1);
+    splitter->setSizes({300, 900});
 
     return page;
+}
+
+void MainWindow::clearPotentiostatVisualization()
+{
+    potentiostatPlotTimes_.clear();
+    potentiostatPlotCurrents_.clear();
+    potentiostatPlotEwe_.clear();
+    potentiostatMatrix_.clear();
+    potentiostatScanOrder_.clear();
+    potentiostatRows_ = 0;
+    potentiostatCols_ = 0;
+    potentiostatSampleCount_ = 0;
+
+    if (potentiostatPointCountLabel_ != nullptr) {
+        potentiostatPointCountLabel_->setText("0");
+    }
+    if (potentiostatProgressLabel_ != nullptr) {
+        potentiostatProgressLabel_->setText("En attente");
+    }
+    if (potentiostatGraphWidget_ != nullptr) {
+        potentiostatGraphWidget_->clear();
+    }
+    if (potentiostatHeatmapWidget_ != nullptr) {
+        potentiostatHeatmapWidget_->clear();
+    }
+}
+
+void MainWindow::resetPotentiostatVisualization(int rows, int cols, const std::vector<std::pair<int, int>>& order)
+{
+    clearPotentiostatVisualization();
+    potentiostatRows_ = rows;
+    potentiostatCols_ = cols;
+    potentiostatScanOrder_ = order;
+    potentiostatMatrix_.assign(static_cast<std::size_t>(std::max(0, rows * cols)), std::nullopt);
+    refreshPotentiostatVisualization();
+}
+
+void MainWindow::appendPotentiostatVisualizationSample(
+    int index,
+    int total,
+    int row,
+    int col,
+    const QPointF& waypointMm,
+    double elapsedTime,
+    double ewe,
+    double current
+)
+{
+    potentiostatPlotTimes_.push_back(elapsedTime);
+    potentiostatPlotCurrents_.push_back(current);
+    potentiostatPlotEwe_.push_back(ewe);
+    potentiostatSampleCount_ = static_cast<int>(potentiostatPlotTimes_.size());
+
+    if (row >= 0 && row < potentiostatRows_ && col >= 0 && col < potentiostatCols_) {
+        const std::size_t matrixIndex = static_cast<std::size_t>(row * potentiostatCols_ + col);
+        if (matrixIndex < potentiostatMatrix_.size()) {
+            potentiostatMatrix_[matrixIndex] = current;
+        }
+    }
+
+    if (potentiostatCurrentLabel_ != nullptr) {
+        potentiostatCurrentLabel_->setText(QString("%1 A").arg(current, 0, 'e', 3));
+    }
+    if (potentiostatPointCountLabel_ != nullptr) {
+        potentiostatPointCountLabel_->setText(QString::number(potentiostatSampleCount_));
+    }
+    if (potentiostatProgressLabel_ != nullptr) {
+        potentiostatProgressLabel_->setText(QString("%1 / %2").arg(index + 1).arg(total));
+    }
+    if (sequenceStatusLabel_ != nullptr) {
+        sequenceStatusLabel_->setText(QString("%1 / %2 - (%3, %4)")
+            .arg(index + 1).arg(total)
+            .arg(waypointMm.x(), 0, 'f', 4)
+            .arg(waypointMm.y(), 0, 'f', 4));
+    }
+
+    refreshPotentiostatVisualization();
+}
+
+void MainWindow::refreshPotentiostatVisualization()
+{
+    if (potentiostatGraphWidget_ != nullptr) {
+        PotentiostatGraphWidget::Mode graphMode = PotentiostatGraphWidget::Mode::CurrentVsTime;
+        const int modeIndex = potentiostatGraphTypeCombo_ != nullptr ? potentiostatGraphTypeCombo_->currentIndex() : 0;
+        switch (modeIndex) {
+        case 1:
+            graphMode = PotentiostatGraphWidget::Mode::EweVsTime;
+            break;
+        case 2:
+            graphMode = PotentiostatGraphWidget::Mode::CurrentVsEwe;
+            break;
+        case 3:
+            graphMode = PotentiostatGraphWidget::Mode::EweVsCurrent;
+            break;
+        default:
+            graphMode = PotentiostatGraphWidget::Mode::CurrentVsTime;
+            break;
+        }
+        potentiostatGraphWidget_->setGraphMode(graphMode);
+        potentiostatGraphWidget_->setSeries(potentiostatPlotTimes_, potentiostatPlotCurrents_, potentiostatPlotEwe_);
+    }
+
+    if (potentiostatHeatmapWidget_ != nullptr) {
+        std::optional<std::pair<int, int>> highlightedCell;
+        if (potentiostatSampleCount_ > 0 && potentiostatSampleCount_ <= static_cast<int>(potentiostatScanOrder_.size())) {
+            highlightedCell = potentiostatScanOrder_[static_cast<std::size_t>(potentiostatSampleCount_ - 1)];
+        }
+        potentiostatHeatmapWidget_->setGrid(
+            potentiostatRows_,
+            potentiostatCols_,
+            potentiostatMatrix_,
+            highlightedCell
+        );
+    }
 }
 
 void MainWindow::refreshSummaries()
@@ -2906,6 +3256,385 @@ double MainWindow::readAbsoluteTargetMm(hardware::AxisId axis) const
         throw std::runtime_error("La position absolue doit etre un nombre valide.");
     }
     return targetMm;
+}
+
+void MainWindow::onConnectPotentiostat()
+{
+    if (potentiostatBusy_.load() || potentiostatController_ == nullptr) {
+        return;
+    }
+    potentiostatBusy_.store(true);
+    if (potentiostatConnectButton_    != nullptr) potentiostatConnectButton_->setEnabled(false);
+    if (potentiostatFirmwareButton_   != nullptr) potentiostatFirmwareButton_->setEnabled(false);
+    if (potentiostatDisconnectButton_ != nullptr) potentiostatDisconnectButton_->setEnabled(false);
+    if (potentiostatStatusLabel_      != nullptr) potentiostatStatusLabel_->setText("Connexion...");
+
+    const QString dllPath = potentiostatDllPathEdit_  != nullptr ? potentiostatDllPathEdit_->text()  : QString();
+    const QString address = potentiostatAddressEdit_  != nullptr ? potentiostatAddressEdit_->text()  : "169.254.3.150";
+    const int channel     = potentiostatChannelCombo_ != nullptr ? potentiostatChannelCombo_->currentIndex() + 1 : 1;
+
+    auto ctrl = potentiostatController_;
+    if (potentiostatThread_.joinable()) {
+        potentiostatThread_.join();
+    }
+    potentiostatThread_ = std::thread([this, ctrl, dllPath, address, channel]() {
+        const bool ok = ctrl->connect(dllPath, address, channel);
+        const QString msg = ok ? QString("Connecte - %1").arg(ctrl->connectedModel()) : ctrl->lastError();
+        QMetaObject::invokeMethod(this, [this, ok, msg]() {
+            potentiostatBusy_.store(false);
+            const QString style = ok ? "color:#1a7f37; font-size:9pt;" : "color:#c0392b; font-size:9pt;";
+            if (potentiostatStatusLabel_      != nullptr) { potentiostatStatusLabel_->setText(msg);      potentiostatStatusLabel_->setStyleSheet(style); }
+            if (potentiostatMeasureStateLabel_ != nullptr) { potentiostatMeasureStateLabel_->setText(ok ? QString("Etat : %1").arg(msg) : "Etat : non connecte"); potentiostatMeasureStateLabel_->setStyleSheet(style); }
+            if (potentiostatRunButton_        != nullptr) potentiostatRunButton_->setEnabled(ok);
+            if (potentiostatStopButton_       != nullptr) potentiostatStopButton_->setEnabled(false);
+            if (potentiostatConnectButton_    != nullptr) potentiostatConnectButton_->setEnabled(!ok);
+            if (potentiostatFirmwareButton_   != nullptr) potentiostatFirmwareButton_->setEnabled(ok);
+            if (potentiostatDisconnectButton_ != nullptr) potentiostatDisconnectButton_->setEnabled(ok);
+        }, Qt::QueuedConnection);
+    });
+}
+
+void MainWindow::onDisconnectPotentiostat()
+{
+    if (potentiostatBusy_.load() || potentiostatController_ == nullptr) {
+        return;
+    }
+    potentiostatBusy_.store(true);
+    if (potentiostatConnectButton_    != nullptr) potentiostatConnectButton_->setEnabled(false);
+    if (potentiostatFirmwareButton_   != nullptr) potentiostatFirmwareButton_->setEnabled(false);
+    if (potentiostatDisconnectButton_ != nullptr) potentiostatDisconnectButton_->setEnabled(false);
+
+    auto ctrl = potentiostatController_;
+    if (potentiostatThread_.joinable()) {
+        potentiostatThread_.join();
+    }
+    potentiostatThread_ = std::thread([this, ctrl]() {
+        ctrl->disconnect();
+        QMetaObject::invokeMethod(this, [this]() {
+            potentiostatBusy_.store(false);
+            constexpr auto kStyleOff = "color:#5c6570; font-size:9pt;";
+            if (potentiostatStatusLabel_       != nullptr) { potentiostatStatusLabel_->setText("Deconnecte");       potentiostatStatusLabel_->setStyleSheet(kStyleOff); }
+            if (potentiostatMeasureStateLabel_ != nullptr) { potentiostatMeasureStateLabel_->setText("Etat : non connecte"); potentiostatMeasureStateLabel_->setStyleSheet(kStyleOff); }
+            if (potentiostatRunButton_         != nullptr) potentiostatRunButton_->setEnabled(false);
+            if (potentiostatStopButton_        != nullptr) potentiostatStopButton_->setEnabled(false);
+            if (potentiostatConnectButton_     != nullptr) potentiostatConnectButton_->setEnabled(true);
+            if (potentiostatFirmwareButton_    != nullptr) potentiostatFirmwareButton_->setEnabled(false);
+            if (potentiostatDisconnectButton_  != nullptr) potentiostatDisconnectButton_->setEnabled(false);
+        }, Qt::QueuedConnection);
+    });
+}
+
+void MainWindow::onLoadFirmware()
+{
+    if (potentiostatBusy_.load() || potentiostatController_ == nullptr || !potentiostatController_->isConnected()) {
+        return;
+    }
+    potentiostatBusy_.store(true);
+    if (potentiostatFirmwareButton_   != nullptr) potentiostatFirmwareButton_->setEnabled(false);
+    if (potentiostatStatusLabel_      != nullptr) potentiostatStatusLabel_->setText("Chargement firmware...");
+
+    const int channel = potentiostatChannelCombo_ != nullptr ? potentiostatChannelCombo_->currentIndex() + 1 : 1;
+    auto ctrl = potentiostatController_;
+    if (potentiostatThread_.joinable()) {
+        potentiostatThread_.join();
+    }
+    potentiostatThread_ = std::thread([this, ctrl, channel]() {
+        QString msg;
+        try {
+            ctrl->loadFirmware(channel);
+            msg = QString("Firmware charge - %1").arg(ctrl->connectedModel());
+        } catch (const std::exception& ex) {
+            msg = QString("Erreur firmware : %1").arg(QString::fromUtf8(ex.what()));
+        }
+        const bool stillOk = ctrl->isConnected();
+        QMetaObject::invokeMethod(this, [this, msg, stillOk]() {
+            potentiostatBusy_.store(false);
+            if (potentiostatStatusLabel_ != nullptr) {
+                potentiostatStatusLabel_->setText(msg);
+            }
+            if (potentiostatFirmwareButton_ != nullptr) {
+                potentiostatFirmwareButton_->setEnabled(stillOk);
+            }
+        }, Qt::QueuedConnection);
+    });
+}
+
+void MainWindow::onStartCaPotentiostat()
+{
+    if (potentiostatController_ == nullptr || !potentiostatController_->isConnected()) {
+        QMessageBox::warning(this, "CA", "Connecter d'abord le potentiostat.");
+        return;
+    }
+    if (motorController_ == nullptr) {
+        QMessageBox::warning(this, "CA", "Connecter d'abord les moteurs.");
+        return;
+    }
+    if (!sequenceStartMotorMm_.has_value() || !sequenceEndMotorMm_.has_value()) {
+        QMessageBox::warning(this, "CA", "Definir d'abord la zone de balayage (depart + arrivee).");
+        return;
+    }
+    if (potentiostatBusy_.load() || sequenceRunning_) {
+        return;
+    }
+
+    bool stepOk = false;
+    bool durationOk = false;
+    const double stepMm = sequenceStepMmEdit_ != nullptr ? sequenceStepMmEdit_->text().trimmed().toDouble(&stepOk) : 0.0;
+    const double durationS = sequenceDurationEdit_ != nullptr ? sequenceDurationEdit_->text().trimmed().toDouble(&durationOk) : 0.0;
+    if (!stepOk || !durationOk || stepMm <= 0.0 || durationS <= 0.0) {
+        QMessageBox::warning(this, "CA", "Pas (mm) et Duree/pt doivent etre des nombres positifs.");
+        return;
+    }
+
+    const QPointF startMm = *sequenceStartMotorMm_;
+    const QPointF endMm   = *sequenceEndMotorMm_;
+    const QString mode = sequenceModeCombo_ != nullptr ? sequenceModeCombo_->currentText() : QString("Lineaire");
+    std::vector<QPointF> waypoints = (mode == "Rectangle")
+        ? buildWaypointsRect(startMm, endMm, stepMm)
+        : buildWaypointsLinear(startMm, endMm, stepMm);
+    int rows = 1;
+    int cols = static_cast<int>(waypoints.size());
+    std::vector<std::pair<int, int>> order;
+    if (mode == "Rectangle") {
+        cols = std::max(1, static_cast<int>(std::lround(std::abs(endMm.x() - startMm.x()) / stepMm))) + 1;
+        rows = std::max(1, static_cast<int>(std::lround(std::abs(endMm.y() - startMm.y()) / stepMm))) + 1;
+        order.reserve(static_cast<std::size_t>(rows * cols));
+        for (int row = 0; row < rows; ++row) {
+            if ((row % 2) == 0) {
+                for (int col = 0; col < cols; ++col) {
+                    order.emplace_back(row, col);
+                }
+            } else {
+                for (int col = cols - 1; col >= 0; --col) {
+                    order.emplace_back(row, col);
+                }
+            }
+        }
+    } else {
+        order.reserve(static_cast<std::size_t>(cols));
+        for (int col = 0; col < cols; ++col) {
+            order.emplace_back(0, col);
+        }
+    }
+
+    if (waypoints.empty()) {
+        QMessageBox::warning(this, "CA", "Aucun point de balayage (depart == arrivee ?).");
+        return;
+    }
+
+    double stageSpeedMmPerS = 1.0;
+    try { stageSpeedMmPerS = readJogSpeedMmPerS(); } catch (...) {}
+
+    hardware::CaParams p;
+    p.channel   = potentiostatChannelCombo_      != nullptr ? potentiostatChannelCombo_->currentIndex() + 1  : 1;
+    p.voltage   = potentiostatVoltageEdit_       != nullptr ? potentiostatVoltageEdit_->text().toDouble()    : 0.5;
+    p.vsInit    = potentiostatVsCombo_           != nullptr && potentiostatVsCombo_->currentText() == "Pref";
+    p.eRange    = potentiostatErangeCombo_       != nullptr ? potentiostatErangeCombo_->currentIndex()       : 0;
+    p.iRange    = potentiostatCurrentRangeCombo_ != nullptr ? potentiostatCurrentRangeCombo_->currentIndex() : 12;
+    p.bandwidth = potentiostatBandwidthCombo_    != nullptr ? potentiostatBandwidthCombo_->currentText().toInt() : 8;
+    p.nCycles   = potentiostatNbCyclesEdit_      != nullptr ? potentiostatNbCyclesEdit_->text().toInt()      : 0;
+
+    // Total CA duration covers all moves + dwells + 5 s margin (same as Python)
+    const int nPoints = static_cast<int>(waypoints.size());
+    const double motorTimeoutS = kDefaultMotorTimeoutMs / 1000.0;
+    p.duration = nPoints * durationS + std::max(0, nPoints - 1) * 2.0 * motorTimeoutS + 5.0;
+    // Match interface_final: keep a regular CA record period instead of forcing one giant sample.
+    p.recordDt = 0.1;
+
+    potentiostatBusy_.store(true);
+    potentiostatStopRequested_.store(false);
+    waypointsMm_ = waypoints;
+    currentWaypointIndex_ = 0;
+    resetPotentiostatVisualization(rows, cols, order);
+    if (potentiostatRunButton_  != nullptr) potentiostatRunButton_->setEnabled(false);
+    if (potentiostatStopButton_ != nullptr) potentiostatStopButton_->setEnabled(true);
+    if (potentiostatCurrentLabel_   != nullptr) potentiostatCurrentLabel_->setText("...");
+    if (potentiostatMeasureStateLabel_ != nullptr) potentiostatMeasureStateLabel_->setText("Lancement...");
+    if (sequenceStatusLabel_ != nullptr) sequenceStatusLabel_->setText(QString("0 / %1 points").arg(nPoints));
+    if (tabWidget_ != nullptr) {
+        tabWidget_->setCurrentIndex(1);
+    }
+
+    auto ctrl      = potentiostatController_;
+    auto motorCtrl = motorController_;
+    if (potentiostatThread_.joinable()) {
+        potentiostatThread_.join();
+    }
+
+    appendLog(QString("Mesure spatiale : %1 pts | dwell=%2 s | duree CA=%3 s | record_dt=%4 s")
+        .arg(nPoints).arg(durationS, 0, 'f', 2).arg(p.duration, 0, 'f', 1).arg(p.recordDt, 0, 'f', 1));
+
+    potentiostatThread_ = std::thread([this, ctrl, motorCtrl,
+                                       p, waypoints = std::move(waypoints),
+                                       nPoints, durationS, stageSpeedMmPerS]() mutable
+    {
+        using namespace std::chrono_literals;
+        const auto finishUi = [this](const QString& stateMsg) {
+            QMetaObject::invokeMethod(this, [this, stateMsg]() {
+                potentiostatBusy_.store(false);
+                if (potentiostatRunButton_  != nullptr) potentiostatRunButton_->setEnabled(true);
+                if (potentiostatStopButton_ != nullptr) potentiostatStopButton_->setEnabled(false);
+                if (potentiostatMeasureStateLabel_ != nullptr) potentiostatMeasureStateLabel_->setText(stateMsg);
+            }, Qt::QueuedConnection);
+        };
+
+        try {
+            // ── Phase 0 : move to first waypoint ──
+            const QPointF firstPt = waypoints.front();
+            QMetaObject::invokeMethod(this, [this]() {
+                if (potentiostatMeasureStateLabel_ != nullptr)
+                    potentiostatMeasureStateLabel_->setText("Mise en position...");
+            }, Qt::QueuedConnection);
+
+            motorCtrl->setVelocity(hardware::AxisId::X, stageSpeedMmPerS);
+            motorCtrl->setVelocity(hardware::AxisId::Y, stageSpeedMmPerS);
+
+            {
+                const auto both = motorCtrl->snapshotBoth();
+                if (both.x.positionValid && both.y.positionValid) {
+                    startPredictedMotorMotion(
+                        both.x.positionMm, both.y.positionMm,
+                        firstPt.x(), firstPt.y(),
+                        stageSpeedMmPerS, stageSpeedMmPerS);
+                }
+            }
+            motorCtrl->moveAbsoluteNoWait(hardware::AxisId::X, firstPt.x());
+            motorCtrl->moveAbsoluteNoWait(hardware::AxisId::Y, firstPt.y());
+            motorCtrl->waitAxis(hardware::AxisId::X, kDefaultMotorTimeoutMs);
+            motorCtrl->waitAxis(hardware::AxisId::Y, kDefaultMotorTimeoutMs);
+            stopPredictedMotorMotion(firstPt.x(), firstPt.y());
+
+            if (potentiostatStopRequested_.load()) {
+                stopPredictedMotorMotion();
+                finishUi("Arrete.");
+                return;
+            }
+
+            // ── Phase 1 : start CA for total duration ──
+            QMetaObject::invokeMethod(this, [this, p]() {
+                appendLog(QString("Lancement CA : tension=%1 V, duree=%2 s, record_dt=%3 s")
+                    .arg(p.voltage, 0, 'f', 3).arg(p.duration, 0, 'f', 1).arg(p.recordDt, 0, 'f', 1));
+            }, Qt::QueuedConnection);
+            if (!ctrl->startCa(p)) {
+                const QString err = ctrl->lastError();
+                QMetaObject::invokeMethod(this, [this, err]() {
+                    appendLog("Erreur startCa : " + err);
+                }, Qt::QueuedConnection);
+                stopPredictedMotorMotion();
+                finishUi("Erreur : " + err);
+                return;
+            }
+            QMetaObject::invokeMethod(this, [this]() {
+                appendLog("CA demarre.");
+                if (potentiostatMeasureStateLabel_ != nullptr)
+                    potentiostatMeasureStateLabel_->setText("Balayage en cours...");
+            }, Qt::QueuedConnection);
+
+            const int channel = p.channel;
+
+            // ── Phase 2 : for each waypoint ──
+            for (int idx = 0; idx < nPoints; ++idx) {
+                if (potentiostatStopRequested_.load()) break;
+
+                const QPointF wp = waypoints[static_cast<std::size_t>(idx)];
+
+                // Move to waypoint (idx==0 already there)
+                if (idx > 0) {
+                    const auto both = motorCtrl->snapshotBoth();
+                    if (both.x.positionValid && both.y.positionValid) {
+                        startPredictedMotorMotion(
+                            both.x.positionMm, both.y.positionMm,
+                            wp.x(), wp.y(),
+                            stageSpeedMmPerS, stageSpeedMmPerS);
+                    }
+                    motorCtrl->moveAbsoluteNoWait(hardware::AxisId::X, wp.x());
+                    motorCtrl->moveAbsoluteNoWait(hardware::AxisId::Y, wp.y());
+                    motorCtrl->waitAxis(hardware::AxisId::X, kDefaultMotorTimeoutMs);
+                    motorCtrl->waitAxis(hardware::AxisId::Y, kDefaultMotorTimeoutMs);
+                    stopPredictedMotorMotion(wp.x(), wp.y());
+                }
+
+                if (potentiostatStopRequested_.load()) break;
+
+                // Wait dwell time
+                const auto dwellDur   = std::chrono::duration<double>(durationS);
+                const auto dwellStart = std::chrono::steady_clock::now();
+                while (std::chrono::steady_clock::now() - dwellStart < dwellDur) {
+                    if (potentiostatStopRequested_.load()) break;
+                    std::this_thread::sleep_for(20ms);
+                }
+
+                if (potentiostatStopRequested_.load()) break;
+
+                // Sample instantaneous current (same as Python GetCurrentValues)
+                const auto cv = ctrl->getCurrentValues(channel);
+                if (!cv.ok) {
+                    throw std::runtime_error(QString("GetCurrentValues a echoue : %1").arg(cv.error).toStdString());
+                }
+                int row = 0;
+                int col = idx;
+                if (idx >= 0 && idx < static_cast<int>(potentiostatScanOrder_.size())) {
+                    row = potentiostatScanOrder_[static_cast<std::size_t>(idx)].first;
+                    col = potentiostatScanOrder_[static_cast<std::size_t>(idx)].second;
+                }
+
+                QMetaObject::invokeMethod(this, [this, idx, nPoints, row, col, wp, cv]() {
+                    currentWaypointIndex_ = idx + 1;
+                    appendPotentiostatVisualizationSample(idx, nPoints, row, col, wp, cv.elapsedTime, cv.ewe, cv.I);
+                    appendLog(QString("Pt %1/%2 : Ewe=%3 V, I=%4 A, stopped=%5, ok=%6%7")
+                        .arg(idx + 1).arg(nPoints)
+                        .arg(cv.ewe, 0, 'e', 3).arg(cv.I, 0, 'e', 3)
+                        .arg(cv.stopped ? "oui" : "non")
+                        .arg(cv.ok ? "oui" : "non")
+                        .arg(cv.ok ? "" : " err=" + cv.error));
+                }, Qt::QueuedConnection);
+
+                if (cv.stopped) {
+                    const auto confirm = ctrl->getData(channel);
+                    if (confirm.ok && confirm.stopped) {
+                        QMetaObject::invokeMethod(this, [this]() {
+                            appendLog("CA arrete par l'instrument, fin du balayage.");
+                        }, Qt::QueuedConnection);
+                        break;
+                    }
+                    QMetaObject::invokeMethod(this, [this]() {
+                        appendLog("Etat STOP transitoire ignore: la CA continue.");
+                    }, Qt::QueuedConnection);
+                }
+            }
+
+            // Stop channel
+            ctrl->stopChannel(channel);
+
+            const bool stopped = potentiostatStopRequested_.load();
+            QMetaObject::invokeMethod(this, [this, nPoints, stopped]() {
+                potentiostatBusy_.store(false);
+                currentWaypointIndex_ = nPoints;
+                if (potentiostatRunButton_  != nullptr) potentiostatRunButton_->setEnabled(true);
+                if (potentiostatStopButton_ != nullptr) potentiostatStopButton_->setEnabled(false);
+                if (potentiostatProgressLabel_ != nullptr) {
+                    potentiostatProgressLabel_->setText(stopped ? "Arrete" : QString("Termine (%1)").arg(potentiostatSampleCount_));
+                }
+                if (potentiostatMeasureStateLabel_ != nullptr)
+                    potentiostatMeasureStateLabel_->setText(stopped ? "Arrete." : "Acquisition terminee.");
+                if (!stopped && sequenceStatusLabel_ != nullptr)
+                    sequenceStatusLabel_->setText(QString("Termine (%1 points).").arg(nPoints));
+            }, Qt::QueuedConnection);
+
+        } catch (const std::exception& ex) {
+            stopPredictedMotorMotion();
+            finishUi(QString("Erreur : ") + QString::fromUtf8(ex.what()));
+        }
+    });
+}
+
+void MainWindow::onStopCaPotentiostat()
+{
+    potentiostatStopRequested_.store(true);
+    if (potentiostatController_ == nullptr) { return; }
+    const int channel = potentiostatChannelCombo_ != nullptr ? potentiostatChannelCombo_->currentIndex() + 1 : 1;
+    auto ctrl = potentiostatController_;
+    std::thread([ctrl, channel]() { ctrl->stopChannel(channel); }).detach();
 }
 
 }  // namespace laserbench::ui

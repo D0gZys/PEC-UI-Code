@@ -30,18 +30,21 @@ class QLineEdit;
 class QObject;
 class QPlainTextEdit;
 class QPushButton;
+class QSpinBox;
 class QTabWidget;
 class QTimer;
 QT_END_NAMESPACE
 
 namespace laserbench::hardware {
 class ICameraController;
-class MockPotentiostatController;
+class BioLogicController;
 }
 
 namespace laserbench::ui {
 
 class CameraPreviewWidget;
+class PotentiostatGraphWidget;
+class PotentiostatHeatmapWidget;
 
 class MainWindow final : public QMainWindow
 {
@@ -105,6 +108,12 @@ private:
     bool shouldHandleJogKeys() const;
     double readJogSpeedMmPerS() const;
 
+    void onConnectPotentiostat();
+    void onStartCaPotentiostat();
+    void onStopCaPotentiostat();
+    void onDisconnectPotentiostat();
+    void onLoadFirmware();
+
     void onScanPorts();
     void onConnectAxes();
     void onHomeAxes();
@@ -119,6 +128,19 @@ private:
     void onStopSequence();
     void onPreviewFrameClicked(const QPoint& framePointPx);
     void onPreviewBackgroundClicked();
+    void resetPotentiostatVisualization(int rows, int cols, const std::vector<std::pair<int, int>>& order);
+    void appendPotentiostatVisualizationSample(
+        int index,
+        int total,
+        int row,
+        int col,
+        const QPointF& waypointMm,
+        double elapsedTime,
+        double ewe,
+        double current
+    );
+    void clearPotentiostatVisualization();
+    void refreshPotentiostatVisualization();
 
     double readJogStepMm() const;
     double readAbsoluteTargetMm(hardware::AxisId axis) const;
@@ -157,7 +179,7 @@ private:
     core::RuntimeSnapshot snapshot_;
     std::shared_ptr<hardware::NewportConexController> motorController_;
     std::unique_ptr<hardware::ICameraController> cameraController_;
-    std::unique_ptr<hardware::MockPotentiostatController> potentiostatController_;
+    std::shared_ptr<hardware::BioLogicController> potentiostatController_;
 
     QTimer* motorPollTimer_ {nullptr};
     QTimer* cameraPollTimer_ {nullptr};
@@ -165,6 +187,9 @@ private:
     std::thread motorPollThread_;
     std::thread cameraPollThread_;
     std::thread sequenceThread_;
+    std::thread potentiostatThread_;
+    std::atomic_bool potentiostatBusy_ {false};
+    std::atomic_bool potentiostatStopRequested_ {false};
     std::atomic_bool motorPollStopRequested_ {false};
     std::atomic_bool cameraPollStopRequested_ {false};
     std::atomic_bool motorUiUpdatePending_ {false};
@@ -209,6 +234,29 @@ private:
     QLabel* stageSummaryLabel_ {nullptr};
     QLabel* cameraSummaryLabel_ {nullptr};
     QLabel* potentiostatSummaryLabel_ {nullptr};
+    QComboBox*   potentiostatTechniqueCombo_    {nullptr};
+    QLineEdit*   potentiostatDllPathEdit_      {nullptr};
+    QLineEdit*   potentiostatAddressEdit_      {nullptr};
+    QComboBox*   potentiostatChannelCombo_     {nullptr};
+    QLineEdit*   potentiostatVoltageEdit_      {nullptr};
+    QComboBox*   potentiostatCurrentRangeCombo_ {nullptr};
+    QComboBox*   potentiostatVsCombo_          {nullptr};
+    QComboBox*   potentiostatErangeCombo_      {nullptr};
+    QComboBox*   potentiostatBandwidthCombo_   {nullptr};
+    QLabel*      potentiostatMeasureStateLabel_ {nullptr};
+    QLabel*      potentiostatCurrentLabel_     {nullptr};
+    QLabel*      potentiostatPointCountLabel_  {nullptr};
+    QLabel*      potentiostatProgressLabel_    {nullptr};
+    QLineEdit*   potentiostatNbCyclesEdit_     {nullptr};
+    QComboBox*   potentiostatGraphTypeCombo_   {nullptr};
+    QPushButton* potentiostatConnectButton_    {nullptr};
+    QPushButton* potentiostatDisconnectButton_ {nullptr};
+    QPushButton* potentiostatFirmwareButton_   {nullptr};
+    QLabel*      potentiostatStatusLabel_      {nullptr};
+    QPushButton* potentiostatRunButton_        {nullptr};
+    QPushButton* potentiostatStopButton_       {nullptr};
+    PotentiostatGraphWidget* potentiostatGraphWidget_ {nullptr};
+    PotentiostatHeatmapWidget* potentiostatHeatmapWidget_ {nullptr};
     QPlainTextEdit* logView_ {nullptr};
     QDialog* motorConnectionDialog_ {nullptr};
     QDialog* cameraConnectionDialog_ {nullptr};
@@ -248,6 +296,14 @@ private:
     std::optional<QPoint> sequenceRectEndFrame_;
     std::optional<QPointF> sequenceBaseMotorMm_;
     std::vector<QPointF> waypointsMm_;
+    std::vector<double> potentiostatPlotTimes_;
+    std::vector<double> potentiostatPlotCurrents_;
+    std::vector<double> potentiostatPlotEwe_;
+    std::vector<std::optional<double>> potentiostatMatrix_;
+    std::vector<std::pair<int, int>> potentiostatScanOrder_;
+    int potentiostatRows_ {0};
+    int potentiostatCols_ {0};
+    int potentiostatSampleCount_ {0};
     int currentWaypointIndex_ {-1};
     std::optional<QPointF> cachedMotorMm_;
     bool sequenceRectFollowSample_ {false};

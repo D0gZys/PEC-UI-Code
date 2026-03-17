@@ -15,6 +15,7 @@ MAINUI_DIR = PROJECT_ROOT / "MainUI"
 if str(MAINUI_DIR) not in sys.path:
     sys.path.insert(0, str(MAINUI_DIR))
 
+import main_ui as main_ui_mod
 from main_ui import MainApp
 import potentiostat_support as ps
 
@@ -61,6 +62,13 @@ class IntegratedMeasurementApp(MainApp):
         self.pot_progress_var = tk.StringVar(value="")
         self.pot_zone_var = tk.StringVar(value="Zone : non definie")
         self.pot_count_var = tk.StringVar(value="Points : 0")
+        self.seq_pick_status_var = tk.StringVar(value="Zone image : inactive")
+        self.seq_pick_btn_var = tk.StringVar(value="Zone image")
+        self._seq_select_armed = False
+        self._seq_select_first_frame = None
+        self._seq_rect_start_frame = None
+        self._seq_rect_end_frame = None
+        self._seq_select_base_motor = None
 
     def _build_ui(self):
         self._init_pot_state()
@@ -96,7 +104,6 @@ class IntegratedMeasurementApp(MainApp):
         self._statusbar.grid(row=2, column=0, sticky="ew", padx=2, pady=(2, 2))
         ttk.Label(self._statusbar, textvariable=self.status_var, foreground="blue", width=42, anchor="w").pack(side="left", padx=6)
         ttk.Label(self._statusbar, textvariable=self.fps_var, width=14, anchor="w").pack(side="left", padx=6)
-        ttk.Label(self._statusbar, textvariable=self.zoom_var, width=14, anchor="w").pack(side="left", padx=6)
         ttk.Label(self._statusbar, textvariable=self.laser_coord_var, width=24, anchor="w").pack(side="left", padx=6)
         ttk.Button(self._statusbar, text="Live", width=8, command=self.on_start_live).pack(side="right", padx=2)
         ttk.Button(self._statusbar, text="Stop", width=8, command=self.on_stop_live).pack(side="right", padx=2)
@@ -132,8 +139,200 @@ class IntegratedMeasurementApp(MainApp):
         self._controls_frame.grid(row=1, column=0, sticky="ew", padx=2, pady=(2, 0))
         self._build_controls()
 
+    def _safe_focus_get(self):
+        try:
+            return self.focus_get()
+        except Exception:
+            return None
+
+    def _defocus_entry(self, event=None):
+        current_focus = self._safe_focus_get()
+        if current_focus is None or not hasattr(current_focus, "winfo_class"):
+            return
+        if current_focus.winfo_class() in {"Entry", "TEntry", "Text", "Spinbox", "TSpinbox"}:
+            self.focus_set()
+
+    def _on_global_click(self, event):
+        widget = getattr(event, "widget", None)
+        wc = widget.winfo_class() if hasattr(widget, "winfo_class") else ""
+        if wc not in {"Entry", "TEntry", "Text", "Spinbox", "TSpinbox", "Combobox", "TCombobox"}:
+            current_focus = self._safe_focus_get()
+            if current_focus is not None and hasattr(current_focus, "winfo_class"):
+                if current_focus.winfo_class() in {"Entry", "TEntry", "Text", "Spinbox", "TSpinbox"}:
+                    self.focus_set()
+
+    def _current_objective_mm_per_px(self) -> float:
+        name = self.objective_var.get().strip().lower()
+        mag = 4.0
+        if name.endswith("x"):
+            try:
+                mag = float(name[:-1])
+            except Exception:
+                mag = 4.0
+        if mag <= 0:
+            mag = 4.0
+        return 3.45 / (mag * 1000.0)
+
+    def _preview_to_frame_coords(self, click_x: int, click_y: int):
+        if self._last_image is None:
+            return None
+        sw, sh = self._last_image.size
+        tw = max(self.preview_label.winfo_width(), 1)
+        th = max(self.preview_label.winfo_height(), 1)
+        if sw <= 0 or sh <= 0:
+            return None
+        scale = min(tw / sw, th / sh)
+        if scale <= 0:
+            return None
+        fw = max(int(sw * scale), 1)
+        fh = max(int(sh * scale), 1)
+        ox = max((tw - fw) // 2, 0)
+        oy = max((th - fh) // 2, 0)
+        local_x = click_x - ox
+        local_y = click_y - oy
+        if local_x < 0 or local_y < 0 or local_x >= fw or local_y >= fh:
+            return None
+        frame_x = int(round(local_x / scale))
+        frame_y = int(round(local_y / scale))
+        frame_x = max(0, min(sw - 1, frame_x))
+        frame_y = max(0, min(sh - 1, frame_y))
+        return frame_x, frame_y
+
+    def _frame_point_to_motor_target(self, frame_x: int, frame_y: int, base_x: float, base_y: float):
+        mm_per_px = self._current_objective_mm_per_px()
+        dx_px = int(frame_x - int(self.laser_x))
+        dy_px = int(frame_y - int(self.laser_y))
+        target_x = base_x + dx_px * mm_per_px
+        target_y = base_y + dy_px * mm_per_px
+        if not (main_ui_mod.ABS_MIN_MM <= target_x <= main_ui_mod.ABS_MAX_MM):
+            raise main_ui_mod.ConexError(f"Zone X hors limites ({target_x:.4f} mm)")
+        if not (main_ui_mod.ABS_MIN_MM <= target_y <= main_ui_mod.ABS_MAX_MM):
+            raise main_ui_mod.ConexError(f"Zone Y hors limites ({target_y:.4f} mm)")
+        return target_x, target_y
+
+    def _clear_sequence_preview_selection(self):
+        self._seq_select_first_frame = None
+        self._seq_rect_start_frame = None
+        self._seq_rect_end_frame = None
+        self._seq_select_base_motor = None
+        if not self._seq_select_armed:
+            self.seq_pick_status_var.set("Zone image : inactive")
+        if self._last_image is not None:
+            self._render_preview(self._last_image)
+
+    def _set_seq_select_armed(self, armed: bool):
+        self._seq_select_armed = bool(armed)
+        self.seq_pick_btn_var.set("Annuler zone" if armed else "Zone image")
+
+    def _update_sequence_labels(self, start_xy, end_xy):
+        x0, y0 = start_xy
+        x1, y1 = end_xy
+        self.seq_start_motor = (x0, y0)
+        self.seq_end_motor = (x1, y1)
+        self.seq_start_lbl_var.set(f"Depart  : X={x0:.4f}  Y={y0:.4f} mm")
+        self.seq_end_lbl_var.set(f"Arrivee : X={x1:.4f}  Y={y1:.4f} mm")
+        self._update_measure_zone_label()
+
+    def on_arm_seq_rectangle(self):
+        if self._seq_select_armed:
+            self._set_seq_select_armed(False)
+            self._clear_sequence_preview_selection()
+            self._log("Zone image annulee.")
+            return
+        if self.stream_thread is None or self._last_image is None:
+            messagebox.showerror("Zone image", "Demarrer d'abord le flux live.")
+            return
+        try:
+            base_x, base_y = self._read_motor_positions()
+        except Exception as exc:
+            messagebox.showerror("Zone image", str(exc))
+            return
+        self._seq_select_first_frame = None
+        self._seq_rect_start_frame = None
+        self._seq_rect_end_frame = None
+        self._seq_select_base_motor = (base_x, base_y)
+        self.seq_pick_status_var.set("Zone image : clic 1/2")
+        self._set_seq_select_armed(True)
+        self._log(f"Zone image armee depuis X={base_x:.4f} Y={base_y:.4f} mm.")
+        if self._last_image is not None:
+            self._render_preview(self._last_image)
+
+    def _handle_sequence_preview_click(self, event):
+        point = self._preview_to_frame_coords(event.x, event.y)
+        if point is None:
+            self._log("Zone image: clic en dehors de l'image")
+            return
+        if self._seq_select_base_motor is None:
+            self._set_seq_select_armed(False)
+            self.seq_pick_status_var.set("Zone image : inactive")
+            return
+        if self._seq_select_first_frame is None:
+            self._seq_select_first_frame = point
+            self._seq_rect_start_frame = point
+            self._seq_rect_end_frame = point
+            self.seq_pick_status_var.set("Zone image : clic 2/2")
+            if self._last_image is not None:
+                self._render_preview(self._last_image)
+            return
+        first_point = self._seq_select_first_frame
+        base_x, base_y = self._seq_select_base_motor
+        try:
+            start_xy = self._frame_point_to_motor_target(first_point[0], first_point[1], base_x, base_y)
+            end_xy = self._frame_point_to_motor_target(point[0], point[1], base_x, base_y)
+        except Exception as exc:
+            self._set_seq_select_armed(False)
+            self._clear_sequence_preview_selection()
+            messagebox.showerror("Zone image", str(exc))
+            return
+        self._seq_rect_start_frame = first_point
+        self._seq_rect_end_frame = point
+        self._seq_select_first_frame = None
+        self._seq_select_base_motor = None
+        self._update_sequence_labels(start_xy, end_xy)
+        self.seq_mode_var.set("Rectangle")
+        self.seq_pick_status_var.set("Zone image : zone definie")
+        self._set_seq_select_armed(False)
+        self._log(
+            f"Zone image definie: ({start_xy[0]:.4f},{start_xy[1]:.4f}) -> ({end_xy[0]:.4f},{end_xy[1]:.4f}) mm"
+        )
+        if self._last_image is not None:
+            self._render_preview(self._last_image)
+
+    def _draw_sequence_overlay(self, image):
+        start_pt = self._seq_rect_start_frame or self._seq_select_first_frame
+        end_pt = self._seq_rect_end_frame
+        if start_pt is None:
+            return image
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        draw = main_ui_mod.ImageDraw.Draw(image)
+        sx, sy = start_pt
+        if end_pt is None or end_pt == start_pt:
+            r = 8
+            draw.ellipse((sx - r, sy - r, sx + r, sy + r), outline=(0, 255, 128), width=2)
+            return image
+        ex, ey = end_pt
+        x0, x1 = sorted((sx, ex))
+        y0, y1 = sorted((sy, ey))
+        draw.rectangle((x0, y0, x1, y1), outline=(0, 255, 128), width=2)
+        for px, py in ((sx, sy), (ex, ey)):
+            draw.ellipse((px - 4, py - 4, px + 4, py + 4), fill=(0, 255, 128), outline=(0, 90, 40), width=1)
+        return image
+
+    def _render_preview(self, image):
+        display = self._draw_laser_overlay(image.copy())
+        display = self._draw_sequence_overlay(display)
+        fitted = self._fit_image_to_preview(display)
+        self.preview_photo = main_ui_mod.ImageTk.PhotoImage(image=fitted)
+        self.preview_label.configure(image=self.preview_photo, text="")
+
+    def _on_preview_click(self, event):
+        if self._seq_select_armed:
+            self._handle_sequence_preview_click(event)
+        return None
+
     def _build_objective_laser_controls(self, parent):
-        obj_box = ttk.LabelFrame(parent, text="Objectif / Laser", padding=6)
+        obj_box = ttk.LabelFrame(parent, text="Objectif / Laser", padding=4)
         obj_box.pack(fill="x", pady=(0, 6))
 
         ttk.Label(obj_box, text="Objectif").grid(row=0, column=0, sticky="w", padx=2)
@@ -160,35 +359,6 @@ class IntegratedMeasurementApp(MainApp):
         ttk.Button(obj_box, text="-", width=3, command=lambda: self.on_laser_size(-1)).grid(row=2, column=2, padx=1)
         ttk.Button(obj_box, text="+", width=3, command=lambda: self.on_laser_size(+1)).grid(row=2, column=3, padx=1)
 
-        ttk.Label(obj_box, text="mm/px X").grid(row=3, column=0, sticky="w", padx=2)
-        ttk.Label(obj_box, textvariable=self.goto_mm_per_px_x_var, width=9, foreground="blue").grid(row=3, column=1, padx=2, sticky="w")
-        ttk.Label(obj_box, text="mm/px Y").grid(row=3, column=2, sticky="w", padx=2)
-        ttk.Label(obj_box, textvariable=self.goto_mm_per_px_y_var, width=9, foreground="blue").grid(row=3, column=3, padx=2, sticky="w")
-
-        ttk.Checkbutton(obj_box, text="Inv X", variable=self.goto_invert_x_var).grid(row=3, column=4, padx=2)
-        ttk.Checkbutton(obj_box, text="Inv Y", variable=self.goto_invert_y_var).grid(row=3, column=5, padx=2)
-
-        ttk.Label(obj_box, text="Corr X+ (mm)").grid(row=4, column=0, sticky="w", padx=2)
-        ttk.Entry(obj_box, textvariable=self.goto_corr_xp_var, width=7).grid(row=4, column=1, padx=2)
-        ttk.Label(obj_box, text="Corr X- (mm)").grid(row=4, column=2, sticky="w", padx=2)
-        ttk.Entry(obj_box, textvariable=self.goto_corr_xm_var, width=7).grid(row=4, column=3, padx=2)
-
-        ttk.Label(obj_box, text="Corr Y+ (mm)").grid(row=5, column=0, sticky="w", padx=2)
-        ttk.Entry(obj_box, textvariable=self.goto_corr_yp_var, width=7).grid(row=5, column=1, padx=2)
-        ttk.Label(obj_box, text="Corr Y- (mm)").grid(row=5, column=2, sticky="w", padx=2)
-        ttk.Entry(obj_box, textvariable=self.goto_corr_ym_var, width=7).grid(row=5, column=3, padx=2)
-
-        ttk.Label(obj_box, text="Vit. GoTo (mm/s)").grid(row=6, column=0, sticky="w", padx=2)
-        ttk.Entry(obj_box, textvariable=self.goto_velocity_var, width=7).grid(row=6, column=1, padx=2)
-        ttk.Button(obj_box, text="GoTo", width=8, command=self.on_arm_goto).grid(row=6, column=2, columnspan=2, padx=2, sticky="w")
-        ttk.Label(obj_box, textvariable=self.goto_status_var, foreground="blue", font=("Segoe UI", 8)).grid(
-            row=6,
-            column=4,
-            columnspan=2,
-            sticky="w",
-            padx=2,
-        )
-
     def _build_controls(self):
         outer = self._controls_frame
 
@@ -205,24 +375,10 @@ class IntegratedMeasurementApp(MainApp):
         ttk.Button(motor_box, text="Y -", width=4, command=lambda: self.on_motor_jog("Y", -1, False)).grid(row=1, column=2, padx=1)
         ttk.Button(motor_box, text="Y +", width=4, command=lambda: self.on_motor_jog("Y", +1, False)).grid(row=1, column=3, padx=1)
 
-        ttk.Label(motor_box, text="Abs X (mm)").grid(row=2, column=0, sticky="w", padx=2, pady=(4, 0))
-        ttk.Entry(motor_box, textvariable=self.abs_x_var, width=7).grid(row=2, column=1, padx=2, pady=(4, 0))
-        ttk.Button(motor_box, text="Aller X", width=8, command=lambda: self.on_motor_move_absolute("X")).grid(row=2, column=2, columnspan=2, padx=1, pady=(4, 0), sticky="w")
-
-        ttk.Label(motor_box, text="Abs Y (mm)").grid(row=3, column=0, sticky="w", padx=2)
-        ttk.Entry(motor_box, textvariable=self.abs_y_var, width=7).grid(row=3, column=1, padx=2)
-        ttk.Button(motor_box, text="Aller Y", width=8, command=lambda: self.on_motor_move_absolute("Y")).grid(row=3, column=2, columnspan=2, padx=1, sticky="w")
-
-        ttk.Label(motor_box, text="Pos X").grid(row=4, column=0, sticky="w", padx=2, pady=(2, 0))
-        ttk.Label(motor_box, textvariable=self.motor_pos_x_var, width=12, anchor="w", foreground="blue").grid(row=4, column=1, sticky="w", padx=2, pady=(2, 0))
-        ttk.Label(motor_box, text="Pos Y").grid(row=4, column=2, sticky="w", padx=2, pady=(2, 0))
-        ttk.Label(motor_box, textvariable=self.motor_pos_y_var, width=12, anchor="w", foreground="blue").grid(row=4, column=3, sticky="w", padx=2, pady=(2, 0))
-
-        ttk.Label(motor_box, text="Plage : 0 - 25 mm", foreground="gray", font=("Segoe UI", 8)).grid(row=5, column=0, columnspan=4, sticky="w", pady=(1, 0))
-
-        ttk.Label(motor_box, text="Vit. clavier (mm/s)").grid(row=6, column=0, columnspan=2, sticky="w", padx=2, pady=(4, 0))
-        ttk.Entry(motor_box, textvariable=self.jog_speed_var, width=7).grid(row=6, column=2, columnspan=2, sticky="w", padx=2, pady=(4, 0))
-        ttk.Label(motor_box, text="Clavier continu : Left/Right/Up/Down | Echap = quitter champ", foreground="gray", font=("Segoe UI", 8)).grid(row=7, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        ttk.Label(motor_box, text="Plage : 0 - 25 mm", foreground="gray", font=("Segoe UI", 8)).grid(row=2, column=0, columnspan=4, sticky="w", pady=(1, 0))
+        ttk.Label(motor_box, text="Vit. clavier (mm/s)").grid(row=3, column=0, columnspan=2, sticky="w", padx=2, pady=(4, 0))
+        ttk.Entry(motor_box, textvariable=self.jog_speed_var, width=7).grid(row=3, column=2, columnspan=2, sticky="w", padx=2, pady=(4, 0))
+        ttk.Label(motor_box, text="Clavier continu : Left/Right/Up/Down | Echap = quitter champ", foreground="gray", font=("Segoe UI", 8)).grid(row=4, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
         seq_box = ttk.LabelFrame(outer, text="Sequence balayage", padding=4)
         seq_box.pack(side="left", fill="y", padx=(0, 4))
@@ -231,7 +387,7 @@ class IntegratedMeasurementApp(MainApp):
         ttk.Label(seq_box, textvariable=self.seq_end_lbl_var, width=24, foreground="#880000").grid(row=1, column=0, columnspan=4, sticky="w", padx=2)
 
         ttk.Label(seq_box, text="Mode").grid(row=2, column=0, sticky="w", padx=2)
-        ttk.Combobox(seq_box, textvariable=self.seq_mode_var, values=["Linéaire", "Rectangle"], state="readonly", width=9).grid(row=2, column=1, padx=2)
+        ttk.Combobox(seq_box, textvariable=self.seq_mode_var, values=[self.seq_mode_var.get(), "Rectangle"], state="readonly", width=9).grid(row=2, column=1, padx=2)
         ttk.Label(seq_box, text="Pas (mm)").grid(row=2, column=2, sticky="w", padx=(8, 2))
         ttk.Entry(seq_box, textvariable=self.seq_step_mm_var, width=7).grid(row=2, column=3, padx=2)
 
@@ -246,7 +402,6 @@ class IntegratedMeasurementApp(MainApp):
 
         ttk.Button(seq_box, textvariable=self.seq_pick_btn_var, command=self.on_arm_seq_rectangle).grid(row=5, column=0, columnspan=2, padx=2, pady=(4, 0), sticky="w")
         ttk.Label(seq_box, textvariable=self.seq_pick_status_var, foreground="gray", font=("Segoe UI", 8)).grid(row=5, column=2, columnspan=2, sticky="w", pady=(4, 0))
-
         ttk.Label(seq_box, textvariable=self.seq_status_var, foreground="blue", font=("Segoe UI", 8)).grid(row=6, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
         cam_box = ttk.LabelFrame(outer, text="Camera rapide", padding=4)
@@ -706,10 +861,6 @@ class IntegratedMeasurementApp(MainApp):
             self.pot_zone_var.set(f"Zone : {self.seq_mode_var.get()} | grille {rows}x{cols}")
         except Exception:
             self.pot_zone_var.set(f"Zone : {self.seq_mode_var.get()} | X={x0:.3f}->{x1:.3f}, Y={y0:.3f}->{y1:.3f}")
-
-    def _update_sequence_labels(self, start_xy, end_xy):
-        super()._update_sequence_labels(start_xy, end_xy)
-        self._update_measure_zone_label()
 
     def on_set_seq_start(self):
         super().on_set_seq_start()
