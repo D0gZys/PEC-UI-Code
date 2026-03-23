@@ -4,7 +4,11 @@
 #include <QDir>
 #include <QFileInfo>
 
+#include <atomic>
+#include <chrono>
+#include <memory>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 namespace laserbench::hardware {
@@ -152,18 +156,38 @@ bool BioLogicController::connect(const QString& dllPath, const QString& address,
                              "(Chemin essaye : %1)").arg(dllPath));
         }
 
-        TDeviceInfos_t infos {};
-        const int id = [&] {
-            int tmp = -1;
-            const int rc = impl_.blConnect(address.toLatin1().constData(), 5, &tmp, &infos);
-            if (rc != ERR_OK) throwErr(QString("BL_Connect : %1").arg(impl_.errorMsg(rc)));
-            return tmp;
-        }();
-        impl_.connectionId = id;
+        // BL_Connect peut ignorer son paramètre timeout sur certaines DLLs.
+        // On l'exécute dans un thread dédié avec un timeout dur de 15 secondes.
+        struct BlResult {
+            std::atomic<bool> done {false};
+            int rc {-1};
+            int id {-1};
+            TDeviceInfos_t infos {};
+        };
+        auto blRes = std::make_shared<BlResult>();
+        {
+            const std::string addr = address.toLatin1().toStdString();
+            auto blConnect = impl_.blConnect;
+            std::thread([blRes, addr, blConnect]() {
+                blRes->rc = blConnect(addr.c_str(), 10, &blRes->id, &blRes->infos);
+                blRes->done.store(true);
+            }).detach();
+        }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        while (!blRes->done.load() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+        if (!blRes->done.load())
+            throwErr("Timeout (15s) : appareil non reachable. Verifiez IP et connexion reseau.");
+        if (blRes->rc != ERR_OK)
+            throwErr(QString("BL_Connect : %1").arg(impl_.errorMsg(blRes->rc)));
+
+        TDeviceInfos_t infos = blRes->infos;
+        impl_.connectionId = blRes->id;
 
         const uint8 ch = static_cast<uint8>(channel - 1);
         {
-            const int rc = impl_.blGetChannelBoardType(id, ch, &impl_.boardType);
+            const int rc = impl_.blGetChannelBoardType(impl_.connectionId, ch, &impl_.boardType);
             if (rc != ERR_OK) throwErr(QString("BL_GetChannelBoardType : %1").arg(impl_.errorMsg(rc)));
         }
 
