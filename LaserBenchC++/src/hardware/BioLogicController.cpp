@@ -1,169 +1,122 @@
 #include "hardware/BioLogicController.hpp"
 
-#include <QCoreApplication>
+#include <QDir>
 #include <QFileInfo>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
 
 #include <stdexcept>
-#include <string>
-
-#define NOMINMAX
-#include <windows.h>
+#include <vector>
 
 namespace laserbench::hardware {
 
-namespace {
+// Board type values returned by BL_GetChannelBoardType
+static constexpr uint32_t BOARD_ESSENTIAL = 1;  // VMP3 series    -> ca.ecc  / ocv.ecc
+static constexpr uint32_t BOARD_PREMIUM   = 2;  // VMP-300 series -> ca4.ecc / ocv4.ecc
+static constexpr uint32_t BOARD_DIGICORE  = 3;  // SP-300 series  -> ca5.ecc / ocv5.ecc
 
-[[noreturn]] void throwErr(const QString& msg)
+static constexpr int ERR_OK = 0;
+
+[[noreturn]] static void throwErr(const QString& msg)
 {
     throw std::runtime_error(msg.toStdString());
 }
 
-QString fromWide(const wchar_t* text)
-{
-    return QString::fromWCharArray(text == nullptr ? L"" : text);
-}
-
-QString win32Msg(DWORD code)
-{
-    wchar_t* buf = nullptr;
-    const DWORD n = FormatMessageW(
-        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-        nullptr, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-        reinterpret_cast<LPWSTR>(&buf), 0, nullptr
-    );
-    QString msg = n > 0 ? fromWide(buf).trimmed() : QString("Win32 error %1").arg(code);
-    if (buf) LocalFree(buf);
-    return msg;
-}
-
-QString readLine(HANDLE h)
-{
-    QByteArray data;
-    char byte = 0;
-    DWORD bytesRead = 0;
-    while (true) {
-        if (!ReadFile(h, &byte, 1, &bytesRead, nullptr)) {
-            throwErr(QString("Lecture helper echouee : %1").arg(win32Msg(GetLastError())));
-        }
-        if (bytesRead == 0) {
-            throwErr("Le helper a ferme son flux de sortie.");
-        }
-        if (byte == '\n') { break; }
-        if (byte != '\r') { data.append(byte); }
-    }
-    return QString::fromUtf8(data);
-}
-
-void writeLine(HANDLE h, const QByteArray& data)
-{
-    QByteArray line = data + "\n";
-    DWORD written = 0;
-    if (!WriteFile(h, line.constData(), static_cast<DWORD>(line.size()), &written, nullptr)) {
-        throwErr(QString("Ecriture vers helper echouee : %1").arg(win32Msg(GetLastError())));
-    }
-}
-
-}  // namespace
-
 // ── Impl ──────────────────────────────────────────────────────────────────────
 
-void BioLogicController::Impl::shutdown()
+bool BioLogicController::Impl::load(const QString& dllPath)
 {
-    ready = false;
-    if (stdinWrite  != nullptr) { CloseHandle(stdinWrite);    stdinWrite  = nullptr; }
-    if (stdoutRead  != nullptr) { CloseHandle(stdoutRead);    stdoutRead  = nullptr; }
-    if (processHandle != nullptr) {
-        if (WaitForSingleObject(processHandle, 500) == WAIT_TIMEOUT) {
-            TerminateProcess(processHandle, 0);
-            WaitForSingleObject(processHandle, 1000);
+    unload();
+
+    // Resolve the DLL path
+    QString path = dllPath;
+    if (path.isEmpty() || !QFileInfo::exists(path)) {
+        const QStringList candidates = {
+            QDir(QFileInfo(path).absolutePath()).filePath("EClib64.dll"),
+            "C:/EC-Lab Development Package/lib/EClib64.dll",
+            "C:/Program Files/Bio-Logic Science Instruments/EC-Lab Development Package/lib/EClib64.dll",
+        };
+        for (const QString& c : candidates) {
+            if (QFileInfo::exists(c)) { path = c; break; }
         }
-        CloseHandle(processHandle);
-        processHandle = nullptr;
     }
+
+    hDll = LoadLibraryW(path.toStdWString().c_str());
+    if (!hDll) return false;
+
+    dllDir = QFileInfo(path).absolutePath();
+
+    // Bind all function pointers
+    auto get = [this](const char* name) {
+        return GetProcAddress(hDll, name);
+    };
+
+    blConnect             = reinterpret_cast<FnConnect>            (get("BL_Connect"));
+    blDisconnect          = reinterpret_cast<FnDisconnect>         (get("BL_Disconnect"));
+    blLoadFirmware        = reinterpret_cast<FnLoadFirmware>       (get("BL_LoadFirmware"));
+    blLoadTechnique       = reinterpret_cast<FnLoadTechnique>      (get("BL_LoadTechnique"));
+    blStartChannel        = reinterpret_cast<FnStartChannel>       (get("BL_StartChannel"));
+    blStopChannel         = reinterpret_cast<FnStopChannel>        (get("BL_StopChannel"));
+    blGetData             = reinterpret_cast<FnGetData>            (get("BL_GetData"));
+    blGetCurrentValues    = reinterpret_cast<FnGetCurrentValues>   (get("BL_GetCurrentValues"));
+    blGetChannelBoardType = reinterpret_cast<FnGetChannelBoardType>(get("BL_GetChannelBoardType"));
+    blDefineSgl           = reinterpret_cast<FnDefineSgl>          (get("BL_DefineSglParameter"));
+    blDefineBool          = reinterpret_cast<FnDefineBool>         (get("BL_DefineBoolParameter"));
+    blDefineInt           = reinterpret_cast<FnDefineInt>          (get("BL_DefineIntParameter"));
+    blConvertNumSgl       = reinterpret_cast<FnConvertNumSgl>      (get("BL_ConvertChannelNumericIntoSingle"));
+    blConvertTimeSecs     = reinterpret_cast<FnConvertTimeSecs>    (get("BL_ConvertTimeChannelNumericIntoSeconds"));
+    blGetErrorMsg         = reinterpret_cast<FnGetErrorMsg>        (get("BL_GetErrorMsg"));
+
+    const bool ok = blConnect && blDisconnect && blLoadTechnique
+        && blStartChannel && blStopChannel
+        && blGetData && blGetCurrentValues && blGetChannelBoardType
+        && blDefineSgl && blDefineBool && blDefineInt
+        && blConvertNumSgl && blConvertTimeSecs;
+
+    if (!ok) { unload(); }
+    return ok;
 }
 
-void BioLogicController::Impl::ensureStarted(const QString& helperScriptPath)
+void BioLogicController::Impl::unload()
 {
-    if (isRunning() && ready) {
-        return;
+    if (connectionId >= 0 && blDisconnect) {
+        blDisconnect(connectionId);
+        connectionId = -1;
     }
-    shutdown();
-
-    if (!QFileInfo::exists(helperScriptPath)) {
-        throwErr(QString("Script introuvable : %1").arg(helperScriptPath));
+    if (hDll) {
+        FreeLibrary(hDll);
+        hDll = nullptr;
     }
+    blConnect = nullptr; blDisconnect = nullptr; blLoadFirmware = nullptr;
+    blLoadTechnique = nullptr; blStartChannel = nullptr; blStopChannel = nullptr;
+    blGetData = nullptr; blGetCurrentValues = nullptr; blGetChannelBoardType = nullptr;
+    blDefineSgl = nullptr; blDefineBool = nullptr; blDefineInt = nullptr;
+    blConvertNumSgl = nullptr; blConvertTimeSecs = nullptr; blGetErrorMsg = nullptr;
+    boardType = 0;
+    dllDir.clear();
+}
 
-    SECURITY_ATTRIBUTES sa {};
-    sa.nLength        = sizeof(SECURITY_ATTRIBUTES);
-    sa.bInheritHandle = TRUE;
-
-    HANDLE childStdoutRead = nullptr, childStdoutWrite = nullptr;
-    HANDLE childStdinRead  = nullptr, childStdinWrite  = nullptr;
-
-    if (!CreatePipe(&childStdoutRead, &childStdoutWrite, &sa, 0)) {
-        throwErr(QString("CreatePipe stdout : %1").arg(win32Msg(GetLastError())));
+QString BioLogicController::Impl::errorMsg(int code) const
+{
+    if (blGetErrorMsg) {
+        char buf[256] = {};
+        unsigned int sz = static_cast<unsigned int>(sizeof(buf));
+        blGetErrorMsg(code, buf, &sz);
+        return QString::fromLatin1(buf).trimmed();
     }
-    SetHandleInformation(childStdoutRead, HANDLE_FLAG_INHERIT, 0);
+    return QString("Erreur EClib %1").arg(code);
+}
 
-    if (!CreatePipe(&childStdinRead, &childStdinWrite, &sa, 0)) {
-        CloseHandle(childStdoutRead); CloseHandle(childStdoutWrite);
-        throwErr(QString("CreatePipe stdin : %1").arg(win32Msg(GetLastError())));
-    }
-    SetHandleInformation(childStdinWrite, HANDLE_FLAG_INHERIT, 0);
+QString BioLogicController::Impl::techFile(const char* base4, const char* base5, const char* base) const
+{
+    const char* name = (boardType == BOARD_PREMIUM)  ? base4 :
+                       (boardType == BOARD_DIGICORE) ? base5 : base;
 
-    STARTUPINFOW si {};
-    si.cb         = sizeof(si);
-    si.dwFlags    = STARTF_USESTDHANDLES;
-    si.hStdInput  = childStdinRead;
-    si.hStdOutput = childStdoutWrite;
-    si.hStdError  = childStdoutWrite;
-
-    PROCESS_INFORMATION pi {};
-    std::wstring cmdLine = QString("python \"%1\"").arg(helperScriptPath).toStdWString();
-
-    const BOOL created = CreateProcessW(
-        nullptr, cmdLine.data(), nullptr, nullptr, TRUE,
-        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi
-    );
-
-    CloseHandle(childStdoutWrite);
-    CloseHandle(childStdinRead);
-
-    if (!created) {
-        CloseHandle(childStdoutRead); CloseHandle(childStdinWrite);
-        throwErr(QString("Impossible de lancer python : %1").arg(win32Msg(GetLastError())));
-    }
-
-    CloseHandle(pi.hThread);
-    processHandle = pi.hProcess;
-    stdoutRead    = childStdoutRead;
-    stdinWrite    = childStdinWrite;
-
-    // Wait for the ready message
-    const QString line = readLine(stdoutRead);
-    const QJsonDocument doc = QJsonDocument::fromJson(line.toUtf8());
-    if (doc.isNull()) {
-        shutdown();
-        throwErr(QString("Reponse initiale invalide : %1").arg(line));
-    }
-    const QJsonObject obj = doc.object();
-    if (!obj.value("kbio_available").toBool(true)) {
-        shutdown();
-        throwErr(QString("kbio non disponible : %1").arg(obj.value("error").toString()));
-    }
-    ready = true;
+    const QString full = QDir(dllDir).filePath(QString::fromLatin1(name));
+    return QFileInfo::exists(full) ? full : QString::fromLatin1(name);
 }
 
 // ── BioLogicController ────────────────────────────────────────────────────────
 
-BioLogicController::BioLogicController(const QString& helperScriptPath)
-    : helperScriptPath_(helperScriptPath)
-{
-}
-
+BioLogicController::BioLogicController() = default;
 BioLogicController::~BioLogicController() = default;
 
 QString           BioLogicController::displayName()    const { return "Potentiostat BioLogic"; }
@@ -178,42 +131,50 @@ QString BioLogicController::backendSummary()     const
 QString BioLogicController::channelSummary()     const { return connected_ ? connectedModel_ : "---"; }
 QString BioLogicController::acquisitionSummary() const { return "CA / OCV par point"; }
 
-QString BioLogicController::sendRawCommand(const QString& jsonLine)
-{
-    // caller must hold transportMutex
-    writeLine(impl_.stdinWrite, jsonLine.toUtf8());
-    return readLine(impl_.stdoutRead);
-}
-
 bool BioLogicController::connect(const QString& dllPath, const QString& address, int channel)
 {
     connected_ = false;
     connectedModel_.clear();
     lastError_.clear();
 
-    std::lock_guard<std::mutex> lock(impl_.transportMutex);
+    std::lock_guard<std::mutex> lock(impl_.mutex);
     try {
-        impl_.ensureStarted(helperScriptPath_);
-
-        QJsonObject cmd;
-        cmd["cmd"]      = "connect";
-        cmd["dll_path"] = dllPath;
-        cmd["address"]  = address;
-        cmd["channel"]  = channel;
-
-        const QJsonObject resp = QJsonDocument::fromJson(
-            sendRawCommand(QJsonDocument(cmd).toJson(QJsonDocument::Compact)).toUtf8()
-        ).object();
-
-        if (!resp.value("ok").toBool()) {
-            lastError_ = resp.value("error").toString("Erreur inconnue");
-            return false;
+        if (!impl_.load(dllPath)) {
+            throwErr(QString("Impossible de charger EClib64.dll depuis : %1").arg(dllPath));
         }
-        connectedModel_ = resp.value("model").toString("inconnu");
+
+        TDeviceInfos_t infos {};
+        const int id = [&] {
+            int tmp = -1;
+            const int rc = impl_.blConnect(address.toLatin1().constData(), 5, &tmp, &infos);
+            if (rc != ERR_OK) throwErr(QString("BL_Connect : %1").arg(impl_.errorMsg(rc)));
+            return tmp;
+        }();
+        impl_.connectionId = id;
+
+        const uint8 ch = static_cast<uint8>(channel - 1);
+        {
+            const int rc = impl_.blGetChannelBoardType(id, ch, &impl_.boardType);
+            if (rc != ERR_OK) throwErr(QString("BL_GetChannelBoardType : %1").arg(impl_.errorMsg(rc)));
+        }
+
+        // Map DeviceCode to human-readable model name
+        static const char* const kDeviceNames[] = {
+            "VMP","VMP2","MPG","BiStat","MCS200","VMP3","VSP","HCP803",
+            "EPP400","EPP4000","BiStat2","FCT150S","VMP300","SP50","SP150",
+            "FCT50S","SP300","CLB500","HCP1005","CLB2000","VSP300","SP200",
+            "MPG2","SP100","MOSLED","Kinetic","Nikita","SP240",
+            "MPG205","MPG210","MPG220","MPG240","BP300","VMP3e","VSP3e","SP50e","SP150e"
+        };
+        const int code = infos.DeviceCode;
+        connectedModel_ = (code >= 0 && code < static_cast<int>(std::size(kDeviceNames)))
+                          ? QString::fromLatin1(kDeviceNames[code])
+                          : QString("Device%1").arg(code);
         connected_ = true;
         return true;
     } catch (const std::exception& ex) {
         lastError_ = QString::fromUtf8(ex.what());
+        impl_.unload();
         return false;
     }
 }
@@ -222,53 +183,72 @@ void BioLogicController::disconnect()
 {
     connected_ = false;
     connectedModel_.clear();
-    std::lock_guard<std::mutex> lock(impl_.transportMutex);
-    if (impl_.isRunning()) {
-        try {
-            QJsonObject cmd;
-            cmd["cmd"] = "disconnect";
-            sendRawCommand(QJsonDocument(cmd).toJson(QJsonDocument::Compact));
-        } catch (...) {}
-    }
-    impl_.shutdown();
+    std::lock_guard<std::mutex> lock(impl_.mutex);
+    impl_.unload();
 }
 
 void BioLogicController::loadFirmware(int channel)
 {
-    std::lock_guard<std::mutex> lock(impl_.transportMutex);
-    QJsonObject cmd;
-    cmd["cmd"]     = "load_firmware";
-    cmd["channel"] = channel;
-    const QJsonObject resp = QJsonDocument::fromJson(
-        sendRawCommand(QJsonDocument(cmd).toJson(QJsonDocument::Compact)).toUtf8()
-    ).object();
-    if (!resp.value("ok").toBool()) {
-        throwErr(resp.value("error").toString("Erreur firmware"));
-    }
+    std::lock_guard<std::mutex> lock(impl_.mutex);
+    if (!impl_.isConnected()) throwErr("Non connecte");
+    if (!impl_.blLoadFirmware)  throwErr("BL_LoadFirmware non disponible");
+
+    const char* fw   = nullptr;
+    const char* fpga = nullptr;
+    if (impl_.boardType == BOARD_ESSENTIAL) { fw = "kernel.bin";  fpga = "Vmp_ii_0437_a6.xlx"; }
+    else if (impl_.boardType == BOARD_PREMIUM)   { fw = "kernel4.bin"; fpga = "vmp_iv_0395_aa.xlx"; }
+    else if (impl_.boardType == BOARD_DIGICORE)  { fw = "kernel5.bin"; fpga = ""; }
+    else throwErr(QString("Type de carte inconnu : %1").arg(impl_.boardType));
+
+    constexpr uint8 kMaxCh = 16;
+    uint8 channels[kMaxCh] = {};
+    int   results[kMaxCh]  = {};
+    channels[static_cast<uint8>(channel - 1)] = 1;
+
+    const QString fwFull   = impl_.dllDir.isEmpty() ? QString::fromLatin1(fw)   : QDir(impl_.dllDir).filePath(QString::fromLatin1(fw));
+    const QString fpgaFull = (fpga && *fpga) ? (impl_.dllDir.isEmpty() ? QString::fromLatin1(fpga) : QDir(impl_.dllDir).filePath(QString::fromLatin1(fpga))) : QString();
+
+    const int rc = impl_.blLoadFirmware(
+        impl_.connectionId, channels, results, kMaxCh,
+        false, true,
+        fwFull.toLatin1().constData(),
+        fpgaFull.isEmpty() ? nullptr : fpgaFull.toLatin1().constData()
+    );
+    if (rc != ERR_OK) throwErr(QString("BL_LoadFirmware : %1").arg(impl_.errorMsg(rc)));
 }
 
 bool BioLogicController::startCa(const CaParams& p)
 {
-    std::lock_guard<std::mutex> lock(impl_.transportMutex);
+    std::lock_guard<std::mutex> lock(impl_.mutex);
     try {
-        QJsonObject cmd;
-        cmd["cmd"]       = "start_ca";
-        cmd["channel"]   = p.channel;
-        cmd["voltage"]   = p.voltage;
-        cmd["duration"]  = p.duration;
-        cmd["vs_init"]   = p.vsInit;
-        cmd["record_dt"] = p.recordDt;
-        cmd["i_range"]   = p.iRange;
-        cmd["e_range"]   = p.eRange;
-        cmd["bandwidth"] = p.bandwidth;
-        cmd["n_cycles"]  = p.nCycles;
-        const QJsonObject resp = QJsonDocument::fromJson(
-            sendRawCommand(QJsonDocument(cmd).toJson(QJsonDocument::Compact)).toUtf8()
-        ).object();
-        if (!resp.value("ok").toBool()) {
-            lastError_ = resp.value("error").toString("Erreur CA");
-            return false;
-        }
+        if (!impl_.isConnected()) throwErr("Non connecte");
+
+        constexpr int kNParams = 9;
+        std::vector<TEccParam_t> params(kNParams);
+
+        impl_.blDefineSgl ("Voltage_step",    static_cast<float>(p.voltage),   0, &params[0]);
+        impl_.blDefineSgl ("Duration_step",   static_cast<float>(p.duration),  0, &params[1]);
+        impl_.blDefineBool("vs_initial",      p.vsInit,                        0, &params[2]);
+        impl_.blDefineInt ("Step_number",     0,                               0, &params[3]);
+        impl_.blDefineSgl ("Record_every_dT", static_cast<float>(p.recordDt),  0, &params[4]);
+        impl_.blDefineInt ("I_Range",         p.iRange,                        0, &params[5]);
+        impl_.blDefineInt ("E_Range",         p.eRange,                        0, &params[6]);
+        impl_.blDefineInt ("Bandwidth",       p.bandwidth,                     0, &params[7]);
+        impl_.blDefineInt ("N_Cycles",        p.nCycles,                       0, &params[8]);
+
+        TEccParams_t eccParams;
+        eccParams.len     = kNParams;
+        eccParams.pParams = params.data();
+
+        const QString tech  = impl_.techFile("ca4.ecc", "ca5.ecc", "ca.ecc");
+        const uint8   ch    = static_cast<uint8>(p.channel - 1);
+
+        int rc = impl_.blLoadTechnique(impl_.connectionId, ch, tech.toLatin1().constData(), eccParams, true, true, false);
+        if (rc != ERR_OK) throwErr(QString("BL_LoadTechnique CA : %1").arg(impl_.errorMsg(rc)));
+
+        rc = impl_.blStartChannel(impl_.connectionId, ch);
+        if (rc != ERR_OK) throwErr(QString("BL_StartChannel : %1").arg(impl_.errorMsg(rc)));
+
         return true;
     } catch (const std::exception& ex) {
         lastError_ = QString::fromUtf8(ex.what());
@@ -278,21 +258,30 @@ bool BioLogicController::startCa(const CaParams& p)
 
 bool BioLogicController::startOcv(const OcvParams& p)
 {
-    std::lock_guard<std::mutex> lock(impl_.transportMutex);
+    std::lock_guard<std::mutex> lock(impl_.mutex);
     try {
-        QJsonObject cmd;
-        cmd["cmd"]       = "start_ocv";
-        cmd["channel"]   = p.channel;
-        cmd["duration"]  = p.duration;
-        cmd["record_dt"] = p.recordDt;
-        cmd["e_range"]   = p.eRange;
-        const QJsonObject resp = QJsonDocument::fromJson(
-            sendRawCommand(QJsonDocument(cmd).toJson(QJsonDocument::Compact)).toUtf8()
-        ).object();
-        if (!resp.value("ok").toBool()) {
-            lastError_ = resp.value("error").toString("Erreur OCV");
-            return false;
-        }
+        if (!impl_.isConnected()) throwErr("Non connecte");
+
+        constexpr int kNParams = 3;
+        std::vector<TEccParam_t> params(kNParams);
+
+        impl_.blDefineSgl("Rest_time_T",     static_cast<float>(p.duration),  0, &params[0]);
+        impl_.blDefineSgl("Record_every_dT", static_cast<float>(p.recordDt),  0, &params[1]);
+        impl_.blDefineInt("E_Range",         p.eRange,                        0, &params[2]);
+
+        TEccParams_t eccParams;
+        eccParams.len     = kNParams;
+        eccParams.pParams = params.data();
+
+        const QString tech = impl_.techFile("ocv4.ecc", "ocv5.ecc", "ocv.ecc");
+        const uint8   ch   = static_cast<uint8>(p.channel - 1);
+
+        int rc = impl_.blLoadTechnique(impl_.connectionId, ch, tech.toLatin1().constData(), eccParams, true, true, false);
+        if (rc != ERR_OK) throwErr(QString("BL_LoadTechnique OCV : %1").arg(impl_.errorMsg(rc)));
+
+        rc = impl_.blStartChannel(impl_.connectionId, ch);
+        if (rc != ERR_OK) throwErr(QString("BL_StartChannel : %1").arg(impl_.errorMsg(rc)));
+
         return true;
     } catch (const std::exception& ex) {
         lastError_ = QString::fromUtf8(ex.what());
@@ -302,38 +291,52 @@ bool BioLogicController::startOcv(const OcvParams& p)
 
 void BioLogicController::stopChannel(int channel)
 {
-    std::lock_guard<std::mutex> lock(impl_.transportMutex);
-    QJsonObject cmd;
-    cmd["cmd"]     = "stop_channel";
-    cmd["channel"] = channel;
-    try {
-        sendRawCommand(QJsonDocument(cmd).toJson(QJsonDocument::Compact));
-    } catch (...) {}
+    std::lock_guard<std::mutex> lock(impl_.mutex);
+    if (!impl_.isConnected() || !impl_.blStopChannel) return;
+    impl_.blStopChannel(impl_.connectionId, static_cast<uint8>(channel - 1));
 }
 
 PotDataResult BioLogicController::getData(int channel)
 {
     PotDataResult result;
-    std::lock_guard<std::mutex> lock(impl_.transportMutex);
+    std::lock_guard<std::mutex> lock(impl_.mutex);
     try {
-        QJsonObject cmd;
-        cmd["cmd"]     = "get_data";
-        cmd["channel"] = channel;
-        const QJsonObject resp = QJsonDocument::fromJson(
-            sendRawCommand(QJsonDocument(cmd).toJson(QJsonDocument::Compact)).toUtf8()
-        ).object();
-        result.ok      = resp.value("ok").toBool();
-        result.stopped = resp.value("status").toString() == "STOP";
-        result.error   = resp.value("error").toString();
-        const QJsonArray data = resp.value("data").toArray();
-        result.points.reserve(static_cast<std::size_t>(data.size()));
-        for (const QJsonValue& v : data) {
-            const QJsonObject pt = v.toObject();
-            result.points.push_back({
-                pt.value("t").toDouble(),
-                pt.value("Ewe").toDouble(),
-                pt.value("I").toDouble()
-            });
+        if (!impl_.isConnected()) throwErr("Non connecte");
+
+        TDataBuffer_t    buf {};
+        TDataInfos_t     info {};
+        TCurrentValues_t curr {};
+        const uint8      ch = static_cast<uint8>(channel - 1);
+
+        const int rc = impl_.blGetData(impl_.connectionId, ch, &buf, &info, &curr);
+        if (rc != ERR_OK) throwErr(QString("BL_GetData : %1").arg(impl_.errorMsg(rc)));
+
+        result.ok      = true;
+        result.stopped = (curr.State == KBIO_STATE_STOP);
+
+        // Data layout per row: [t_lo, t_hi, Ewe, I?, ...] (NbCols columns)
+        // Column 0-1 : time encoding -> BL_ConvertTimeChannelNumericIntoSeconds
+        // Column 2   : Ewe (V)
+        // Column 3   : I (A)  -- only for CA (NbCols >= 4)
+        for (int i = 0; i < info.NbRows; ++i) {
+            const int offset = i * info.NbCols;
+
+            double t = info.StartTime;
+            if (impl_.blConvertTimeSecs) {
+                double dt = 0.0;
+                impl_.blConvertTimeSecs(&buf.data[offset], &dt, curr.TimeBase, impl_.boardType);
+                t += dt;
+            }
+
+            float ewe = 0.0f;
+            if (info.NbCols >= 3 && impl_.blConvertNumSgl)
+                impl_.blConvertNumSgl(buf.data[offset + 2], &ewe, impl_.boardType);
+
+            float I = 0.0f;
+            if (info.NbCols >= 4 && impl_.blConvertNumSgl)
+                impl_.blConvertNumSgl(buf.data[offset + 3], &I, impl_.boardType);
+
+            result.points.push_back({t, static_cast<double>(ewe), static_cast<double>(I)});
         }
     } catch (const std::exception& ex) {
         result.ok    = false;
@@ -345,20 +348,21 @@ PotDataResult BioLogicController::getData(int channel)
 PotCurrentValues BioLogicController::getCurrentValues(int channel)
 {
     PotCurrentValues result;
-    std::lock_guard<std::mutex> lock(impl_.transportMutex);
+    std::lock_guard<std::mutex> lock(impl_.mutex);
     try {
-        QJsonObject cmd;
-        cmd["cmd"]     = "get_current_values";
-        cmd["channel"] = channel;
-        const QJsonObject resp = QJsonDocument::fromJson(
-            sendRawCommand(QJsonDocument(cmd).toJson(QJsonDocument::Compact)).toUtf8()
-        ).object();
-        result.ok      = resp.value("ok").toBool();
-        result.stopped = resp.value("stopped").toBool();
-        result.elapsedTime = resp.value("ElapsedTime").toDouble();
-        result.ewe     = resp.value("Ewe").toDouble();
-        result.I       = resp.value("I").toDouble();
-        result.error   = resp.value("error").toString();
+        if (!impl_.isConnected()) throwErr("Non connecte");
+
+        TCurrentValues_t curr {};
+        const uint8      ch = static_cast<uint8>(channel - 1);
+
+        const int rc = impl_.blGetCurrentValues(impl_.connectionId, ch, &curr);
+        if (rc != ERR_OK) throwErr(QString("BL_GetCurrentValues : %1").arg(impl_.errorMsg(rc)));
+
+        result.ok          = true;
+        result.stopped     = (curr.State == KBIO_STATE_STOP);
+        result.elapsedTime = static_cast<double>(curr.ElapsedTime);
+        result.ewe         = static_cast<double>(curr.Ewe);
+        result.I           = static_cast<double>(curr.I);
     } catch (const std::exception& ex) {
         result.ok    = false;
         result.error = QString::fromUtf8(ex.what());

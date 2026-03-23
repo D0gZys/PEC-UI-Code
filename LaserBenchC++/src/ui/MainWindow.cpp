@@ -178,11 +178,7 @@ MainWindow::MainWindow(QWidget* parent)
     , snapshot_(core::makeDefaultSnapshot())
     , motorController_(std::make_shared<hardware::NewportConexController>())
     , cameraController_(std::make_unique<hardware::ThorlabsCameraController>())
-    , potentiostatController_([]{
-        const QString appDir = QCoreApplication::applicationDirPath();
-        const QString helperPath = QDir::cleanPath(appDir + "/helpers/PotentiostatHelper.py");
-        return std::make_shared<hardware::BioLogicController>(helperPath);
-    }())
+    , potentiostatController_(std::make_shared<hardware::BioLogicController>())
 {
     setWindowTitle("LaserBench");
     resize(1500, 920);

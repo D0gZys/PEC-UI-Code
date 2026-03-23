@@ -15,6 +15,8 @@ set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
 set(NEWPORT_DOTNET_DLL "${CMAKE_CURRENT_SOURCE_DIR}/../MotorController/lib/Newport.CONEXCC.CommandInterface.dll")
+set(BIOLOGIC_SDK_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../Potentiostat/Examples/C-C++/include")
+set(BIOLOGIC_DLL "${CMAKE_CURRENT_SOURCE_DIR}/../Potentiostat/lib/EClib64.dll")
 set(THORLABS_CAMERA_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../Camera/SDK/Native Toolkit")
 set(THORLABS_CAMERA_DLL_DIR "${THORLABS_CAMERA_SDK_DIR}/dlls/Native_64_lib")
 set(THORLABS_CAMERA_LOAD_C "${THORLABS_CAMERA_SDK_DIR}/load_dll_helpers/tl_camera_sdk_load.c")
@@ -84,6 +86,7 @@ target_include_directories(LaserBench PRIVATE
     src
     "${THORLABS_CAMERA_SDK_DIR}/include"
     "${THORLABS_CAMERA_SDK_DIR}/load_dll_helpers"
+    "${BIOLOGIC_SDK_INCLUDE}"
 )
 
 target_link_libraries(LaserBench PRIVATE Qt6::Widgets)
@@ -96,6 +99,9 @@ add_custom_command(TARGET LaserBench POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${NEWPORT_DOTNET_DLL}"
         "$<TARGET_FILE_DIR:LaserBench>/Newport.CONEXCC.CommandInterface.dll"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${BIOLOGIC_DLL}"
+        "$<TARGET_FILE_DIR:LaserBench>/EClib64.dll"
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${THORLABS_CAMERA_DLL_DIR}"
         "$<TARGET_FILE_DIR:LaserBench>"

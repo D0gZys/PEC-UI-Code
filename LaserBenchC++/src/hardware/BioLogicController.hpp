@@ -4,11 +4,14 @@
 
 #include <QString>
 
+#include <cstdint>
 #include <mutex>
 #include <vector>
 
 #define NOMINMAX
 #include <windows.h>
+
+#include "BLStructs.h"
 
 namespace laserbench::hardware {
 
@@ -50,18 +53,18 @@ struct PotDataResult
 
 struct PotCurrentValues
 {
-    bool    ok      {false};
-    bool    stopped {false};
+    bool    ok          {false};
+    bool    stopped     {false};
     double  elapsedTime {0.0};
-    double  ewe     {0.0};
-    double  I       {0.0};
+    double  ewe         {0.0};
+    double  I           {0.0};
     QString error;
 };
 
 class BioLogicController final : public IPotentiostatController
 {
 public:
-    explicit BioLogicController(const QString& helperScriptPath);
+    BioLogicController();
     ~BioLogicController() override;
 
     QString           displayName()        const override;
@@ -84,29 +87,58 @@ public:
     QString lastError()      const { return lastError_; }
 
 private:
+    // Function pointer types (all __stdcall as per BioLogic API)
+    using FnConnect              = int(__stdcall*)(const char*, uint8, int*, TDeviceInfos_t*);
+    using FnDisconnect           = int(__stdcall*)(int);
+    using FnLoadFirmware         = int(__stdcall*)(int, uint8*, int*, uint8, bool, bool, const char*, const char*);
+    using FnLoadTechnique        = int(__stdcall*)(int, uint8, const char*, TEccParams_t, bool, bool, bool);
+    using FnStartChannel         = int(__stdcall*)(int, uint8);
+    using FnStopChannel          = int(__stdcall*)(int, uint8);
+    using FnGetData              = int(__stdcall*)(int, uint8, TDataBuffer_t*, TDataInfos_t*, TCurrentValues_t*);
+    using FnGetCurrentValues     = int(__stdcall*)(int, uint8, TCurrentValues_t*);
+    using FnGetChannelBoardType  = int(__stdcall*)(int32_t, uint8, uint32_t*);
+    using FnDefineSgl            = int(__stdcall*)(const char*, float, int, TEccParam_t*);
+    using FnDefineBool           = int(__stdcall*)(const char*, bool, int, TEccParam_t*);
+    using FnDefineInt            = int(__stdcall*)(const char*, int, int, TEccParam_t*);
+    using FnConvertNumSgl        = int(__stdcall*)(uint32_t, float*, uint32_t);
+    using FnConvertTimeSecs      = int(__stdcall*)(uint32_t*, double*, float, uint32_t);
+    using FnGetErrorMsg          = int(__stdcall*)(int, char*, unsigned int*);
+
     struct Impl
     {
-        mutable std::mutex transportMutex;
-        HANDLE processHandle {nullptr};
-        HANDLE stdinWrite    {nullptr};
-        HANDLE stdoutRead    {nullptr};
-        bool   ready         {false};   // helper sent {"ready":true}
+        HMODULE hDll             {nullptr};
+        int     connectionId     {-1};
+        uint32_t boardType       {0};
+        QString  dllDir;
+        mutable std::mutex mutex;
 
-        ~Impl() { shutdown(); }
+        FnConnect             blConnect             {nullptr};
+        FnDisconnect          blDisconnect          {nullptr};
+        FnLoadFirmware        blLoadFirmware        {nullptr};
+        FnLoadTechnique       blLoadTechnique       {nullptr};
+        FnStartChannel        blStartChannel        {nullptr};
+        FnStopChannel         blStopChannel         {nullptr};
+        FnGetData             blGetData             {nullptr};
+        FnGetCurrentValues    blGetCurrentValues    {nullptr};
+        FnGetChannelBoardType blGetChannelBoardType {nullptr};
+        FnDefineSgl           blDefineSgl           {nullptr};
+        FnDefineBool          blDefineBool          {nullptr};
+        FnDefineInt           blDefineInt           {nullptr};
+        FnConvertNumSgl       blConvertNumSgl       {nullptr};
+        FnConvertTimeSecs     blConvertTimeSecs     {nullptr};
+        FnGetErrorMsg         blGetErrorMsg         {nullptr};
 
-        bool isRunning() const
-        {
-            return processHandle != nullptr
-                && WaitForSingleObject(processHandle, 0) == WAIT_TIMEOUT;
-        }
+        ~Impl() { unload(); }
 
-        void shutdown();
-        void ensureStarted(const QString& helperScriptPath);
+        bool    load(const QString& dllPath);
+        void    unload();
+        bool    isLoaded()    const { return hDll != nullptr; }
+        bool    isConnected() const { return connectionId >= 0; }
+        QString errorMsg(int code) const;
+
+        QString techFile(const char* base4, const char* base5, const char* base) const;
     };
 
-    QString sendRawCommand(const QString& jsonLine);
-
-    QString helperScriptPath_;
     Impl    impl_;
     bool    connected_      {false};
     QString connectedModel_;
