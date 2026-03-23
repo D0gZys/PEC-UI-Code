@@ -28,8 +28,12 @@ bool BioLogicController::Impl::load(const QString& dllPath)
     unload();
 
     // Resolve the DLL path — priority: provided path > next to exe > system install
+    // If the provided path is a directory, append the DLL filename automatically.
     QString path = dllPath;
-    if (path.isEmpty() || !QFileInfo::exists(path)) {
+    if (!path.isEmpty() && QFileInfo(path).isDir())
+        path = QDir(path).filePath("EClib64.dll");
+
+    if (!QFileInfo(path).isFile()) {
         const QString appDir = QCoreApplication::applicationDirPath();
         const QStringList candidates = {
             QDir(appDir).filePath("EClib64.dll"),
@@ -37,7 +41,7 @@ bool BioLogicController::Impl::load(const QString& dllPath)
             "C:/Program Files/Bio-Logic Science Instruments/EC-Lab Development Package/lib/EClib64.dll",
         };
         for (const QString& c : candidates) {
-            if (QFileInfo::exists(c)) { path = c; break; }
+            if (QFileInfo(c).isFile()) { path = c; break; }
         }
     }
 
@@ -142,7 +146,10 @@ bool BioLogicController::connect(const QString& dllPath, const QString& address,
     std::lock_guard<std::mutex> lock(impl_.mutex);
     try {
         if (!impl_.load(dllPath)) {
-            throwErr(QString("Impossible de charger EClib64.dll depuis : %1").arg(dllPath));
+            throwErr(QString("Impossible de charger EClib64.dll. "
+                             "Verifiez que EClib64.dll est present dans le dossier de l'application "
+                             "ou indiquez son chemin dans le champ DLL. "
+                             "(Chemin essaye : %1)").arg(dllPath));
         }
 
         TDeviceInfos_t infos {};
