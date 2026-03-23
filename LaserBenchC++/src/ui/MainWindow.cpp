@@ -180,7 +180,7 @@ MainWindow::MainWindow(QWidget* parent)
     , cameraController_(std::make_unique<hardware::ThorlabsCameraController>())
     , potentiostatController_([]{
         const QString appDir = QCoreApplication::applicationDirPath();
-        const QString helperPath = QDir::cleanPath(appDir + "/../../helpers/PotentiostatHelper.py");
+        const QString helperPath = QDir::cleanPath(appDir + "/helpers/PotentiostatHelper.py");
         return std::make_shared<hardware::BioLogicController>(helperPath);
     }())
 {
