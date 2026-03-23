@@ -30,6 +30,18 @@ public:
     void clearSequenceOverlay();
     void setWaypointOverlay(std::vector<QPointF> donePx, std::vector<QPointF> remainingPx);
     void clearWaypointOverlay();
+    // Ruler overlay: p1 always set first, p2 optional, distanceText shown at midpoint
+    void setRulerOverlay(const QPointF& p1Px, bool hasP2, const QPointF& p2Px,
+                         const QString& distanceText);
+    void clearRulerOverlay();
+    // Circle overlay: center + optional edge point, diameterText shown at center
+    void setCircleOverlay(const QPointF& centerPx, bool hasEdge, const QPointF& edgePx,
+                          const QString& diameterText);
+    void clearCircleOverlay();
+    // Rectangle overlay: corner1 + optional corner2, sizeText shown at center
+    void setRectOverlay(const QPointF& p1Px, bool hasP2, const QPointF& p2Px,
+                        const QString& sizeText);
+    void clearRectOverlay();
     void setZoomFactor(double zoomFactor);
     double zoomFactor() const;
     void zoomIn();
@@ -40,9 +52,18 @@ signals:
     void frameClicked(const QPoint& framePointPx);
     void backgroundClicked();
     void zoomFactorChanged(double zoomFactor);
+    // Emitted when the mouse moves over the image area (frame-pixel coords)
+    void frameCursorMoved(const QPoint& framePointPx);
+    // Emitted when the mouse leaves the image area
+    void frameCursorLeft();
+    // Emitted on double-click inside the image (frame-pixel coords)
+    void frameDoubleClicked(const QPoint& framePointPx);
 
 protected:
     void mousePressEvent(QMouseEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void leaveEvent(QEvent* event) override;
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
@@ -68,6 +89,21 @@ private:
     std::vector<QPointF> waypointsDonePx_;
     std::vector<QPointF> waypointsRemainingPx_;
     bool waypointOverlayVisible_ {false};
+    QPointF rulerP1Px_;
+    QPointF rulerP2Px_;
+    bool rulerP1Visible_ {false};
+    bool rulerP2Visible_ {false};
+    QString rulerDistanceText_;
+    QPointF circleCenterPx_;
+    QPointF circleEdgePx_;
+    bool circleCenterVisible_ {false};
+    bool circleEdgeVisible_ {false};
+    QString circleDiameterText_;
+    QPointF rectP1Px_;
+    QPointF rectP2Px_;
+    bool rectP1Visible_ {false};
+    bool rectP2Visible_ {false};
+    QString rectSizeText_;
     double zoomFactor_ {1.0};
 };
 

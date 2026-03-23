@@ -25,6 +25,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QTimer>
@@ -41,6 +42,7 @@
 #include "ui/CameraPreviewWidget.hpp"
 #include "ui/PotentiostatGraphWidget.hpp"
 #include "ui/PotentiostatHeatmapWidget.hpp"
+#include "ui/Potentiostat3DWidget.hpp"
 #include "hardware/BioLogicController.hpp"
 #include "hardware/MockHardware.hpp"
 #include "hardware/ThorlabsCameraController.hpp"
@@ -307,6 +309,9 @@ MainWindow::MainWindow(QWidget* parent)
     appendLog("Interface moteurs Qt6 initialisee.");
     appendLog("La DLL Newport est chargee automatiquement depuis MotorController/lib via le pont .NET.");
     appendLog("Camera Thorlabs: menu Camera pour recherche, connexion et live.");
+
+    // Show the unified connection dialog at startup (non-modal)
+    QTimer::singleShot(150, this, [this]() { openStartupConnectionDialog(); });
 }
 
 MainWindow::~MainWindow()
@@ -506,9 +511,15 @@ void MainWindow::buildUi()
     cameraSummaryLabel_ = new QLabel;
     potentiostatSummaryLabel_ = new QLabel;
 
+    mouseCoordsLabel_ = new QLabel;
+    mouseCoordsLabel_->setStyleSheet("color:#c8d0db; font-family:monospace; padding-right:6px;");
+    mouseCoordsLabel_->setMinimumWidth(220);
+    mouseCoordsLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
     statusBar()->addPermanentWidget(stageSummaryLabel_, 1);
     statusBar()->addPermanentWidget(cameraSummaryLabel_, 1);
     statusBar()->addPermanentWidget(potentiostatSummaryLabel_, 1);
+    statusBar()->addPermanentWidget(mouseCoordsLabel_);
     statusBar()->showMessage("Pret");
 }
 
@@ -529,71 +540,40 @@ QWidget* MainWindow::buildSetupTab()
     leftLayout->setContentsMargins(0, 0, 0, 0);
     leftLayout->setSpacing(4);
 
-    // Potentiostat configuration
-    auto* potBox = createGroupBox("Potentiostat");
+    // Potentiostat: only CA parameters (connection controls are in the startup connection dialog)
+    auto* potBox = createGroupBox("Potentiostat – Parametres CA");
     auto* potLayout = new QGridLayout(potBox);
     potLayout->setSpacing(3);
     potLayout->setContentsMargins(6, 4, 6, 4);
 
-    // Row 0 : DLL path + browse
-    potLayout->addWidget(new QLabel("Chemin DLL"), 0, 0);
-    potentiostatDllPathEdit_ = new QLineEdit("C:\\EC-Lab Development Package\\lib");
-    potentiostatDllPathEdit_->setPlaceholderText("Chemin vers EClib64.dll...");
-    potLayout->addWidget(potentiostatDllPathEdit_, 0, 1, 1, 2);
-    auto* browseDllButton = createActionButton("...");
-    browseDllButton->setMaximumWidth(30);
-    potLayout->addWidget(browseDllButton, 0, 3);
-
-    // Row 1 : IP + channel
-    potLayout->addWidget(new QLabel("IP"), 1, 0);
-    potentiostatAddressEdit_ = new QLineEdit("169.254.3.150");
-    potLayout->addWidget(potentiostatAddressEdit_, 1, 1);
-    potLayout->addWidget(new QLabel("Canal"), 1, 2);
-    potentiostatChannelCombo_ = new QComboBox;
-    for (int i = 1; i <= 16; ++i) {
-        potentiostatChannelCombo_->addItem(QString::number(i));
-    }
-    potLayout->addWidget(potentiostatChannelCombo_, 1, 3);
-
-    // Row 2 : Connect / Firmware / Disconnect
-    potentiostatConnectButton_ = createActionButton("Connecter");
-    potentiostatConnectButton_->setProperty("accent", true);
-    potentiostatFirmwareButton_ = createActionButton("Firmware");
-    potentiostatFirmwareButton_->setEnabled(false);
-    potentiostatDisconnectButton_ = createActionButton("Deconnecter");
-    potentiostatDisconnectButton_->setEnabled(false);
-    potLayout->addWidget(potentiostatConnectButton_,    2, 0, 1, 2);
-    potLayout->addWidget(potentiostatFirmwareButton_,   2, 2);
-    potLayout->addWidget(potentiostatDisconnectButton_, 2, 3);
-
-    // Row 3 : status
+    // Status row + shortcut to connection dialog
     potentiostatStatusLabel_ = new QLabel("Deconnecte");
     potentiostatStatusLabel_->setStyleSheet("color:#5c6570; font-size:9pt;");
-    potLayout->addWidget(potentiostatStatusLabel_, 3, 0, 1, 4);
+    auto* openConnBtn = createActionButton("Connexion...");
+    openConnBtn->setMaximumWidth(110);
+    connect(openConnBtn, &QPushButton::clicked, this, &MainWindow::openStartupConnectionDialog);
+    potLayout->addWidget(new QLabel("Etat :"), 0, 0);
+    potLayout->addWidget(potentiostatStatusLabel_, 0, 1, 1, 2);
+    potLayout->addWidget(openConnBtn, 0, 3);
 
-    // -- Parametres CA --
-    auto* caHeaderLabel = new QLabel("Parametres CA");
-    caHeaderLabel->setStyleSheet("font-weight:600; font-size:9pt; color:#1f6feb; margin-top:4px;");
-    potLayout->addWidget(caHeaderLabel, 4, 0, 1, 4);
-
-    // Row 5 : Ewe (V) + vs reference
-    potLayout->addWidget(new QLabel("Ewe (V)"), 5, 0);
+    // Row 1 : Ewe (V) + vs reference
+    potLayout->addWidget(new QLabel("Ewe (V)"), 1, 0);
     potentiostatVoltageEdit_ = new QLineEdit("0.500");
-    potLayout->addWidget(potentiostatVoltageEdit_, 5, 1);
-    potLayout->addWidget(new QLabel("vs"), 5, 2);
+    potLayout->addWidget(potentiostatVoltageEdit_, 1, 1);
+    potLayout->addWidget(new QLabel("vs"), 1, 2);
     potentiostatVsCombo_ = new QComboBox;
     potentiostatVsCombo_->addItems({"Ref", "Pref"});
-    potLayout->addWidget(potentiostatVsCombo_, 5, 3);
+    potLayout->addWidget(potentiostatVsCombo_, 1, 3);
 
-    // Row 6 : E Range
-    potLayout->addWidget(new QLabel("E Range"), 6, 0);
+    // Row 2 : E Range
+    potLayout->addWidget(new QLabel("E Range"), 2, 0);
     potentiostatErangeCombo_ = new QComboBox;
     potentiostatErangeCombo_->addItems({"-2,5 V; 2,5 V", "-5 V; 5 V", "-10 V; 10 V", "Auto"});
     potentiostatErangeCombo_->setCurrentIndex(0);
-    potLayout->addWidget(potentiostatErangeCombo_, 6, 1, 1, 3);
+    potLayout->addWidget(potentiostatErangeCombo_, 2, 1, 1, 3);
 
-    // Row 7 : I Range
-    potLayout->addWidget(new QLabel("I Range"), 7, 0);
+    // Row 3 : I Range
+    potLayout->addWidget(new QLabel("I Range"), 3, 0);
     potentiostatCurrentRangeCombo_ = new QComboBox;
     potentiostatCurrentRangeCombo_->addItems({
         "100 pA", "1 nA", "10 nA", "100 nA",
@@ -602,34 +582,22 @@ QWidget* MainWindow::buildSetupTab()
         "Booster", "Auto"
     });
     potentiostatCurrentRangeCombo_->setCurrentText("Auto");
-    potLayout->addWidget(potentiostatCurrentRangeCombo_, 7, 1, 1, 3);
+    potLayout->addWidget(potentiostatCurrentRangeCombo_, 3, 1, 1, 3);
 
-    // Row 8 : Bandwidth + Record dT
-    potLayout->addWidget(new QLabel("Bandwidth"), 8, 0);
+    // Row 4 : Bandwidth
+    potLayout->addWidget(new QLabel("Bandwidth"), 4, 0);
     potentiostatBandwidthCombo_ = new QComboBox;
     for (int i = 1; i <= 9; ++i) {
         potentiostatBandwidthCombo_->addItem(QString::number(i));
     }
     potentiostatBandwidthCombo_->setCurrentText("8");
-    potLayout->addWidget(potentiostatBandwidthCombo_, 8, 1);
-    // record_dt is derived from sequence duration — no separate field
+    potLayout->addWidget(potentiostatBandwidthCombo_, 4, 1);
 
-    // Row 9 : N Cycles
-    potLayout->addWidget(new QLabel("Cycles"), 9, 0);
+    // Row 5 : N Cycles
+    potLayout->addWidget(new QLabel("Cycles"), 5, 0);
     potentiostatNbCyclesEdit_ = new QLineEdit("0");
     potentiostatNbCyclesEdit_->setMaximumWidth(60);
-    potLayout->addWidget(potentiostatNbCyclesEdit_, 9, 1);
-
-    // Wire up connect/disconnect/firmware/browse buttons
-    connect(browseDllButton, &QPushButton::clicked, this, [this]() {
-        const QString path = QFileDialog::getOpenFileName(this, "Selectionner EClib64.dll", QString(), "DLL (*.dll)");
-        if (!path.isEmpty() && potentiostatDllPathEdit_ != nullptr) {
-            potentiostatDllPathEdit_->setText(QDir::toNativeSeparators(path));
-        }
-    });
-    connect(potentiostatConnectButton_,    &QPushButton::clicked, this, &MainWindow::onConnectPotentiostat);
-    connect(potentiostatFirmwareButton_,   &QPushButton::clicked, this, &MainWindow::onLoadFirmware);
-    connect(potentiostatDisconnectButton_, &QPushButton::clicked, this, &MainWindow::onDisconnectPotentiostat);
+    potLayout->addWidget(potentiostatNbCyclesEdit_, 5, 1);
 
     leftLayout->addWidget(potBox);
 
@@ -659,11 +627,48 @@ QWidget* MainWindow::buildSetupTab()
     gotoStatusLabel_->setStyleSheet("color:#1f6feb; font-size:9pt;");
     laserLayout->addWidget(gotoStatusLabel_, 2, 0, 1, 4);
 
+    // ── Measurement tools ─────────────────────────────────────────────────────
+    auto* measBox = createGroupBox("Mesure (clic image)");
+    auto* measLayout = new QGridLayout(measBox);
+    measLayout->setSpacing(3);
+    measLayout->setContentsMargins(6, 4, 6, 4);
+
+    rulerButton_ = createActionButton("Regle");
+    rulerDistanceLabel_ = new QLabel("---");
+    rulerDistanceLabel_->setStyleSheet("font-size:9pt; font-weight:600; color:#f0c040;");
+    measLayout->addWidget(rulerButton_,         0, 0);
+    measLayout->addWidget(rulerDistanceLabel_,  0, 1, 1, 3);
+
+    circleButton_ = createActionButton("Cercle");
+    circleDiameterLabel_ = new QLabel("---");
+    circleDiameterLabel_->setStyleSheet("font-size:9pt; font-weight:600; color:#50c8ff;");
+    measLayout->addWidget(circleButton_,        1, 0);
+    measLayout->addWidget(circleDiameterLabel_, 1, 1, 1, 3);
+
+    rectButton_ = createActionButton("Rect.");
+    rectSizeLabel_ = new QLabel("---");
+    rectSizeLabel_->setStyleSheet("font-size:9pt; font-weight:600; color:#ff8c00;");
+    measLayout->addWidget(rectButton_,   2, 0);
+    measLayout->addWidget(rectSizeLabel_, 2, 1, 1, 3);
+
+    leftLayout->addWidget(measBox);
+
     connect(objectiveCombo_, &QComboBox::currentTextChanged, this, [this](const QString&) {
         applyObjectivePreset();
+        updateRulerOverlay();
+        updateCircleOverlay();
+        updateRectOverlay();
     });
-    connect(applyObjectiveButton, &QPushButton::clicked, this, &MainWindow::applyObjectivePreset);
+    connect(applyObjectiveButton, &QPushButton::clicked, this, [this]() {
+        applyObjectivePreset();
+        updateRulerOverlay();
+        updateCircleOverlay();
+        updateRectOverlay();
+    });
     connect(gotoButton_, &QPushButton::clicked, this, &MainWindow::onArmGoto);
+    connect(rulerButton_,  &QPushButton::clicked, this, &MainWindow::onToggleRuler);
+    connect(circleButton_, &QPushButton::clicked, this, &MainWindow::onToggleCircle);
+    connect(rectButton_,   &QPushButton::clicked, this, &MainWindow::onToggleRect);
 
     leftLayout->addWidget(laserBox);
 
@@ -734,6 +739,25 @@ QWidget* MainWindow::buildSetupTab()
     });
     connect(cameraPreviewWidget_, &CameraPreviewWidget::frameClicked, this, &MainWindow::onPreviewFrameClicked);
     connect(cameraPreviewWidget_, &CameraPreviewWidget::backgroundClicked, this, &MainWindow::onPreviewBackgroundClicked);
+    connect(cameraPreviewWidget_, &CameraPreviewWidget::frameCursorMoved, this, [this](const QPoint& fp) {
+        if (mouseCoordsLabel_ == nullptr) return;
+        const QString obj = (objectiveCombo_ != nullptr)
+            ? objectiveCombo_->currentText().trimmed() : QString("4x");
+        const double mmPerPx = autoMmPerPxForObjective(obj);
+        const double xUm = fp.x() * mmPerPx * 1000.0;
+        const double yUm = fp.y() * mmPerPx * 1000.0;
+        mouseCoordsLabel_->setText(
+            QString("X: %1 px  |  %2 µm      Y: %3 px  |  %4 µm")
+                .arg(fp.x(), 4)
+                .arg(xUm,    0, 'f', 1)
+                .arg(fp.y(), 4)
+                .arg(yUm,    0, 'f', 1));
+    });
+    connect(cameraPreviewWidget_, &CameraPreviewWidget::frameCursorLeft, this, [this]() {
+        if (mouseCoordsLabel_ != nullptr) mouseCoordsLabel_->clear();
+    });
+    connect(cameraPreviewWidget_, &CameraPreviewWidget::frameDoubleClicked,
+            this, &MainWindow::onPreviewFrameDoubleClicked);
     applyObjectivePreset();
 
     // Bottom strip: motor controls + zone selection
@@ -789,6 +813,21 @@ QWidget* MainWindow::buildSetupTab()
 
     bottomLayout->addWidget(motorBox, 1);
 
+    // Capture position tool
+    auto* captureBox = createGroupBox("Capture");
+    auto* captureLayout = new QVBoxLayout(captureBox);
+    captureLayout->setSpacing(4);
+    captureButton_ = createActionButton("Capturer ref.");
+    captureButton_->setProperty("accent", true);
+    captureLayout->addWidget(captureButton_);
+    captureDeltaLabel_ = new QLabel("---");
+    captureDeltaLabel_->setAlignment(Qt::AlignCenter);
+    captureDeltaLabel_->setWordWrap(true);
+    captureDeltaLabel_->setStyleSheet("font-size:9pt; color:#374151;");
+    captureLayout->addWidget(captureDeltaLabel_);
+    connect(captureButton_, &QPushButton::clicked, this, &MainWindow::onCapturePosition);
+    bottomLayout->addWidget(captureBox);
+
     // Zone selection
     auto* zoneBox = createGroupBox("Zone image");
     auto* zoneLayout = new QVBoxLayout(zoneBox);
@@ -820,91 +859,95 @@ QWidget* MainWindow::buildSetupTab()
 
 void MainWindow::openMotorConnectionDialog()
 {
-    if (motorConnectionDialog_ == nullptr) {
-        motorConnectionDialog_ = new QDialog(this);
-        motorConnectionDialog_->setObjectName("motorConnectionDialog");
-        motorConnectionDialog_->setWindowTitle("Connexion moteurs");
-        motorConnectionDialog_->setModal(true);
-        motorConnectionDialog_->setMinimumWidth(620);
-
-        auto* layout = new QVBoxLayout(motorConnectionDialog_);
-        layout->setContentsMargins(18, 18, 18, 18);
-        layout->setSpacing(10);
-
-        auto* box = createGroupBox("Connexion Newport CONEX-CC");
-        auto* grid = new QGridLayout(box);
-        grid->addWidget(new QLabel("Port X"), 0, 0);
-        xPortCombo_ = new QComboBox;
-        xPortCombo_->setEditable(true);
-        grid->addWidget(xPortCombo_, 0, 1);
-        grid->addWidget(new QLabel("Port Y"), 0, 2);
-        yPortCombo_ = new QComboBox;
-        yPortCombo_->setEditable(true);
-        grid->addWidget(yPortCombo_, 0, 3);
-
-        scanPortsButton_ = createActionButton("Chercher COM");
-        connectAxesButton_ = createActionButton("Connecter");
-        homeAxesButton_ = createActionButton("Initialiser / Home");
-        disconnectAxesButton_ = createActionButton("Deconnecter");
-        scanPortsButton_->setProperty("accent", true);
-        connectAxesButton_->setProperty("accent", true);
-
-        grid->addWidget(scanPortsButton_, 1, 0);
-        grid->addWidget(connectAxesButton_, 1, 1);
-        grid->addWidget(homeAxesButton_, 1, 2);
-        grid->addWidget(disconnectAxesButton_, 1, 3);
-
-        auto* dependencyInfo = new QLabel(
-            "La dependance Newport est chargee automatiquement depuis le depot. Aucun chemin DLL manuel n'est requis."
-        );
-        dependencyInfo->setWordWrap(true);
-        dependencyInfo->setStyleSheet("color:#5c6570; font-size:9pt;");
-        grid->addWidget(dependencyInfo, 2, 0, 1, 4);
-
-        layout->addWidget(box);
-
-        connect(scanPortsButton_, &QPushButton::clicked, this, &MainWindow::onScanPorts);
-        connect(connectAxesButton_, &QPushButton::clicked, this, &MainWindow::onConnectAxes);
-        connect(homeAxesButton_, &QPushButton::clicked, this, &MainWindow::onHomeAxes);
-        connect(disconnectAxesButton_, &QPushButton::clicked, this, &MainWindow::onDisconnectAxes);
-    }
-
-    refreshMotorUi();
-    motorConnectionDialog_->adjustSize();
-    motorConnectionDialog_->show();
-    motorConnectionDialog_->raise();
-    motorConnectionDialog_->activateWindow();
+    openStartupConnectionDialog();
 }
 
 void MainWindow::openCameraConnectionDialog()
 {
-    if (cameraConnectionDialog_ == nullptr) {
-        cameraConnectionDialog_ = new QDialog(this);
-        cameraConnectionDialog_->setWindowTitle("Connexion camera");
-        cameraConnectionDialog_->setModal(true);
-        cameraConnectionDialog_->setMinimumWidth(520);
+    openStartupConnectionDialog();
+}
 
-        auto* layout = new QVBoxLayout(cameraConnectionDialog_);
-        layout->setContentsMargins(18, 18, 18, 18);
+void MainWindow::openStartupConnectionDialog()
+{
+    if (startupConnectionDialog_ == nullptr) {
+        startupConnectionDialog_ = new QDialog(this);
+        startupConnectionDialog_->setWindowTitle("Connexion des appareils");
+        startupConnectionDialog_->setModal(false);
+        startupConnectionDialog_->setMinimumWidth(640);
+
+        auto* layout = new QVBoxLayout(startupConnectionDialog_);
+        layout->setContentsMargins(16, 16, 16, 10);
         layout->setSpacing(10);
 
-        auto* box = createGroupBox("Camera Thorlabs");
-        auto* grid = new QGridLayout(box);
-        grid->addWidget(new QLabel("Camera"), 0, 0);
+        // ── Moteurs Newport CONEX-CC ──────────────────────────────
+        auto* motorBox = createGroupBox("Moteurs Newport CONEX-CC");
+        auto* motorGrid = new QGridLayout(motorBox);
+        motorGrid->addWidget(new QLabel("Port X"), 0, 0);
+        xPortCombo_ = new QComboBox;
+        xPortCombo_->setEditable(true);
+        motorGrid->addWidget(xPortCombo_, 0, 1);
+        auto* swapPortsButton = createActionButton("Inv.");
+        swapPortsButton->setFixedWidth(52);
+        swapPortsButton->setToolTip("Inverser les ports X et Y");
+        motorGrid->addWidget(swapPortsButton, 0, 2);
+        motorGrid->addWidget(new QLabel("Port Y"), 0, 3);
+        yPortCombo_ = new QComboBox;
+        yPortCombo_->setEditable(true);
+        motorGrid->addWidget(yPortCombo_, 0, 4);
+
+        connect(swapPortsButton, &QPushButton::clicked, this, [this]() {
+            if (xPortCombo_ == nullptr || yPortCombo_ == nullptr) return;
+            const QString xText = xPortCombo_->currentText();
+            const QString yText = yPortCombo_->currentText();
+            xPortCombo_->setCurrentText(yText);
+            yPortCombo_->setCurrentText(xText);
+        });
+
+        scanPortsButton_      = createActionButton("Chercher COM");
+        connectAxesButton_    = createActionButton("Connecter");
+        homeAxesButton_       = createActionButton("Init / Home");
+        disconnectAxesButton_ = createActionButton("Deconnecter");
+        scanPortsButton_->setProperty("accent", true);
+        connectAxesButton_->setProperty("accent", true);
+        motorGrid->addWidget(scanPortsButton_,      1, 0);
+        motorGrid->addWidget(connectAxesButton_,    1, 1);
+        motorGrid->addWidget(homeAxesButton_,       1, 2);
+        motorGrid->addWidget(disconnectAxesButton_, 1, 3);
+
+        auto* motorInfo = new QLabel(
+            "La dependance Newport est chargee automatiquement depuis le depot."
+        );
+        motorInfo->setWordWrap(true);
+        motorInfo->setStyleSheet("color:#5c6570; font-size:9pt;");
+        motorGrid->addWidget(motorInfo, 2, 0, 1, 4);
+
+        connect(scanPortsButton_,      &QPushButton::clicked, this, &MainWindow::onScanPorts);
+        connect(connectAxesButton_,    &QPushButton::clicked, this, &MainWindow::onConnectAxes);
+        connect(homeAxesButton_,       &QPushButton::clicked, this, &MainWindow::onHomeAxes);
+        connect(disconnectAxesButton_, &QPushButton::clicked, this, &MainWindow::onDisconnectAxes);
+        layout->addWidget(motorBox);
+
+        // ── Camera Thorlabs ───────────────────────────────────────
+        auto* camBox = createGroupBox("Camera Thorlabs");
+        auto* camGrid = new QGridLayout(camBox);
+        camGrid->addWidget(new QLabel("Camera"), 0, 0);
         cameraSerialCombo_ = new QComboBox;
         cameraSerialCombo_->setEditable(false);
-        grid->addWidget(cameraSerialCombo_, 0, 1, 1, 3);
+        camGrid->addWidget(cameraSerialCombo_, 0, 1, 1, 3);
 
-        scanCameraButton_ = createActionButton("Chercher");
-        connectCameraButton_ = createActionButton("Connecter");
+        scanCameraButton_       = createActionButton("Chercher");
+        connectCameraButton_    = createActionButton("Connecter");
         disconnectCameraButton_ = createActionButton("Deconnecter");
+        startCameraLiveButton_  = createActionButton("Live");
+        stopCameraLiveButton_   = createActionButton("Stop");
         scanCameraButton_->setProperty("accent", true);
         connectCameraButton_->setProperty("accent", true);
-        grid->addWidget(scanCameraButton_, 1, 0);
-        grid->addWidget(connectCameraButton_, 1, 1);
-        grid->addWidget(disconnectCameraButton_, 1, 2);
-
-        layout->addWidget(box);
+        startCameraLiveButton_->setProperty("accent", true);
+        camGrid->addWidget(scanCameraButton_,       1, 0);
+        camGrid->addWidget(connectCameraButton_,    1, 1);
+        camGrid->addWidget(disconnectCameraButton_, 1, 2);
+        camGrid->addWidget(startCameraLiveButton_,  1, 3);
+        camGrid->addWidget(stopCameraLiveButton_,   1, 4);
 
         connect(scanCameraButton_, &QPushButton::clicked, this, [this]() {
             try {
@@ -925,7 +968,6 @@ void MainWindow::openCameraConnectionDialog()
                 QMessageBox::warning(this, "Camera", QString::fromUtf8(ex.what()));
             }
         });
-
         connect(connectCameraButton_, &QPushButton::clicked, this, [this]() {
             if (cameraSerialCombo_ == nullptr || cameraSerialCombo_->currentText().trimmed().isEmpty()) {
                 QMessageBox::warning(this, "Camera", "Aucune camera selectionnee.");
@@ -940,7 +982,6 @@ void MainWindow::openCameraConnectionDialog()
                 QMessageBox::warning(this, "Camera", QString::fromUtf8(ex.what()));
             }
         });
-
         connect(disconnectCameraButton_, &QPushButton::clicked, this, [this]() {
             try {
                 stopCameraLive();
@@ -952,16 +993,95 @@ void MainWindow::openCameraConnectionDialog()
                 QMessageBox::warning(this, "Camera", QString::fromUtf8(ex.what()));
             }
         });
+        connect(startCameraLiveButton_, &QPushButton::clicked, this, &MainWindow::startCameraLive);
+        connect(stopCameraLiveButton_,  &QPushButton::clicked, this, &MainWindow::stopCameraLive);
+        layout->addWidget(camBox);
+
+        // ── Potentiostat BioLogic ─────────────────────────────────
+        auto* potConnBox = createGroupBox("Potentiostat BioLogic");
+        auto* potConnGrid = new QGridLayout(potConnBox);
+        potConnGrid->setSpacing(4);
+
+        // DLL path
+        potConnGrid->addWidget(new QLabel("Chemin DLL"), 0, 0);
+        potentiostatDllPathEdit_ = new QLineEdit("C:\\EC-Lab Development Package\\lib");
+        potentiostatDllPathEdit_->setPlaceholderText("Chemin vers EClib64.dll...");
+        potConnGrid->addWidget(potentiostatDllPathEdit_, 0, 1, 1, 2);
+        auto* browseDllButton = createActionButton("...");
+        browseDllButton->setMaximumWidth(30);
+        potConnGrid->addWidget(browseDllButton, 0, 3);
+
+        // IP + channel
+        potConnGrid->addWidget(new QLabel("IP"), 1, 0);
+        potentiostatAddressEdit_ = new QLineEdit("169.254.3.150");
+        potConnGrid->addWidget(potentiostatAddressEdit_, 1, 1);
+        potConnGrid->addWidget(new QLabel("Canal"), 1, 2);
+        potentiostatChannelCombo_ = new QComboBox;
+        for (int i = 1; i <= 16; ++i)
+            potentiostatChannelCombo_->addItem(QString::number(i));
+        potConnGrid->addWidget(potentiostatChannelCombo_, 1, 3);
+
+        // Connect / Firmware / Disconnect
+        potentiostatConnectButton_    = createActionButton("Connecter");
+        potentiostatFirmwareButton_   = createActionButton("Firmware");
+        potentiostatDisconnectButton_ = createActionButton("Deconnecter");
+        potentiostatConnectButton_->setProperty("accent", true);
+        potentiostatFirmwareButton_->setEnabled(false);
+        potentiostatDisconnectButton_->setEnabled(false);
+        potConnGrid->addWidget(potentiostatConnectButton_,    2, 0, 1, 2);
+        potConnGrid->addWidget(potentiostatFirmwareButton_,   2, 2);
+        potConnGrid->addWidget(potentiostatDisconnectButton_, 2, 3);
+
+        // Status (shared with Parametrage tab small status label via slot)
+        auto* potDialogStatusLabel = new QLabel("Deconnecte");
+        potDialogStatusLabel->setStyleSheet("color:#5c6570; font-size:9pt;");
+        potConnGrid->addWidget(potDialogStatusLabel, 3, 0, 1, 4);
+
+        connect(browseDllButton, &QPushButton::clicked, this, [this]() {
+            const QString path = QFileDialog::getOpenFileName(
+                this, "Selectionner EClib64.dll", QString(), "DLL (*.dll)");
+            if (!path.isEmpty() && potentiostatDllPathEdit_ != nullptr)
+                potentiostatDllPathEdit_->setText(QDir::toNativeSeparators(path));
+        });
+        connect(potentiostatConnectButton_,    &QPushButton::clicked, this, &MainWindow::onConnectPotentiostat);
+        connect(potentiostatFirmwareButton_,   &QPushButton::clicked, this, &MainWindow::onLoadFirmware);
+        connect(potentiostatDisconnectButton_, &QPushButton::clicked, this, &MainWindow::onDisconnectPotentiostat);
+
+        // Keep the dialog status label in sync with potentiostatStatusLabel_
+        connect(potentiostatConnectButton_, &QPushButton::clicked, potDialogStatusLabel, [this, potDialogStatusLabel]() {
+            // will be updated by onConnectPotentiostat via potentiostatStatusLabel_
+            // mirror the same text once the operation finishes
+            if (potentiostatStatusLabel_ != nullptr)
+                QTimer::singleShot(200, potDialogStatusLabel, [this, potDialogStatusLabel]() {
+                    if (potentiostatStatusLabel_ != nullptr)
+                        potDialogStatusLabel->setText(potentiostatStatusLabel_->text());
+                });
+        });
+        connect(potentiostatDisconnectButton_, &QPushButton::clicked, potDialogStatusLabel, [this, potDialogStatusLabel]() {
+            if (potentiostatStatusLabel_ != nullptr)
+                QTimer::singleShot(200, potDialogStatusLabel, [this, potDialogStatusLabel]() {
+                    if (potentiostatStatusLabel_ != nullptr)
+                        potDialogStatusLabel->setText(potentiostatStatusLabel_->text());
+                });
+        });
+        layout->addWidget(potConnBox);
+
+        // ── Close button ──────────────────────────────────────────
+        auto* closeButton = createActionButton("Fermer");
+        closeButton->setMinimumWidth(120);
+        connect(closeButton, &QPushButton::clicked, startupConnectionDialog_, &QDialog::hide);
+        auto* closeRow = new QHBoxLayout;
+        closeRow->addStretch();
+        closeRow->addWidget(closeButton);
+        layout->addLayout(closeRow);
     }
 
-    if (scanCameraButton_ != nullptr) {
-        scanCameraButton_->click();
-    }
+    refreshMotorUi();
     refreshCameraUi();
-    cameraConnectionDialog_->adjustSize();
-    cameraConnectionDialog_->show();
-    cameraConnectionDialog_->raise();
-    cameraConnectionDialog_->activateWindow();
+    startupConnectionDialog_->adjustSize();
+    startupConnectionDialog_->show();
+    startupConnectionDialog_->raise();
+    startupConnectionDialog_->activateWindow();
 }
 
 void MainWindow::openCameraSettingsDialog()
@@ -1155,7 +1275,9 @@ void MainWindow::updatePreviewCursor()
         return;
     }
 
-    cameraPreviewWidget_->setCursor((gotoArmed_ || sequenceSelectArmed_) ? Qt::CrossCursor : Qt::ArrowCursor);
+    cameraPreviewWidget_->setCursor(
+        (gotoArmed_ || sequenceSelectArmed_ || rulerArmed_ || circleArmed_ || rectArmed_)
+        ? Qt::CrossCursor : Qt::ArrowCursor);
 }
 
 void MainWindow::setGotoArmed(bool armed)
@@ -1673,6 +1795,306 @@ std::vector<QPointF> MainWindow::buildWaypointsRect(const QPointF& startMm, cons
     return waypoints;
 }
 
+// ── Ruler measurement tool ────────────────────────────────────────────────────
+
+void MainWindow::onToggleRuler()
+{
+    rulerArmed_ = !rulerArmed_;
+
+    if (rulerArmed_) {
+        // Disarm other modes
+        if (gotoArmed_)            setGotoArmed(false);
+        if (sequenceSelectArmed_) { setSequenceSelectArmed(false); clearSequencePreviewSelection(); }
+        rulerHasP1_ = false;
+        rulerHasP2_ = false;
+        if (cameraPreviewWidget_ != nullptr) cameraPreviewWidget_->clearRulerOverlay();
+        if (rulerDistanceLabel_ != nullptr)  rulerDistanceLabel_->setText("Cliquez P1");
+        if (rulerButton_ != nullptr)         rulerButton_->setText("Regle ON");
+    } else {
+        if (rulerButton_ != nullptr) rulerButton_->setText("Regle");
+        if (rulerDistanceLabel_ != nullptr && !rulerHasP2_)
+            rulerDistanceLabel_->setText("---");
+    }
+    updatePreviewCursor();
+}
+
+QString MainWindow::computeRulerDistanceText() const
+{
+    if (!rulerHasP1_ || !rulerHasP2_) return {};
+
+    const QPointF delta = rulerP2Px_ - rulerP1Px_;
+    const double distPx = std::hypot(delta.x(), delta.y());
+
+    const QString objName = (objectiveCombo_ != nullptr)
+        ? objectiveCombo_->currentText().trimmed()
+        : QString("4x");
+    const double mmPerPx = autoMmPerPxForObjective(objName);
+    const double distUm  = distPx * mmPerPx * 1000.0;
+
+    if (distUm >= 1000.0)
+        return QString("%1 mm").arg(distUm / 1000.0, 0, 'f', 3);
+    return QString("%1 µm").arg(distUm, 0, 'f', 1);
+}
+
+void MainWindow::updateRulerOverlay()
+{
+    if (cameraPreviewWidget_ == nullptr) return;
+
+    if (!rulerHasP1_) {
+        cameraPreviewWidget_->clearRulerOverlay();
+        return;
+    }
+
+    const QString distText = computeRulerDistanceText();
+    cameraPreviewWidget_->setRulerOverlay(rulerP1Px_, rulerHasP2_, rulerP2Px_, distText);
+
+    if (rulerDistanceLabel_ != nullptr) {
+        rulerDistanceLabel_->setText(rulerHasP2_ ? distText : "Cliquez P2");
+    }
+}
+
+// ── Helper: disarm all measure tools ─────────────────────────────────────────
+
+void MainWindow::disarmAllMeasureTools()
+{
+    if (rulerArmed_) {
+        rulerArmed_ = false;
+        if (rulerButton_ != nullptr) rulerButton_->setText("Regle");
+    }
+    if (circleArmed_) {
+        circleArmed_ = false;
+        if (circleButton_ != nullptr) circleButton_->setText("Cercle");
+    }
+    if (rectArmed_) {
+        rectArmed_ = false;
+        if (rectButton_ != nullptr) rectButton_->setText("Rect.");
+    }
+}
+
+// ── Circle measurement tool ───────────────────────────────────────────────────
+
+void MainWindow::onToggleCircle()
+{
+    circleArmed_ = !circleArmed_;
+    if (circleArmed_) {
+        if (gotoArmed_)            setGotoArmed(false);
+        if (sequenceSelectArmed_) { setSequenceSelectArmed(false); clearSequencePreviewSelection(); }
+        rulerArmed_ = false;
+        if (rulerButton_ != nullptr) rulerButton_->setText("Regle");
+        rectArmed_ = false;
+        if (rectButton_ != nullptr) rectButton_->setText("Rect.");
+        circleHasCenter_ = false;
+        circleHasEdge_   = false;
+        if (cameraPreviewWidget_ != nullptr) cameraPreviewWidget_->clearCircleOverlay();
+        if (circleDiameterLabel_ != nullptr) circleDiameterLabel_->setText("Cliquez centre");
+        if (circleButton_ != nullptr)        circleButton_->setText("Cercle ON");
+    } else {
+        if (circleButton_ != nullptr) circleButton_->setText("Cercle");
+        if (circleDiameterLabel_ != nullptr && !circleHasEdge_)
+            circleDiameterLabel_->setText("---");
+    }
+    updatePreviewCursor();
+}
+
+QString MainWindow::computeCircleDiameterText() const
+{
+    if (!circleHasCenter_ || !circleHasEdge_) return {};
+    const QPointF delta = circleEdgePx_ - circleCenterPx_;
+    const double radiusPx  = std::hypot(delta.x(), delta.y());
+    const double diameterPx = radiusPx * 2.0;
+    const QString obj = (objectiveCombo_ != nullptr)
+        ? objectiveCombo_->currentText().trimmed() : QString("4x");
+    const double mmPerPx  = autoMmPerPxForObjective(obj);
+    const double diamUm   = diameterPx * mmPerPx * 1000.0;
+    if (diamUm >= 1000.0)
+        return QString("d = %1 mm").arg(diamUm / 1000.0, 0, 'f', 3);
+    return QString("d = %1 µm").arg(diamUm, 0, 'f', 1);
+}
+
+void MainWindow::updateCircleOverlay()
+{
+    if (cameraPreviewWidget_ == nullptr) return;
+    if (!circleHasCenter_) { cameraPreviewWidget_->clearCircleOverlay(); return; }
+    const QString text = computeCircleDiameterText();
+    cameraPreviewWidget_->setCircleOverlay(circleCenterPx_, circleHasEdge_, circleEdgePx_, text);
+    if (circleDiameterLabel_ != nullptr)
+        circleDiameterLabel_->setText(circleHasEdge_ ? text : "Cliquez bord");
+}
+
+// ── Rectangle measurement tool ────────────────────────────────────────────────
+
+void MainWindow::onToggleRect()
+{
+    rectArmed_ = !rectArmed_;
+    if (rectArmed_) {
+        if (gotoArmed_)            setGotoArmed(false);
+        if (sequenceSelectArmed_) { setSequenceSelectArmed(false); clearSequencePreviewSelection(); }
+        rulerArmed_ = false;
+        if (rulerButton_ != nullptr) rulerButton_->setText("Regle");
+        circleArmed_ = false;
+        if (circleButton_ != nullptr) circleButton_->setText("Cercle");
+        rectHasP1_ = false;
+        rectHasP2_ = false;
+        if (cameraPreviewWidget_ != nullptr) cameraPreviewWidget_->clearRectOverlay();
+        if (rectSizeLabel_ != nullptr) rectSizeLabel_->setText("Cliquez coin 1");
+        if (rectButton_ != nullptr)    rectButton_->setText("Rect. ON");
+    } else {
+        if (rectButton_ != nullptr) rectButton_->setText("Rect.");
+        if (rectSizeLabel_ != nullptr && !rectHasP2_)
+            rectSizeLabel_->setText("---");
+    }
+    updatePreviewCursor();
+}
+
+QString MainWindow::computeRectSizeText() const
+{
+    if (!rectHasP1_ || !rectHasP2_) return {};
+    const QPointF delta = rectP2Px_ - rectP1Px_;
+    const QString obj = (objectiveCombo_ != nullptr)
+        ? objectiveCombo_->currentText().trimmed() : QString("4x");
+    const double mmPerPx = autoMmPerPxForObjective(obj);
+    const double wUm = std::abs(delta.x()) * mmPerPx * 1000.0;
+    const double hUm = std::abs(delta.y()) * mmPerPx * 1000.0;
+    const auto fmt = [](double v) -> QString {
+        if (v >= 1000.0) return QString("%1 mm").arg(v / 1000.0, 0, 'f', 3);
+        return QString("%1 µm").arg(v, 0, 'f', 1);
+    };
+    return QString("%1 x %2").arg(fmt(wUm), fmt(hUm));
+}
+
+void MainWindow::updateRectOverlay()
+{
+    if (cameraPreviewWidget_ == nullptr) return;
+    if (!rectHasP1_) { cameraPreviewWidget_->clearRectOverlay(); return; }
+    const QString text = computeRectSizeText();
+    cameraPreviewWidget_->setRectOverlay(rectP1Px_, rectHasP2_, rectP2Px_, text);
+    if (rectSizeLabel_ != nullptr)
+        rectSizeLabel_->setText(rectHasP2_ ? text : "Cliquez coin 2");
+}
+
+// ── Capture position ─────────────────────────────────────────────────────────
+
+void MainWindow::onCapturePosition()
+{
+    const auto pos = latestPolledMotorPosition();
+
+    if (!capturedMotorPos_) {
+        // ── State A → B: store reference ──────────────────────────────────────
+        if (!pos) {
+            QMessageBox::warning(this, "Capture", "Position moteur non disponible.\nConnectez les moteurs et attendez la première lecture.");
+            return;
+        }
+        capturedMotorPos_ = pos;
+        captureButton_->setText("Delta");
+        captureButton_->setProperty("accent", false);
+        captureButton_->setStyleSheet(
+            "QPushButton { background:#f59e0b; color:#fff; border-radius:6px; "
+            "padding:5px 10px; font-weight:600; } "
+            "QPushButton:hover { background:#d97706; }");
+        captureDeltaLabel_->setText(
+            QString("Ref: X=%1\nY=%2 mm")
+                .arg(pos->x(), 0, 'f', 4)
+                .arg(pos->y(), 0, 'f', 4));
+    } else {
+        // ── State B → A: compute and show delta ───────────────────────────────
+        if (pos) {
+            const double dx = pos->x() - capturedMotorPos_->x();
+            const double dy = pos->y() - capturedMotorPos_->y();
+            const double dist = std::hypot(dx, dy);
+            captureDeltaLabel_->setText(
+                QString("\u0394X=%1\n\u0394Y=%2\nDist=%3 mm")
+                    .arg(dx,   0, 'f', 4)
+                    .arg(dy,   0, 'f', 4)
+                    .arg(dist, 0, 'f', 4));
+        } else {
+            captureDeltaLabel_->setText("Position indisponible");
+        }
+        // Reset button
+        capturedMotorPos_.reset();
+        captureButton_->setText("Capturer ref.");
+        captureButton_->setProperty("accent", true);
+        captureButton_->setStyleSheet("");
+        captureButton_->style()->unpolish(captureButton_);
+        captureButton_->style()->polish(captureButton_);
+    }
+}
+
+// ── Double-click: delete nearest shape ───────────────────────────────────────
+
+void MainWindow::onPreviewFrameDoubleClicked(const QPoint& framePointPx)
+{
+    const QPointF p(framePointPx);
+    constexpr double kTol = 18.0;  // frame-pixel tolerance for hit detection
+
+    // Distance from point to segment AB
+    const auto distToSegment = [](const QPointF& pt, const QPointF& a, const QPointF& b) {
+        const QPointF ab = b - a;
+        const double len2 = ab.x()*ab.x() + ab.y()*ab.y();
+        if (len2 < 1e-9) return std::hypot(pt.x()-a.x(), pt.y()-a.y());
+        const double t = std::clamp(((pt.x()-a.x())*ab.x() + (pt.y()-a.y())*ab.y()) / len2,
+                                     0.0, 1.0);
+        return std::hypot(pt.x() - (a.x() + t*ab.x()), pt.y() - (a.y() + t*ab.y()));
+    };
+
+    // ── Ruler ──
+    if (rulerHasP1_) {
+        bool hit = std::hypot(p.x()-rulerP1Px_.x(), p.y()-rulerP1Px_.y()) < kTol;
+        if (!hit && rulerHasP2_)
+            hit = distToSegment(p, rulerP1Px_, rulerP2Px_) < kTol;
+        if (hit) {
+            rulerHasP1_ = rulerHasP2_ = false;
+            if (cameraPreviewWidget_ != nullptr) cameraPreviewWidget_->clearRulerOverlay();
+            if (rulerDistanceLabel_ != nullptr)  rulerDistanceLabel_->setText("---");
+            return;
+        }
+    }
+
+    // ── Circle ──
+    if (circleHasCenter_) {
+        bool hit = std::hypot(p.x()-circleCenterPx_.x(), p.y()-circleCenterPx_.y()) < kTol;
+        if (!hit && circleHasEdge_) {
+            const double r = std::hypot(circleEdgePx_.x()-circleCenterPx_.x(),
+                                         circleEdgePx_.y()-circleCenterPx_.y());
+            const double dFromCenter = std::hypot(p.x()-circleCenterPx_.x(),
+                                                   p.y()-circleCenterPx_.y());
+            hit = std::abs(dFromCenter - r) < kTol          // near outline
+               || std::hypot(p.x()-circleEdgePx_.x(),       // near edge point
+                              p.y()-circleEdgePx_.y()) < kTol;
+        }
+        if (hit) {
+            circleHasCenter_ = circleHasEdge_ = false;
+            if (cameraPreviewWidget_ != nullptr) cameraPreviewWidget_->clearCircleOverlay();
+            if (circleDiameterLabel_ != nullptr) circleDiameterLabel_->setText("---");
+            return;
+        }
+    }
+
+    // ── Rectangle ──
+    if (rectHasP1_) {
+        bool hit = std::hypot(p.x()-rectP1Px_.x(), p.y()-rectP1Px_.y()) < kTol;
+        if (!hit && rectHasP2_) {
+            // Check proximity to any of the 4 sides
+            const QPointF tl(std::min(rectP1Px_.x(), rectP2Px_.x()),
+                              std::min(rectP1Px_.y(), rectP2Px_.y()));
+            const QPointF br(std::max(rectP1Px_.x(), rectP2Px_.x()),
+                              std::max(rectP1Px_.y(), rectP2Px_.y()));
+            const QPointF tr(br.x(), tl.y()), bl(tl.x(), br.y());
+            hit = distToSegment(p, tl, tr) < kTol
+               || distToSegment(p, tr, br) < kTol
+               || distToSegment(p, br, bl) < kTol
+               || distToSegment(p, bl, tl) < kTol;
+        }
+        if (hit) {
+            rectHasP1_ = rectHasP2_ = false;
+            if (cameraPreviewWidget_ != nullptr) cameraPreviewWidget_->clearRectOverlay();
+            if (rectSizeLabel_ != nullptr) rectSizeLabel_->setText("---");
+            return;
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 void MainWindow::onArmGoto()
 {
     if (sequenceSelectArmed_) {
@@ -2010,6 +2432,48 @@ void MainWindow::onStopSequence()
 
 void MainWindow::onPreviewFrameClicked(const QPoint& framePointPx)
 {
+    // ── Ruler mode ────────────────────────────────────────────────────────────
+    if (rulerArmed_) {
+        if (!rulerHasP1_ || rulerHasP2_) {
+            rulerP1Px_ = QPointF(framePointPx);
+            rulerHasP1_ = true;
+            rulerHasP2_ = false;
+        } else {
+            rulerP2Px_ = QPointF(framePointPx);
+            rulerHasP2_ = true;
+        }
+        updateRulerOverlay();
+        return;
+    }
+
+    // ── Circle mode ───────────────────────────────────────────────────────────
+    if (circleArmed_) {
+        if (!circleHasCenter_ || circleHasEdge_) {
+            circleCenterPx_  = QPointF(framePointPx);
+            circleHasCenter_ = true;
+            circleHasEdge_   = false;
+        } else {
+            circleEdgePx_  = QPointF(framePointPx);
+            circleHasEdge_ = true;
+        }
+        updateCircleOverlay();
+        return;
+    }
+
+    // ── Rectangle mode ────────────────────────────────────────────────────────
+    if (rectArmed_) {
+        if (!rectHasP1_ || rectHasP2_) {
+            rectP1Px_  = QPointF(framePointPx);
+            rectHasP1_ = true;
+            rectHasP2_ = false;
+        } else {
+            rectP2Px_  = QPointF(framePointPx);
+            rectHasP2_ = true;
+        }
+        updateRectOverlay();
+        return;
+    }
+
     if (sequenceSelectArmed_) {
         if (!sequenceBaseMotorMm_.has_value()) {
             setSequenceSelectArmed(false);
@@ -2258,37 +2722,64 @@ QWidget* MainWindow::buildMeasureTab()
     connect(potentiostatGraphTypeCombo_, &QComboBox::currentIndexChanged, this, [this](int) {
         refreshPotentiostatVisualization();
     });
+
+    colorGraphButton_ = createActionButton("ColorGraph");
+    colorGraphButton_->setCheckable(true);
+    colorGraphButton_->setChecked(false);
+    colorGraphButton_->setToolTip("Afficher les zones de deplacement moteur (vert) et d'arret (rouge) sur le graphe");
+    graphModeLayout->addWidget(colorGraphButton_, 1, 0, 1, 2);
+    connect(colorGraphButton_, &QPushButton::toggled, this, [this](bool checked) {
+        if (potentiostatGraphWidget_ != nullptr)
+            potentiostatGraphWidget_->setShowPhases(checked);
+    });
+
+    view3DButton_ = createActionButton("Vue 3D");
+    view3DButton_->setCheckable(true);
+    view3DButton_->setChecked(false);
+    view3DButton_->setToolTip("Basculer entre la vue 2D (graphe + carte) et la surface 3D I(x,y)");
+    graphModeLayout->addWidget(view3DButton_, 2, 0, 1, 2);
+    connect(view3DButton_, &QPushButton::toggled, this, [this](bool is3D) {
+        if (measureRightStack_ != nullptr)
+            measureRightStack_->setCurrentIndex(is3D ? 1 : 0);
+        view3DButton_->setText(is3D ? "Vue 2D" : "Vue 3D");
+    });
     leftLayout->addWidget(graphModeBox);
 
-    // Acquisition log
-    auto* logBox = createGroupBox("Journal d'acquisition");
-    auto* logBoxLayout = new QVBoxLayout(logBox);
-    logView_->setParent(logBox);
-    logView_->setVisible(true);
-    logView_->setMaximumHeight(220);
-    logBoxLayout->addWidget(logView_);
-    leftLayout->addWidget(logBox, 1);
+    leftLayout->addStretch();
 
     // ── Right: graphs / map placeholders ─────────────────────────
-    auto* rightPanel = new QWidget;
-    auto* rightLayout = new QVBoxLayout(rightPanel);
-    rightLayout->setContentsMargins(0, 0, 0, 0);
-    rightLayout->setSpacing(8);
+    // ── Right: stacked widget (2D view / 3D view) ─────────────────────────────
+    measureRightStack_ = new QStackedWidget;
+
+    // Index 0 — classic 2D (graph + heatmap)
+    auto* rightPanel2D = new QWidget;
+    auto* rightLayout2D = new QVBoxLayout(rightPanel2D);
+    rightLayout2D->setContentsMargins(0, 0, 0, 0);
+    rightLayout2D->setSpacing(8);
 
     auto* graphBox = createGroupBox("Courbes");
     auto* graphLayout = new QVBoxLayout(graphBox);
     potentiostatGraphWidget_ = new PotentiostatGraphWidget;
     graphLayout->addWidget(potentiostatGraphWidget_, 1);
-    rightLayout->addWidget(graphBox, 1);
+    rightLayout2D->addWidget(graphBox, 1);
 
     auto* mapBox = createGroupBox("Cartographie");
     auto* mapLayout = new QVBoxLayout(mapBox);
     potentiostatHeatmapWidget_ = new PotentiostatHeatmapWidget;
     mapLayout->addWidget(potentiostatHeatmapWidget_, 1);
-    rightLayout->addWidget(mapBox, 1);
+    rightLayout2D->addWidget(mapBox, 1);
+
+    measureRightStack_->addWidget(rightPanel2D);  // index 0
+
+    // Index 1 — 3D surface
+    auto* map3DBox = createGroupBox("Surface 3D I(x, y)");
+    auto* map3DLayout = new QVBoxLayout(map3DBox);
+    potentiostat3DWidget_ = new Potentiostat3DWidget;
+    map3DLayout->addWidget(potentiostat3DWidget_, 1);
+    measureRightStack_->addWidget(map3DBox);  // index 1
 
     splitter->addWidget(leftPanel);
-    splitter->addWidget(rightPanel);
+    splitter->addWidget(measureRightStack_);
     splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
     splitter->setSizes({300, 900});
@@ -2406,6 +2897,20 @@ void MainWindow::refreshPotentiostatVisualization()
             potentiostatCols_,
             potentiostatMatrix_,
             highlightedCell
+        );
+    }
+
+    if (potentiostat3DWidget_ != nullptr) {
+        const double xSpan = (sequenceStartMotorMm_.has_value() && sequenceEndMotorMm_.has_value())
+            ? std::abs(sequenceEndMotorMm_->x() - sequenceStartMotorMm_->x()) : 1.0;
+        const double ySpan = (sequenceStartMotorMm_.has_value() && sequenceEndMotorMm_.has_value())
+            ? std::abs(sequenceEndMotorMm_->y() - sequenceStartMotorMm_->y()) : 1.0;
+        potentiostat3DWidget_->setGrid(
+            potentiostatRows_,
+            potentiostatCols_,
+            potentiostatMatrix_,
+            xSpan,
+            ySpan
         );
     }
 }
@@ -3532,6 +4037,12 @@ void MainWindow::onStartCaPotentiostat()
 
             const int channel = p.channel;
 
+            // Phase intervals (built from kbio ElapsedTime to align with graph x-axis)
+            using MotorPhase = PotentiostatGraphWidget::MotorPhase;
+            std::vector<MotorPhase> motorPhases;
+            motorPhases.reserve(static_cast<std::size_t>(nPoints) * 2);
+            double prevMeasureT = 0.0; // kbio elapsed time of previous measurement
+
             // ── Phase 2 : for each waypoint ──
             for (int idx = 0; idx < nPoints; ++idx) {
                 if (potentiostatStopRequested_.load()) break;
@@ -3578,8 +4089,21 @@ void MainWindow::onStartCaPotentiostat()
                     col = potentiostatScanOrder_[static_cast<std::size_t>(idx)].second;
                 }
 
-                QMetaObject::invokeMethod(this, [this, idx, nPoints, row, col, wp, cv]() {
+                // Record motor phases aligned on kbio ElapsedTime
+                {
+                    const double t = cv.elapsedTime;
+                    const double tDwellStart = std::max(0.0, t - durationS);
+                    if (idx > 0 && prevMeasureT < tDwellStart)
+                        motorPhases.push_back({prevMeasureT, tDwellStart, true});  // MOVING
+                    motorPhases.push_back({tDwellStart, t, false});                // STOPPED
+                    prevMeasureT = t;
+                }
+
+                QMetaObject::invokeMethod(this, [this, idx, nPoints, row, col, wp, cv,
+                                                 phases = motorPhases]() {
                     currentWaypointIndex_ = idx + 1;
+                    if (potentiostatGraphWidget_ != nullptr)
+                        potentiostatGraphWidget_->setPhases(phases);
                     appendPotentiostatVisualizationSample(idx, nPoints, row, col, wp, cv.elapsedTime, cv.ewe, cv.I);
                     appendLog(QString("Pt %1/%2 : Ewe=%3 V, I=%4 A, stopped=%5, ok=%6%7")
                         .arg(idx + 1).arg(nPoints)

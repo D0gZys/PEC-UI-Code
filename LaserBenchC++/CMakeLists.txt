@@ -72,6 +72,8 @@ qt_add_executable(LaserBench
     src/ui/PotentiostatGraphWidget.hpp
     src/ui/PotentiostatHeatmapWidget.cpp
     src/ui/PotentiostatHeatmapWidget.hpp
+    src/ui/Potentiostat3DWidget.cpp
+    src/ui/Potentiostat3DWidget.hpp
     "${THORLABS_CAMERA_LOAD_C}"
     "${THORLABS_CAMERA_LOAD_H}"
     "${THORLABS_MONO_TO_COLOR_LOAD_C}"

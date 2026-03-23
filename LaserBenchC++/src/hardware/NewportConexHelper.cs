@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using CommandInterfaceConexCC;
 
@@ -204,8 +205,21 @@ internal static class Program
 
     private static void HomeAll()
     {
-        AxisOrThrow("X").Home(90000);
-        AxisOrThrow("Y").Home(90000);
+        // Home both axes simultaneously
+        Exception exX = null, exY = null;
+        var tX = Task.Run(() => { try { AxisOrThrow("X").Home(90000); } catch (Exception e) { exX = e; } });
+        var tY = Task.Run(() => { try { AxisOrThrow("Y").Home(90000); } catch (Exception e) { exY = e; } });
+        Task.WaitAll(tX, tY);
+        if (exX != null) throw exX;
+        if (exY != null) throw exY;
+
+        // After homing, move both axes to the default starting position (12.5 mm)
+        const double kDefaultPosMm = 12.5;
+        var mX = Task.Run(() => { try { AxisOrThrow("X").MoveAbsolute(kDefaultPosMm, 60000); } catch (Exception e) { exX = e; } });
+        var mY = Task.Run(() => { try { AxisOrThrow("Y").MoveAbsolute(kDefaultPosMm, 60000); } catch (Exception e) { exY = e; } });
+        Task.WaitAll(mX, mY);
+        if (exX != null) throw exX;
+        if (exY != null) throw exY;
     }
 
     private static Dictionary<string, object> SetVelocity(string axis, double speed)

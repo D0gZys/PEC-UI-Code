@@ -31,6 +31,7 @@ class QObject;
 class QPlainTextEdit;
 class QPushButton;
 class QSpinBox;
+class QStackedWidget;
 class QTabWidget;
 class QTimer;
 QT_END_NAMESPACE
@@ -45,6 +46,7 @@ namespace laserbench::ui {
 class CameraPreviewWidget;
 class PotentiostatGraphWidget;
 class PotentiostatHeatmapWidget;
+class Potentiostat3DWidget;
 
 class MainWindow final : public QMainWindow
 {
@@ -70,6 +72,7 @@ private:
     void buildUi();
     QWidget* buildSetupTab();
     QWidget* buildMeasureTab();
+    void openStartupConnectionDialog();
     void openMotorConnectionDialog();
     void openCameraConnectionDialog();
     void openCameraSettingsDialog();
@@ -209,6 +212,21 @@ private:
     bool sequenceRunning_ {false};
     bool gotoArmed_ {false};
     bool sequenceSelectArmed_ {false};
+    bool rulerArmed_ {false};
+    bool rulerHasP1_ {false};
+    bool rulerHasP2_ {false};
+    QPointF rulerP1Px_;
+    QPointF rulerP2Px_;
+    bool circleArmed_ {false};
+    bool circleHasCenter_ {false};
+    bool circleHasEdge_ {false};
+    QPointF circleCenterPx_;
+    QPointF circleEdgePx_;
+    bool rectArmed_ {false};
+    bool rectHasP1_ {false};
+    bool rectHasP2_ {false};
+    QPointF rectP1Px_;
+    QPointF rectP2Px_;
     bool leftKeyHeld_ {false};
     bool rightKeyHeld_ {false};
     bool upKeyHeld_ {false};
@@ -234,6 +252,7 @@ private:
     QLabel* stageSummaryLabel_ {nullptr};
     QLabel* cameraSummaryLabel_ {nullptr};
     QLabel* potentiostatSummaryLabel_ {nullptr};
+    QLabel* mouseCoordsLabel_ {nullptr};
     QComboBox*   potentiostatTechniqueCombo_    {nullptr};
     QLineEdit*   potentiostatDllPathEdit_      {nullptr};
     QLineEdit*   potentiostatAddressEdit_      {nullptr};
@@ -249,15 +268,20 @@ private:
     QLabel*      potentiostatProgressLabel_    {nullptr};
     QLineEdit*   potentiostatNbCyclesEdit_     {nullptr};
     QComboBox*   potentiostatGraphTypeCombo_   {nullptr};
+    QPushButton* colorGraphButton_             {nullptr};
     QPushButton* potentiostatConnectButton_    {nullptr};
     QPushButton* potentiostatDisconnectButton_ {nullptr};
     QPushButton* potentiostatFirmwareButton_   {nullptr};
     QLabel*      potentiostatStatusLabel_      {nullptr};
     QPushButton* potentiostatRunButton_        {nullptr};
     QPushButton* potentiostatStopButton_       {nullptr};
-    PotentiostatGraphWidget* potentiostatGraphWidget_ {nullptr};
+    PotentiostatGraphWidget*  potentiostatGraphWidget_  {nullptr};
     PotentiostatHeatmapWidget* potentiostatHeatmapWidget_ {nullptr};
+    Potentiostat3DWidget*     potentiostat3DWidget_     {nullptr};
+    QStackedWidget*           measureRightStack_        {nullptr};
+    QPushButton*              view3DButton_             {nullptr};
     QPlainTextEdit* logView_ {nullptr};
+    QDialog* startupConnectionDialog_ {nullptr};
     QDialog* motorConnectionDialog_ {nullptr};
     QDialog* cameraConnectionDialog_ {nullptr};
     QDialog* cameraSettingsDialog_ {nullptr};
@@ -330,11 +354,33 @@ private:
     QPushButton* stopCameraLiveButton_ {nullptr};
     QPushButton* moveAbsXYButton_ {nullptr};
     QPushButton* gotoButton_ {nullptr};
+    QPushButton* rulerButton_ {nullptr};
+    QLabel*      rulerDistanceLabel_ {nullptr};
+    QPushButton* circleButton_ {nullptr};
+    QLabel*      circleDiameterLabel_ {nullptr};
+    QPushButton* rectButton_ {nullptr};
+    QLabel*      rectSizeLabel_ {nullptr};
     QPushButton* sequenceSetStartButton_ {nullptr};
     QPushButton* sequenceSetEndButton_ {nullptr};
     QPushButton* sequencePickButton_ {nullptr};
     QPushButton* sequenceRunButton_ {nullptr};
     QPushButton* sequenceStopButton_ {nullptr};
+    QPushButton* captureButton_      {nullptr};
+    QLabel*      captureDeltaLabel_  {nullptr};
+    std::optional<QPointF> capturedMotorPos_;
+
+    void onToggleRuler();
+    void updateRulerOverlay();
+    [[nodiscard]] QString computeRulerDistanceText() const;
+    void onToggleCircle();
+    void updateCircleOverlay();
+    [[nodiscard]] QString computeCircleDiameterText() const;
+    void onToggleRect();
+    void updateRectOverlay();
+    [[nodiscard]] QString computeRectSizeText() const;
+    void disarmAllMeasureTools();
+    void onPreviewFrameDoubleClicked(const QPoint& framePointPx);
+    void onCapturePosition();
 };
 
 }  // namespace laserbench::ui

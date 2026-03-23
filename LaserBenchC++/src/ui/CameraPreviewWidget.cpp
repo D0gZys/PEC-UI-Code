@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 
 namespace laserbench::ui {
 
@@ -19,6 +20,7 @@ CameraPreviewWidget::CameraPreviewWidget(QWidget* parent)
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setFocusPolicy(Qt::StrongFocus);
     setAttribute(Qt::WA_OpaquePaintEvent);
+    setMouseTracking(true);  // receive mouseMoveEvent without button pressed
 }
 
 void CameraPreviewWidget::setFrame(const QImage& frame)
@@ -102,6 +104,66 @@ void CameraPreviewWidget::clearWaypointOverlay()
     update();
 }
 
+void CameraPreviewWidget::setRulerOverlay(const QPointF& p1Px, bool hasP2, const QPointF& p2Px,
+                                          const QString& distanceText)
+{
+    rulerP1Px_          = p1Px;
+    rulerP1Visible_     = true;
+    rulerP2Px_          = p2Px;
+    rulerP2Visible_     = hasP2;
+    rulerDistanceText_  = distanceText;
+    update();
+}
+
+void CameraPreviewWidget::clearRulerOverlay()
+{
+    if (!rulerP1Visible_) return;
+    rulerP1Visible_ = false;
+    rulerP2Visible_ = false;
+    rulerDistanceText_.clear();
+    update();
+}
+
+void CameraPreviewWidget::setCircleOverlay(const QPointF& centerPx, bool hasEdge,
+                                            const QPointF& edgePx, const QString& diameterText)
+{
+    circleCenterPx_      = centerPx;
+    circleCenterVisible_ = true;
+    circleEdgePx_        = edgePx;
+    circleEdgeVisible_   = hasEdge;
+    circleDiameterText_  = diameterText;
+    update();
+}
+
+void CameraPreviewWidget::clearCircleOverlay()
+{
+    if (!circleCenterVisible_) return;
+    circleCenterVisible_ = false;
+    circleEdgeVisible_   = false;
+    circleDiameterText_.clear();
+    update();
+}
+
+void CameraPreviewWidget::setRectOverlay(const QPointF& p1Px, bool hasP2, const QPointF& p2Px,
+                                          const QString& sizeText)
+{
+    rectP1Px_      = p1Px;
+    rectP1Visible_ = true;
+    rectP2Px_      = p2Px;
+    rectP2Visible_ = hasP2;
+    rectSizeText_  = sizeText;
+    update();
+}
+
+void CameraPreviewWidget::clearRectOverlay()
+{
+    if (!rectP1Visible_) return;
+    rectP1Visible_ = false;
+    rectP2Visible_ = false;
+    rectSizeText_.clear();
+    update();
+}
+
 void CameraPreviewWidget::setZoomFactor(double zoomFactor)
 {
     const double bounded = std::clamp(zoomFactor, 1.0, 12.0);
@@ -162,6 +224,64 @@ bool CameraPreviewWidget::computeDisplayGeometry(QRectF& targetRect, double& dis
     return true;
 }
 
+// Helper used by both mouseMoveEvent and mousePressEvent
+static std::optional<QPoint> widgetToFramePoint(const QPointF& widgetPos,
+                                                  const QRectF& targetRect,
+                                                  double displayScale,
+                                                  const QSize& frameSize)
+{
+    if (!targetRect.contains(widgetPos) || displayScale <= 0.0 || frameSize.isEmpty())
+        return std::nullopt;
+    const int fx = std::clamp(
+        static_cast<int>(std::lround((widgetPos.x() - targetRect.left()) / displayScale)),
+        0, frameSize.width()  - 1);
+    const int fy = std::clamp(
+        static_cast<int>(std::lround((widgetPos.y() - targetRect.top())  / displayScale)),
+        0, frameSize.height() - 1);
+    return QPoint(fx, fy);
+}
+
+void CameraPreviewWidget::mouseMoveEvent(QMouseEvent* event)
+{
+    if (event == nullptr) { QWidget::mouseMoveEvent(event); return; }
+
+    QRectF targetRect;
+    double displayScale = 1.0;
+    if (computeDisplayGeometry(targetRect, displayScale)) {
+        if (auto fp = widgetToFramePoint(event->position(), targetRect, displayScale, frameSize_)) {
+            emit frameCursorMoved(*fp);
+            event->accept();
+            return;
+        }
+    }
+    emit frameCursorLeft();
+    event->accept();
+}
+
+void CameraPreviewWidget::leaveEvent(QEvent* event)
+{
+    emit frameCursorLeft();
+    QWidget::leaveEvent(event);
+}
+
+void CameraPreviewWidget::mouseDoubleClickEvent(QMouseEvent* event)
+{
+    if (event == nullptr || event->button() != Qt::LeftButton) {
+        QWidget::mouseDoubleClickEvent(event);
+        return;
+    }
+    QRectF targetRect;
+    double displayScale = 1.0;
+    if (computeDisplayGeometry(targetRect, displayScale)) {
+        if (auto fp = widgetToFramePoint(event->position(), targetRect, displayScale, frameSize_)) {
+            emit frameDoubleClicked(*fp);
+            event->accept();
+            return;
+        }
+    }
+    event->accept();
+}
+
 void CameraPreviewWidget::mousePressEvent(QMouseEvent* event)
 {
     if (event == nullptr || event->button() != Qt::LeftButton) {
@@ -171,31 +291,17 @@ void CameraPreviewWidget::mousePressEvent(QMouseEvent* event)
 
     QRectF targetRect;
     double displayScale = 1.0;
-    if (!computeDisplayGeometry(targetRect, displayScale) || displayScale <= 0.0) {
+    if (!computeDisplayGeometry(targetRect, displayScale)) {
         emit backgroundClicked();
         event->accept();
         return;
     }
 
-    const QPointF position = event->position();
-    if (!targetRect.contains(position)) {
+    if (auto fp = widgetToFramePoint(event->position(), targetRect, displayScale, frameSize_)) {
+        emit frameClicked(*fp);
+    } else {
         emit backgroundClicked();
-        event->accept();
-        return;
     }
-
-    const int frameX = std::clamp(
-        static_cast<int>(std::lround((position.x() - targetRect.left()) / displayScale)),
-        0,
-        frameSize_.width() - 1
-    );
-    const int frameY = std::clamp(
-        static_cast<int>(std::lround((position.y() - targetRect.top()) / displayScale)),
-        0,
-        frameSize_.height() - 1
-    );
-
-    emit frameClicked(QPoint(frameX, frameY));
     event->accept();
 }
 
@@ -234,6 +340,26 @@ void CameraPreviewWidget::paintEvent(QPaintEvent* event)
     painter.drawRect(targetRect.adjusted(0.0, 0.0, -1.0, -1.0));
 
     painter.setRenderHint(QPainter::Antialiasing, true);
+
+    // ── Center crosshair ─────────────────────────────────────────────────────
+    {
+        const double cx = targetRect.left() + (frameSize_.width()  * 0.5) * displayScale;
+        const double cy = targetRect.top()  + (frameSize_.height() * 0.5) * displayScale;
+        QPen crossPen(QColor(255, 255, 255, 160), 1.0);
+        crossPen.setStyle(Qt::SolidLine);
+        painter.setPen(crossPen);
+        // Horizontal line
+        painter.drawLine(QPointF(targetRect.left(),  cy),
+                         QPointF(targetRect.right(), cy));
+        // Vertical line
+        painter.drawLine(QPointF(cx, targetRect.top()),
+                         QPointF(cx, targetRect.bottom()));
+        // Small center dot
+        painter.setPen(QPen(QColor(255, 255, 255, 220), 1.0));
+        painter.setBrush(QColor(255, 255, 255, 220));
+        painter.drawEllipse(QPointF(cx, cy), 2.5, 2.5);
+        painter.setBrush(Qt::NoBrush);
+    }
 
     // Draw sequence zone rect
     if (sequenceStartVisible_) {
@@ -286,6 +412,190 @@ void CameraPreviewWidget::paintEvent(QPaintEvent* event)
                 QPointF(targetRect.left() + pt.x() * displayScale, targetRect.top() + pt.y() * displayScale),
                 kDotRadius, kDotRadius
             );
+        }
+    }
+
+    // ── Draw ruler overlay ───────────────────────────────────────────────────
+    if (rulerP1Visible_) {
+        const QColor kRulerColor(255, 220, 0);     // bright yellow
+        const QColor kRulerShadow(0, 0, 0, 180);
+
+        const QPointF p1s(
+            targetRect.left() + rulerP1Px_.x() * displayScale,
+            targetRect.top()  + rulerP1Px_.y() * displayScale
+        );
+
+        // Endpoint P1: crosshair + dot
+        painter.setPen(QPen(QColor(0, 0, 0, 120), 3.0));
+        painter.drawLine(QPointF(p1s.x() - 9, p1s.y()), QPointF(p1s.x() + 9, p1s.y()));
+        painter.drawLine(QPointF(p1s.x(), p1s.y() - 9), QPointF(p1s.x(), p1s.y() + 9));
+        painter.setPen(QPen(kRulerColor, 1.5));
+        painter.drawLine(QPointF(p1s.x() - 8, p1s.y()), QPointF(p1s.x() + 8, p1s.y()));
+        painter.drawLine(QPointF(p1s.x(), p1s.y() - 8), QPointF(p1s.x(), p1s.y() + 8));
+        painter.setBrush(kRulerColor);
+        painter.setPen(QPen(QColor(0, 0, 0, 160), 1.0));
+        painter.drawEllipse(p1s, 3.5, 3.5);
+
+        if (rulerP2Visible_) {
+            const QPointF p2s(
+                targetRect.left() + rulerP2Px_.x() * displayScale,
+                targetRect.top()  + rulerP2Px_.y() * displayScale
+            );
+
+            // Line with shadow
+            painter.setPen(QPen(QColor(0, 0, 0, 140), 3.5));
+            painter.drawLine(p1s, p2s);
+            painter.setPen(QPen(kRulerColor, 2.0));
+            painter.drawLine(p1s, p2s);
+
+            // Perpendicular tick marks at both endpoints
+            const QPointF dir = p2s - p1s;
+            const double len = std::hypot(dir.x(), dir.y());
+            if (len > 1.0) {
+                const QPointF perp(-dir.y() / len * 7, dir.x() / len * 7);
+                painter.setPen(QPen(QColor(0, 0, 0, 120), 3.0));
+                painter.drawLine(p1s - perp, p1s + perp);
+                painter.drawLine(p2s - perp, p2s + perp);
+                painter.setPen(QPen(kRulerColor, 2.0));
+                painter.drawLine(p1s - perp, p1s + perp);
+                painter.drawLine(p2s - perp, p2s + perp);
+            }
+
+            // Endpoint P2 dot
+            painter.setBrush(kRulerColor);
+            painter.setPen(QPen(QColor(0, 0, 0, 160), 1.0));
+            painter.drawEllipse(p2s, 3.5, 3.5);
+
+            // Distance label at midpoint
+            if (!rulerDistanceText_.isEmpty()) {
+                const QPointF mid = (p1s + p2s) * 0.5;
+
+                QFont labelFont;
+                labelFont.setPointSize(10);
+                labelFont.setBold(true);
+                painter.setFont(labelFont);
+                const QFontMetricsF fm(labelFont);
+                const QRectF textBr = fm.boundingRect(rulerDistanceText_);
+
+                const double padH = 6.0, padV = 3.0;
+                const double bw = textBr.width()  + padH * 2;
+                const double bh = textBr.height() + padV * 2;
+                // Position above the midpoint
+                const QRectF bg(mid.x() - bw * 0.5, mid.y() - bh - 6.0, bw, bh);
+
+                painter.setBrush(kRulerShadow);
+                painter.setPen(Qt::NoPen);
+                painter.drawRoundedRect(bg, 4.0, 4.0);
+                painter.setPen(kRulerColor);
+                painter.drawText(bg, Qt::AlignCenter, rulerDistanceText_);
+            }
+        }
+    }
+
+    // ── Helper lambda: draw a labelled annotation ─────────────────────────────
+    const auto drawLabel = [&](const QPointF& pos, const QString& text,
+                                const QColor& color, double offsetY = -8.0) {
+        if (text.isEmpty()) return;
+        QFont f; f.setPointSize(10); f.setBold(true);
+        painter.setFont(f);
+        const QFontMetricsF fm(f);
+        const QRectF tbr = fm.boundingRect(text);
+        const double pw = tbr.width() + 10, ph = tbr.height() + 4;
+        QRectF bg(pos.x() - pw * 0.5, pos.y() + offsetY - ph, pw, ph);
+        painter.setBrush(QColor(0, 0, 0, 170));
+        painter.setPen(Qt::NoPen);
+        painter.drawRoundedRect(bg, 4, 4);
+        painter.setPen(color);
+        painter.drawText(bg, Qt::AlignCenter, text);
+    };
+
+    // ── Draw circle overlay ───────────────────────────────────────────────────
+    if (circleCenterVisible_) {
+        const QColor kCircleColor(80, 200, 255);  // cyan-blue
+        const QPointF cs(
+            targetRect.left() + circleCenterPx_.x() * displayScale,
+            targetRect.top()  + circleCenterPx_.y() * displayScale);
+
+        // Center crosshair
+        painter.setPen(QPen(QColor(0,0,0,120), 3.0));
+        painter.drawLine(QPointF(cs.x()-9, cs.y()), QPointF(cs.x()+9, cs.y()));
+        painter.drawLine(QPointF(cs.x(), cs.y()-9), QPointF(cs.x(), cs.y()+9));
+        painter.setPen(QPen(kCircleColor, 1.5));
+        painter.drawLine(QPointF(cs.x()-8, cs.y()), QPointF(cs.x()+8, cs.y()));
+        painter.drawLine(QPointF(cs.x(), cs.y()-8), QPointF(cs.x(), cs.y()+8));
+        painter.setBrush(kCircleColor);
+        painter.setPen(QPen(QColor(0,0,0,160), 1.0));
+        painter.drawEllipse(cs, 3.5, 3.5);
+
+        if (circleEdgeVisible_) {
+            const QPointF es(
+                targetRect.left() + circleEdgePx_.x() * displayScale,
+                targetRect.top()  + circleEdgePx_.y() * displayScale);
+            const double rx = es.x() - cs.x();
+            const double ry = es.y() - cs.y();
+            const double r  = std::hypot(rx, ry);
+
+            // Circle + dashed radius line
+            painter.setPen(QPen(QColor(0,0,0,140), 3.5));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawEllipse(cs, r, r);
+            painter.setPen(QPen(kCircleColor, 2.0));
+            painter.drawEllipse(cs, r, r);
+
+            QPen dashPen(kCircleColor, 1.5, Qt::DashLine);
+            painter.setPen(dashPen);
+            painter.drawLine(cs, es);
+
+            painter.setBrush(kCircleColor);
+            painter.setPen(QPen(QColor(0,0,0,160), 1.0));
+            painter.drawEllipse(es, 3.5, 3.5);
+
+            // Label at top of circle
+            drawLabel(QPointF(cs.x(), cs.y() - r), circleDiameterText_, kCircleColor, -4.0);
+        }
+    }
+
+    // ── Draw rectangle overlay ────────────────────────────────────────────────
+    if (rectP1Visible_) {
+        const QColor kRectColor(255, 140, 0);  // orange
+        const QPointF p1s(
+            targetRect.left() + rectP1Px_.x() * displayScale,
+            targetRect.top()  + rectP1Px_.y() * displayScale);
+
+        // Corner P1 dot
+        painter.setBrush(kRectColor);
+        painter.setPen(QPen(QColor(0,0,0,160), 1.0));
+        painter.drawEllipse(p1s, 3.5, 3.5);
+
+        if (rectP2Visible_) {
+            const QPointF p2s(
+                targetRect.left() + rectP2Px_.x() * displayScale,
+                targetRect.top()  + rectP2Px_.y() * displayScale);
+
+            const QRectF rect(
+                std::min(p1s.x(), p2s.x()), std::min(p1s.y(), p2s.y()),
+                std::abs(p2s.x() - p1s.x()), std::abs(p2s.y() - p1s.y()));
+
+            painter.setPen(QPen(QColor(0,0,0,140), 3.5));
+            painter.setBrush(QColor(255, 140, 0, 30));
+            painter.drawRect(rect);
+            painter.setPen(QPen(kRectColor, 2.0));
+            painter.setBrush(QColor(255, 140, 0, 30));
+            painter.drawRect(rect);
+
+            // Corner dots
+            painter.setBrush(kRectColor);
+            painter.setPen(QPen(QColor(0,0,0,160), 1.0));
+            for (const QPointF& corner : {p1s, p2s,
+                    QPointF(p1s.x(), p2s.y()), QPointF(p2s.x(), p1s.y())}) {
+                painter.drawEllipse(corner, 3.5, 3.5);
+            }
+
+            // Label at center of rectangle
+            if (!rectSizeText_.isEmpty()) {
+                const QPointF mid = rect.center();
+                drawLabel(mid, rectSizeText_, kRectColor, -4.0);
+            }
         }
     }
 

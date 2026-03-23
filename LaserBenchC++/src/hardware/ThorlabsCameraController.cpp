@@ -6,6 +6,10 @@
 #include <stdexcept>
 #include <thread>
 
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+
 extern "C" {
 #include "tl_camera_sdk.h"
 #include "tl_camera_sdk_load.h"
@@ -370,9 +374,23 @@ void ThorlabsCameraController::ensureSdkLoaded()
         return;
     }
 
+    // The Thorlabs SDK internally calls AllocConsole() which would show a CMD window.
+    // Pre-allocate the console ourselves and immediately hide it so the SDK reuses
+    // the existing (hidden) console instead of creating a visible one.
+    if (::AllocConsole()) {
+        if (HWND hwnd = ::GetConsoleWindow()) {
+            ::ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+
     if (tl_camera_sdk_dll_initialize() != 0) {
         state_ = core::DeviceState::Error;
         throw std::runtime_error("Impossible de charger la DLL Thorlabs Camera SDK.");
+    }
+
+    // Make sure the console stays hidden after SDK init
+    if (HWND hwnd = ::GetConsoleWindow()) {
+        ::ShowWindow(hwnd, SW_HIDE);
     }
 
     dllInitialized_ = true;

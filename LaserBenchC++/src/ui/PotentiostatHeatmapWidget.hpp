@@ -25,10 +25,13 @@ public:
 
 protected:
     void paintEvent(QPaintEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void leaveEvent(QEvent* event) override;
 
 private:
     static QColor valueToColor(double value, double minValue, double maxValue);
     static QString formatCurrent(double value);
+    QRectF gridRect() const;
 
     int rows_ {0};
     int cols_ {0};
