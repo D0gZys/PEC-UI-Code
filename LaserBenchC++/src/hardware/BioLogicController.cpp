@@ -1,5 +1,6 @@
 #include "hardware/BioLogicController.hpp"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
 
@@ -26,11 +27,12 @@ bool BioLogicController::Impl::load(const QString& dllPath)
 {
     unload();
 
-    // Resolve the DLL path
+    // Resolve the DLL path — priority: provided path > next to exe > system install
     QString path = dllPath;
     if (path.isEmpty() || !QFileInfo::exists(path)) {
+        const QString appDir = QCoreApplication::applicationDirPath();
         const QStringList candidates = {
-            QDir(QFileInfo(path).absolutePath()).filePath("EClib64.dll"),
+            QDir(appDir).filePath("EClib64.dll"),
             "C:/EC-Lab Development Package/lib/EClib64.dll",
             "C:/Program Files/Bio-Logic Science Instruments/EC-Lab Development Package/lib/EClib64.dll",
         };
