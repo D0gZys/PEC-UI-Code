@@ -105,6 +105,8 @@ private:
     bool rectP2Visible_ {false};
     QString rectSizeText_;
     double zoomFactor_ {1.0};
+    QPointF panOffset_ {0.0, 0.0};
+    void clampPanOffset();
 };
 
 }  // namespace laserbench::ui

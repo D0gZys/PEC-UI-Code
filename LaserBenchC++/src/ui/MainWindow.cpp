@@ -7,9 +7,16 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
+#include <QDoubleSpinBox>
+#include <QRadioButton>
 #include <QEvent>
+#include <QFile>
 #include <QFileDialog>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QFormLayout>
 #include <QFrame>
 #include <QGridLayout>
@@ -155,15 +162,15 @@ struct ObjectivePreset
     int laserRadiusPx;
 };
 
-constexpr std::array<ObjectivePreset, 3> kObjectivePresets {{
-    {"4x", 4.0, 2588, 1350, 32},
+std::array<ObjectivePreset, 3> kObjectivePresets {{
+    {"4x",  4.0,  2588, 1350, 32},
     {"10x", 10.0, 2588, 1350, 32},
     {"50x", 50.0, 2588, 1350, 32},
 }};
 
-const ObjectivePreset* findObjectivePreset(const QString& name)
+ObjectivePreset* findObjectivePreset(const QString& name)
 {
-    for (const ObjectivePreset& preset : kObjectivePresets) {
+    for (ObjectivePreset& preset : kObjectivePresets) {
         if (name == QLatin1String(preset.name)) {
             return &preset;
         }
@@ -754,6 +761,7 @@ QWidget* MainWindow::buildSetupTab()
     });
     connect(cameraPreviewWidget_, &CameraPreviewWidget::frameDoubleClicked,
             this, &MainWindow::onPreviewFrameDoubleClicked);
+    loadCalibrationPresets();
     applyObjectivePreset();
 
     // Bottom strip: motor controls + zone selection
@@ -1160,9 +1168,19 @@ void MainWindow::openCalibrationDialog()
 
         auto* laserBox = createGroupBox("Cible laser");
         auto* laserLayout = new QGridLayout(laserBox);
-        laserLayout->addWidget(new QLabel("Pas (px)"), 0, 0);
+
+        laserLayout->addWidget(new QLabel("Objectif :"), 0, 0);
+        calibObjectiveCombo_ = new QComboBox;
+        for (const ObjectivePreset& preset : kObjectivePresets) {
+            calibObjectiveCombo_->addItem(QLatin1String(preset.name));
+        }
+        const QString curObj = objectiveCombo_ != nullptr ? objectiveCombo_->currentText() : QString("4x");
+        calibObjectiveCombo_->setCurrentText(curObj);
+        laserLayout->addWidget(calibObjectiveCombo_, 0, 1, 1, 3);
+
+        laserLayout->addWidget(new QLabel("Pas (px)"), 1, 0);
         laserMoveStepEdit_ = new QLineEdit("10");
-        laserLayout->addWidget(laserMoveStepEdit_, 0, 1);
+        laserLayout->addWidget(laserMoveStepEdit_, 1, 1);
 
         auto* moveXMinusButton = createActionButton("X -");
         auto* moveXPlusButton = createActionButton("X +");
@@ -1170,26 +1188,26 @@ void MainWindow::openCalibrationDialog()
         auto* moveYPlusButton = createActionButton("Y +");
         auto* sizeMinusButton = createActionButton("Taille -");
         auto* sizePlusButton = createActionButton("Taille +");
-        laserLayout->addWidget(moveXMinusButton, 1, 0);
-        laserLayout->addWidget(moveXPlusButton, 1, 1);
-        laserLayout->addWidget(moveYMinusButton, 1, 2);
-        laserLayout->addWidget(moveYPlusButton, 1, 3);
-        laserLayout->addWidget(sizeMinusButton, 2, 0, 1, 2);
-        laserLayout->addWidget(sizePlusButton, 2, 2, 1, 2);
+        laserLayout->addWidget(moveXMinusButton, 2, 0);
+        laserLayout->addWidget(moveXPlusButton,  2, 1);
+        laserLayout->addWidget(moveYMinusButton, 2, 2);
+        laserLayout->addWidget(moveYPlusButton,  2, 3);
+        laserLayout->addWidget(sizeMinusButton,  3, 0, 1, 2);
+        laserLayout->addWidget(sizePlusButton,   3, 2, 1, 2);
 
-        laserLayout->addWidget(new QLabel("X cible"), 3, 0);
+        laserLayout->addWidget(new QLabel("X cible"), 4, 0);
         laserXEdit_ = new QLineEdit(QString::number(laserPointPx_.x()));
-        laserLayout->addWidget(laserXEdit_, 3, 1);
-        laserLayout->addWidget(new QLabel("Y cible"), 3, 2);
+        laserLayout->addWidget(laserXEdit_, 4, 1);
+        laserLayout->addWidget(new QLabel("Y cible"), 4, 2);
         laserYEdit_ = new QLineEdit(QString::number(laserPointPx_.y()));
-        laserLayout->addWidget(laserYEdit_, 3, 3);
+        laserLayout->addWidget(laserYEdit_, 4, 3);
 
-        laserLayout->addWidget(new QLabel("Taille"), 4, 0);
+        laserLayout->addWidget(new QLabel("Taille"), 5, 0);
         laserSizeEdit_ = new QLineEdit(QString::number(laserRadiusPx_));
-        laserLayout->addWidget(laserSizeEdit_, 4, 1);
+        laserLayout->addWidget(laserSizeEdit_, 5, 1);
         auto* applyLaserButton = createActionButton("Appliquer cible");
         applyLaserButton->setProperty("accent", true);
-        laserLayout->addWidget(applyLaserButton, 4, 2, 1, 2);
+        laserLayout->addWidget(applyLaserButton, 5, 2, 1, 2);
 
         layout->addWidget(gotoBox);
         layout->addWidget(laserBox);
@@ -1204,6 +1222,15 @@ void MainWindow::openCalibrationDialog()
         connect(laserXEdit_, &QLineEdit::returnPressed, this, &MainWindow::applyLaserCalibrationEdits);
         connect(laserYEdit_, &QLineEdit::returnPressed, this, &MainWindow::applyLaserCalibrationEdits);
         connect(laserSizeEdit_, &QLineEdit::returnPressed, this, &MainWindow::applyLaserCalibrationEdits);
+        // Chargement des valeurs du preset quand l'objectif change dans le dialog
+        connect(calibObjectiveCombo_, &QComboBox::currentTextChanged,
+                this, [this](const QString& name) {
+            const ObjectivePreset* preset = findObjectivePreset(name);
+            if (preset == nullptr) return;
+            if (laserXEdit_)    laserXEdit_->setText(QString::number(preset->laserX));
+            if (laserYEdit_)    laserYEdit_->setText(QString::number(preset->laserY));
+            if (laserSizeEdit_) laserSizeEdit_->setText(QString::number(preset->laserRadiusPx));
+        });
     }
 
     syncCalibrationUi();
@@ -1228,6 +1255,44 @@ void MainWindow::applyObjectivePreset()
     updateLaserLabel();
     syncLaserOverlay();
     syncSequenceOverlay();
+}
+
+void MainWindow::loadCalibrationPresets()
+{
+    const QString path = QCoreApplication::applicationDirPath() + "/calibration.json";
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly))
+        return;
+    const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    if (!doc.isObject()) return;
+    const QJsonArray arr = doc.object().value("objectives").toArray();
+    for (const QJsonValue& val : arr) {
+        const QJsonObject obj = val.toObject();
+        ObjectivePreset* preset = findObjectivePreset(obj.value("name").toString());
+        if (preset == nullptr) continue;
+        preset->laserX        = obj.value("laserX").toInt(preset->laserX);
+        preset->laserY        = obj.value("laserY").toInt(preset->laserY);
+        preset->laserRadiusPx = std::max(obj.value("laserRadiusPx").toInt(preset->laserRadiusPx), 1);
+    }
+}
+
+void MainWindow::saveCalibrationPresets()
+{
+    QJsonArray arr;
+    for (const ObjectivePreset& preset : kObjectivePresets) {
+        QJsonObject obj;
+        obj["name"]          = QLatin1String(preset.name);
+        obj["laserX"]        = preset.laserX;
+        obj["laserY"]        = preset.laserY;
+        obj["laserRadiusPx"] = preset.laserRadiusPx;
+        arr.append(obj);
+    }
+    QJsonObject root;
+    root["objectives"] = arr;
+    const QString path = QCoreApplication::applicationDirPath() + "/calibration.json";
+    QFile file(path);
+    if (file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        file.write(QJsonDocument(root).toJson());
 }
 
 void MainWindow::syncLaserOverlay(const QSize& frameSize)
@@ -1296,6 +1361,16 @@ void MainWindow::setSequenceSelectArmed(bool armed)
 
 void MainWindow::syncCalibrationUi()
 {
+    // Aligner la combo objectif du dialog sur l'objectif courant
+    if (calibObjectiveCombo_ != nullptr && objectiveCombo_ != nullptr) {
+        const QString cur = objectiveCombo_->currentText();
+        if (calibObjectiveCombo_->currentText() != cur) {
+            QSignalBlocker blocker(calibObjectiveCombo_);
+            calibObjectiveCombo_->setCurrentText(cur);
+        }
+    }
+
+    // Afficher les valeurs runtime (laserPointPx_ / laserRadiusPx_)
     if (laserXEdit_ != nullptr && !laserXEdit_->hasFocus()) {
         laserXEdit_->setText(QString::number(laserPointPx_.x()));
     }
@@ -1625,11 +1700,28 @@ void MainWindow::applyLaserCalibrationEdits()
         return;
     }
 
-    laserPointPx_.setX(targetX);
-    laserPointPx_.setY(targetY);
-    laserRadiusPx_ = std::max(targetSize, 1);
-    syncLaserOverlay();
-    appendLog(QString("Cible laser calibree: X=%1 Y=%2 Taille=%3").arg(laserPointPx_.x()).arg(laserPointPx_.y()).arg(laserRadiusPx_));
+    // Sauvegarde dans le preset de l'objectif sélectionné dans le dialog
+    const QString targetObj = calibObjectiveCombo_ != nullptr
+        ? calibObjectiveCombo_->currentText()
+        : (objectiveCombo_ != nullptr ? objectiveCombo_->currentText() : QString());
+    ObjectivePreset* preset = findObjectivePreset(targetObj);
+    if (preset != nullptr) {
+        preset->laserX       = targetX;
+        preset->laserY       = targetY;
+        preset->laserRadiusPx = std::max(targetSize, 1);
+    }
+
+    // Si l'objectif calibré est le courant, mettre à jour les valeurs runtime
+    const QString currentObj = objectiveCombo_ != nullptr ? objectiveCombo_->currentText() : QString();
+    if (targetObj == currentObj || targetObj.isEmpty()) {
+        laserPointPx_.setX(targetX);
+        laserPointPx_.setY(targetY);
+        laserRadiusPx_ = std::max(targetSize, 1);
+        syncLaserOverlay();
+    }
+    saveCalibrationPresets();
+    appendLog(QString("Cible laser calibree [%1]: X=%2 Y=%3 Taille=%4")
+        .arg(targetObj).arg(targetX).arg(targetY).arg(std::max(targetSize, 1)));
 }
 
 void MainWindow::nudgeLaserTarget(int dxPx, int dyPx, int dRadiusPx)
@@ -2508,6 +2600,7 @@ void MainWindow::onPreviewFrameClicked(const QPoint& framePointPx)
                     .arg(endMm.y(), 0, 'f', 4)
             );
             syncSequenceOverlay();
+            QTimer::singleShot(0, this, &MainWindow::showScanConfigDialog);
         } catch (const std::exception& ex) {
             setSequenceSelectArmed(false);
             clearSequencePreviewSelection();
@@ -2793,6 +2886,7 @@ void MainWindow::clearPotentiostatVisualization()
     potentiostatRows_ = 0;
     potentiostatCols_ = 0;
     potentiostatSampleCount_ = 0;
+    potentiostatLastSampledCell_ = {0, 0};
 
     if (potentiostatPointCountLabel_ != nullptr) {
         potentiostatPointCountLabel_->setText("0");
@@ -2839,6 +2933,7 @@ void MainWindow::appendPotentiostatVisualizationSample(
         if (matrixIndex < potentiostatMatrix_.size()) {
             potentiostatMatrix_[matrixIndex] = current;
         }
+        potentiostatLastSampledCell_ = {row, col};
     }
 
     if (potentiostatCurrentLabel_ != nullptr) {
@@ -2885,8 +2980,8 @@ void MainWindow::refreshPotentiostatVisualization()
 
     if (potentiostatHeatmapWidget_ != nullptr) {
         std::optional<std::pair<int, int>> highlightedCell;
-        if (potentiostatSampleCount_ > 0 && potentiostatSampleCount_ <= static_cast<int>(potentiostatScanOrder_.size())) {
-            highlightedCell = potentiostatScanOrder_[static_cast<std::size_t>(potentiostatSampleCount_ - 1)];
+        if (potentiostatSampleCount_ > 0) {
+            highlightedCell = potentiostatLastSampledCell_;
         }
         potentiostatHeatmapWidget_->setGrid(
             potentiostatRows_,
@@ -3878,13 +3973,34 @@ void MainWindow::onStartCaPotentiostat()
         return;
     }
 
-    bool stepOk = false;
-    bool durationOk = false;
-    const double stepMm = sequenceStepMmEdit_ != nullptr ? sequenceStepMmEdit_->text().trimmed().toDouble(&stepOk) : 0.0;
-    const double durationS = sequenceDurationEdit_ != nullptr ? sequenceDurationEdit_->text().trimmed().toDouble(&durationOk) : 0.0;
-    if (!stepOk || !durationOk || stepMm <= 0.0 || durationS <= 0.0) {
-        QMessageBox::warning(this, "CA", "Pas (mm) et Duree/pt doivent etre des nombres positifs.");
-        return;
+    const ScanConfig cfg = scanConfig_;
+    const double effectiveStepCont = (cfg.mode == ScanConfig::AcquisitionMode::Continuous)
+        ? (cfg.trigger == ScanConfig::ContinuousTrigger::Distance
+           ? cfg.triggerDistanceMm
+           : cfg.scanSpeedMmPerS * cfg.triggerTimeS)
+        : 0.0;
+
+    // Diamètre du spot laser en mm (= pas Y en mode continu)
+    const QString objNameForScan = objectiveCombo_ != nullptr
+        ? objectiveCombo_->currentText().trimmed() : QString("4x");
+    const double laserDiameterMm = laserRadiusPx_ * 2.0 * autoMmPerPxForObjective(objNameForScan);
+
+    double stepMm = 0.0, durationS = 0.0;
+    if (cfg.mode == ScanConfig::AcquisitionMode::PointByPoint) {
+        bool stepOk = false, durationOk = false;
+        stepMm    = sequenceStepMmEdit_   != nullptr ? sequenceStepMmEdit_->text().trimmed().toDouble(&stepOk)    : 0.0;
+        durationS = sequenceDurationEdit_ != nullptr ? sequenceDurationEdit_->text().trimmed().toDouble(&durationOk) : 0.0;
+        if (!stepOk || !durationOk || stepMm <= 0.0 || durationS <= 0.0) {
+            QMessageBox::warning(this, "CA", "Pas (mm) et Duree/pt doivent etre des nombres positifs.");
+            return;
+        }
+    } else {
+        stepMm    = effectiveStepCont;
+        durationS = 0.0;
+        if (stepMm <= 0.0) {
+            QMessageBox::warning(this, "CA", "Intervalle d'acquisition invalide (vitesse ou intervalle = 0).");
+            return;
+        }
     }
 
     const QPointF startMm = *sequenceStartMotorMm_;
@@ -3899,6 +4015,11 @@ void MainWindow::onStartCaPotentiostat()
     if (mode == "Rectangle") {
         cols = std::max(1, static_cast<int>(std::lround(std::abs(endMm.x() - startMm.x()) / stepMm))) + 1;
         rows = std::max(1, static_cast<int>(std::lround(std::abs(endMm.y() - startMm.y()) / stepMm))) + 1;
+        // En mode continu, le pas Y = diamètre du spot laser
+        if (cfg.mode == ScanConfig::AcquisitionMode::Continuous && laserDiameterMm > 0.001) {
+            rows = std::max(1, static_cast<int>(std::lround(
+                std::abs(endMm.y() - startMm.y()) / laserDiameterMm)) + 1);
+        }
         order.reserve(static_cast<std::size_t>(rows * cols));
         for (int row = 0; row < rows; ++row) {
             if ((row % 2) == 0) {
@@ -3935,12 +4056,23 @@ void MainWindow::onStartCaPotentiostat()
     p.bandwidth = potentiostatBandwidthCombo_    != nullptr ? potentiostatBandwidthCombo_->currentText().toInt() : 8;
     p.nCycles   = potentiostatNbCyclesEdit_      != nullptr ? potentiostatNbCyclesEdit_->text().toInt()      : 0;
 
-    // Total CA duration covers all moves + dwells + 5 s margin (same as Python)
     const int nPoints = static_cast<int>(waypoints.size());
-    const double motorTimeoutS = kDefaultMotorTimeoutMs / 1000.0;
-    p.duration = nPoints * durationS + std::max(0, nPoints - 1) * 2.0 * motorTimeoutS + 5.0;
-    // Match interface_final: keep a regular CA record period instead of forcing one giant sample.
-    p.recordDt = 0.1;
+    if (cfg.mode == ScanConfig::AcquisitionMode::PointByPoint) {
+        const double motorTimeoutS = kDefaultMotorTimeoutMs / 1000.0;
+        p.duration = nPoints * durationS + std::max(0, nPoints - 1) * 2.0 * motorTimeoutS + 5.0;
+    } else {
+        // Continuous: estimate total time = row scans + Y moves (step Y = laser diameter)
+        const double xRange = std::abs(endMm.x() - startMm.x());
+        const double yRange = std::abs(endMm.y() - startMm.y());
+        const double yStepEst = (laserDiameterMm > 0.001) ? laserDiameterMm : effectiveStepCont;
+        const int estRows = (yRange > 0.001 && yStepEst > 0.0)
+            ? std::max(1, static_cast<int>(std::lround(yRange / yStepEst)) + 1) : 1;
+        const double rowScanTime = (cfg.scanSpeedMmPerS > 0.0) ? xRange / cfg.scanSpeedMmPerS : 60.0;
+        const double yMoveTime   = (stageSpeedMmPerS > 0.0 && yStepEst > 0.0)
+            ? yStepEst / stageSpeedMmPerS + 2.0 : 5.0;
+        p.duration = estRows * (rowScanTime + yMoveTime) + 15.0;
+    }
+    p.recordDt = std::max(60.0, p.duration);
 
     potentiostatBusy_.store(true);
     potentiostatStopRequested_.store(false);
@@ -3967,7 +4099,9 @@ void MainWindow::onStartCaPotentiostat()
 
     potentiostatThread_ = std::thread([this, ctrl, motorCtrl,
                                        p, waypoints = std::move(waypoints),
-                                       nPoints, durationS, stageSpeedMmPerS]() mutable
+                                       nPoints, durationS, stageSpeedMmPerS,
+                                       cfg, effectiveStepCont, laserDiameterMm,
+                                       startMm, endMm, rows, cols]() mutable
     {
         using namespace std::chrono_literals;
         const auto finishUi = [this](const QString& stateMsg) {
@@ -3981,7 +4115,9 @@ void MainWindow::onStartCaPotentiostat()
 
         try {
             // ── Phase 0 : move to first waypoint ──
-            const QPointF firstPt = waypoints.front();
+            const QPointF firstPt = (cfg.mode == ScanConfig::AcquisitionMode::Continuous)
+                ? QPointF(std::min(startMm.x(), endMm.x()), std::min(startMm.y(), endMm.y()))
+                : waypoints.front();
             QMetaObject::invokeMethod(this, [this]() {
                 if (potentiostatMeasureStateLabel_ != nullptr)
                     potentiostatMeasureStateLabel_->setText("Mise en position...");
@@ -4033,7 +4169,157 @@ void MainWindow::onStartCaPotentiostat()
 
             const int channel = p.channel;
 
-            // Phase intervals (built from kbio ElapsedTime to align with graph x-axis)
+            if (cfg.mode == ScanConfig::AcquisitionMode::Continuous) {
+                // ── Balayage continu ─────────────────────────────────────────────────
+                // Moteur déjà positionné en (xMin, yMin) par la Phase 0.
+                // Premier point mesuré immédiatement, puis déplacement en continu.
+                // Déclenchement toutes les triggerDist mm (ou triggerTimeS s) en cumulant
+                // la distance totale parcourue depuis le dernier point (X et Y compris).
+                const double xMin = std::min(startMm.x(), endMm.x());
+                const double xMax = std::max(startMm.x(), endMm.x());
+                const double yMin = std::min(startMm.y(), endMm.y());
+
+                int globalSampleIdx  = 0;
+                const int totalEstimate = rows * cols;
+
+                QMetaObject::invokeMethod(this, [this]() {
+                    if (potentiostatMeasureStateLabel_ != nullptr)
+                        potentiostatMeasureStateLabel_->setText("Balayage continu...");
+                }, Qt::QueuedConnection);
+
+                // Mesure au point de départ (moteur arrêté)
+                QPointF lastSamplePos(xMin, yMin);
+                auto    lastSampleTime    = std::chrono::steady_clock::now();
+                double  lastSampleElapsed = -1.0; // Pour détecter les doublons BioLogic
+                {
+                    const auto cv = ctrl->getCurrentValues(channel);
+                    if (cv.ok) {
+                        lastSampleElapsed = cv.elapsedTime;
+                        const int idx = globalSampleIdx++;
+                        const QPointF wp(xMin, yMin);
+                        QMetaObject::invokeMethod(this, [this, idx, totalEstimate, wp, cv]() {
+                            currentWaypointIndex_ = idx + 1;
+                            appendPotentiostatVisualizationSample(
+                                idx, totalEstimate, 0, 0, wp, cv.elapsedTime, cv.ewe, cv.I);
+                        }, Qt::QueuedConnection);
+                    }
+                    lastSampleTime = std::chrono::steady_clock::now();
+                }
+
+                // Compteur séquentiel par ligne : garantit que chaque déclenchement
+                // occupe une case unique, indépendamment de la position exacte du moteur.
+                int  sampleIndexInRow = 1;   // 0 est toujours pris par le sample de début de ligne
+                bool currentRowEven   = true;
+
+                // Helper de déclenchement — déclenche si la condition est remplie
+                const auto trySample = [&](double cx, double cy) {
+                    bool triggered = false;
+                    if (cfg.trigger == ScanConfig::ContinuousTrigger::Distance) {
+                        const double dx = cx - lastSamplePos.x();
+                        const double dy = cy - lastSamplePos.y();
+                        triggered = std::hypot(dx, dy) >= cfg.triggerDistanceMm;
+                    } else {
+                        triggered = std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - lastSampleTime).count()
+                            >= cfg.triggerTimeS;
+                    }
+                    if (!triggered) return;
+
+                    const auto cv = ctrl->getCurrentValues(channel);
+                    if (!cv.ok) return;
+                    // Ignorer si le BioLogic n'a pas encore produit une nouvelle valeur (doublon)
+                    if (cv.elapsedTime <= lastSampleElapsed) return;
+
+                    const double yStep = (laserDiameterMm > 0.001) ? laserDiameterMm : effectiveStepCont;
+                    const int rowIdx = std::clamp(
+                        static_cast<int>(std::lround((cy - yMin) / yStep)), 0, rows - 1);
+                    // Index séquentiel dans la ligne : évite les sauts de cellule liés
+                    // à l'imprécision de position (accél/décél, latence snapshot).
+                    const int colIdx = std::clamp(
+                        currentRowEven ? sampleIndexInRow : (cols - 1 - sampleIndexInRow),
+                        0, cols - 1);
+                    const int    idx = globalSampleIdx++;
+                    const QPointF wp(cx, cy);
+                    QMetaObject::invokeMethod(this, [this, idx, totalEstimate, rowIdx, colIdx, wp, cv]() {
+                        currentWaypointIndex_ = idx + 1;
+                        appendPotentiostatVisualizationSample(
+                            idx, totalEstimate, rowIdx, colIdx, wp, cv.elapsedTime, cv.ewe, cv.I);
+                    }, Qt::QueuedConnection);
+
+                    lastSamplePos     = QPointF(cx, cy);
+                    lastSampleTime    = std::chrono::steady_clock::now();
+                    lastSampleElapsed = cv.elapsedTime;
+                    ++sampleIndexInRow;
+                };
+
+                // Balayage ligne par ligne (serpentin)
+                const double yStepRow = (laserDiameterMm > 0.001) ? laserDiameterMm : effectiveStepCont;
+
+                for (int r = 0; r < rows; ++r) {
+                    if (potentiostatStopRequested_.load()) break;
+
+                    const bool   even       = (r % 2) == 0;
+                    sampleIndexInRow = 1;      // index 0 = sample de début de ligne
+                    currentRowEven   = even;
+                    const double currentY   = yMin + r * yStepRow;
+                    const double xRowStart  = even ? xMin : xMax;
+                    const double xRowEnd    = even ? xMax : xMin;
+                    const double rowLen     = xMax - xMin;
+                    const double rowTimeS   =
+                        (cfg.scanSpeedMmPerS > 0.0) ? rowLen / cfg.scanSpeedMmPerS : 60.0;
+
+                    // Mesure immédiate au début de chaque ligne (sauf ligne 0 déjà mesurée avant la boucle)
+                    if (r > 0) {
+                        const auto cv = ctrl->getCurrentValues(channel);
+                        if (cv.ok && cv.elapsedTime > lastSampleElapsed) {
+                            lastSampleElapsed = cv.elapsedTime;
+                            const int    idx    = globalSampleIdx++;
+                            const int    colIdx = even ? 0 : (cols - 1);
+                            const QPointF wp(xRowStart, currentY);
+                            QMetaObject::invokeMethod(this, [this, idx, totalEstimate, r, colIdx, wp, cv]() {
+                                currentWaypointIndex_ = idx + 1;
+                                appendPotentiostatVisualizationSample(
+                                    idx, totalEstimate, r, colIdx, wp, cv.elapsedTime, cv.ewe, cv.I);
+                            }, Qt::QueuedConnection);
+                        }
+                        lastSamplePos  = QPointF(xRowStart, currentY);
+                        lastSampleTime = std::chrono::steady_clock::now();
+                    }
+
+                    // Lancement du balayage X continu
+                    motorCtrl->setVelocity(hardware::AxisId::X, cfg.scanSpeedMmPerS);
+                    motorCtrl->moveAbsoluteNoWait(hardware::AxisId::X, xRowEnd);
+
+                    const auto xDeadline = std::chrono::steady_clock::now()
+                        + std::chrono::duration<double>(rowTimeS + 15.0);
+
+                    while (!potentiostatStopRequested_.load()
+                           && std::chrono::steady_clock::now() < xDeadline)
+                    {
+                        const auto pos = motorCtrl->snapshotBoth();
+                        if (pos.x.positionValid && pos.y.positionValid) {
+                            trySample(pos.x.positionMm, pos.y.positionMm);
+                            const bool xReached = even
+                                ? (pos.x.positionMm >= xRowEnd - 0.005)
+                                : (pos.x.positionMm <= xRowEnd + 0.005);
+                            if (xReached) break;
+                        }
+                        std::this_thread::sleep_for(5ms);
+                    }
+                    motorCtrl->waitAxis(hardware::AxisId::X, kDefaultMotorTimeoutMs);
+                    stopPredictedMotorMotion();
+
+                    // Transition Y vers la ligne suivante : déplacement rapide, sans acquisition
+                    if (r < rows - 1 && !potentiostatStopRequested_.load()) {
+                        const double nextY = currentY + yStepRow;
+                        motorCtrl->setVelocity(hardware::AxisId::Y, stageSpeedMmPerS);
+                        motorCtrl->moveAbsoluteNoWait(hardware::AxisId::Y, nextY);
+                        motorCtrl->waitAxis(hardware::AxisId::Y, kDefaultMotorTimeoutMs);
+                        stopPredictedMotorMotion();
+                    }
+                }
+            } else {
+            // ── Phase intervals (built from kbio ElapsedTime to align with graph x-axis) ──
             using MotorPhase = PotentiostatGraphWidget::MotorPhase;
             std::vector<MotorPhase> motorPhases;
             motorPhases.reserve(static_cast<std::size_t>(nPoints) * 2);
@@ -4122,6 +4408,7 @@ void MainWindow::onStartCaPotentiostat()
                     }, Qt::QueuedConnection);
                 }
             }
+            } // end if (continuous) / else (point par point)
 
             // Stop channel
             ctrl->stopChannel(channel);
@@ -4151,10 +4438,122 @@ void MainWindow::onStartCaPotentiostat()
 void MainWindow::onStopCaPotentiostat()
 {
     potentiostatStopRequested_.store(true);
+    stopPredictedMotorMotion();
+
+    // Arrêt immédiat des moteurs (débloque les waitAxis dans le thread de scan)
+    if (motorController_ != nullptr) {
+        try {
+            motorController_->stopAxis(hardware::AxisId::X);
+            motorController_->stopAxis(hardware::AxisId::Y);
+        } catch (...) {}
+    }
+
+    // Arrêt du canal potentiostat
     if (potentiostatController_ == nullptr) { return; }
     const int channel = potentiostatChannelCombo_ != nullptr ? potentiostatChannelCombo_->currentIndex() + 1 : 1;
     auto ctrl = potentiostatController_;
     std::thread([ctrl, channel]() { ctrl->stopChannel(channel); }).detach();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+void MainWindow::showScanConfigDialog()
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle("Paramètres de balayage");
+    dlg.setMinimumWidth(380);
+    auto* vl = new QVBoxLayout(&dlg);
+
+    // ── Mode ─────────────────────────────────────────────────────────────────
+    auto* modeGrp = new QGroupBox("Mode d'acquisition");
+    auto* modeHl  = new QHBoxLayout(modeGrp);
+    auto* ppBtn   = new QRadioButton("Point par point");
+    auto* cntBtn  = new QRadioButton("Balayage continu");
+    ppBtn->setChecked(scanConfig_.mode == ScanConfig::AcquisitionMode::PointByPoint);
+    cntBtn->setChecked(scanConfig_.mode == ScanConfig::AcquisitionMode::Continuous);
+    modeHl->addWidget(ppBtn);
+    modeHl->addWidget(cntBtn);
+    vl->addWidget(modeGrp);
+
+    // ── Stacked panels ───────────────────────────────────────────────────────
+    auto* stack = new QStackedWidget;
+
+    // Panel 0 — Point par point
+    auto* ppWidget = new QWidget;
+    auto* ppGrid   = new QGridLayout(ppWidget);
+    ppGrid->addWidget(new QLabel("Pas :"), 0, 0);
+    auto* stepSpin = new QDoubleSpinBox;
+    stepSpin->setRange(0.001, 25.0); stepSpin->setDecimals(3); stepSpin->setSuffix(" mm");
+    stepSpin->setValue(scanConfig_.stepMm);
+    ppGrid->addWidget(stepSpin, 0, 1);
+    ppGrid->addWidget(new QLabel("Durée pause avant mesure :"), 1, 0);
+    auto* dwellSpin = new QDoubleSpinBox;
+    dwellSpin->setRange(0.1, 3600.0); dwellSpin->setDecimals(2); dwellSpin->setSuffix(" s");
+    dwellSpin->setValue(scanConfig_.dwellS);
+    ppGrid->addWidget(dwellSpin, 1, 1);
+    stack->addWidget(ppWidget);   // index 0
+
+    // Panel 1 — Balayage continu
+    auto* cntWidget = new QWidget;
+    auto* cntGrid   = new QGridLayout(cntWidget);
+    cntGrid->addWidget(new QLabel("Vitesse moteur :"), 0, 0);
+    auto* speedSpin = new QDoubleSpinBox;
+    speedSpin->setRange(0.001, 10.0); speedSpin->setDecimals(3); speedSpin->setSuffix(" mm/s");
+    speedSpin->setValue(scanConfig_.scanSpeedMmPerS);
+    cntGrid->addWidget(speedSpin, 0, 1);
+
+    auto* intGrp  = new QGroupBox("Intervalle d'acquisition");
+    auto* intGrid = new QGridLayout(intGrp);
+    auto* distBtn = new QRadioButton("Toutes les");
+    auto* timeBtn = new QRadioButton("Toutes les");
+    distBtn->setChecked(scanConfig_.trigger == ScanConfig::ContinuousTrigger::Distance);
+    timeBtn->setChecked(scanConfig_.trigger == ScanConfig::ContinuousTrigger::Time);
+    auto* distSpin = new QDoubleSpinBox;
+    distSpin->setRange(0.001, 25.0); distSpin->setDecimals(3); distSpin->setSuffix(" mm");
+    distSpin->setValue(scanConfig_.triggerDistanceMm);
+    auto* timeSpin = new QDoubleSpinBox;
+    timeSpin->setRange(0.01, 3600.0); timeSpin->setDecimals(2); timeSpin->setSuffix(" s");
+    timeSpin->setValue(scanConfig_.triggerTimeS);
+    intGrid->addWidget(distBtn, 0, 0); intGrid->addWidget(distSpin, 0, 1);
+    intGrid->addWidget(timeBtn, 1, 0); intGrid->addWidget(timeSpin, 1, 1);
+    cntGrid->addWidget(intGrp, 1, 0, 1, 2);
+    stack->addWidget(cntWidget);  // index 1
+
+    vl->addWidget(stack);
+    stack->setCurrentIndex(ppBtn->isChecked() ? 0 : 1);
+    connect(ppBtn, &QRadioButton::toggled, [stack](bool chk) { stack->setCurrentIndex(chk ? 0 : 1); });
+
+    // ── Buttons ──────────────────────────────────────────────────────────────
+    auto* btnBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    connect(btnBox, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(btnBox, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    vl->addWidget(btnBox);
+
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    if (ppBtn->isChecked()) {
+        scanConfig_.mode   = ScanConfig::AcquisitionMode::PointByPoint;
+        scanConfig_.stepMm = stepSpin->value();
+        scanConfig_.dwellS = dwellSpin->value();
+        if (sequenceStepMmEdit_)   sequenceStepMmEdit_->setText(QString::number(scanConfig_.stepMm, 'g', 4));
+        if (sequenceDurationEdit_) sequenceDurationEdit_->setText(QString::number(scanConfig_.dwellS, 'g', 3));
+        appendLog(QString("Balayage point par point : pas=%1 mm, dwell=%2 s")
+            .arg(scanConfig_.stepMm, 0, 'f', 3).arg(scanConfig_.dwellS, 0, 'f', 2));
+    } else {
+        scanConfig_.mode              = ScanConfig::AcquisitionMode::Continuous;
+        scanConfig_.scanSpeedMmPerS   = speedSpin->value();
+        scanConfig_.trigger           = distBtn->isChecked()
+                                        ? ScanConfig::ContinuousTrigger::Distance
+                                        : ScanConfig::ContinuousTrigger::Time;
+        scanConfig_.triggerDistanceMm = distSpin->value();
+        scanConfig_.triggerTimeS      = timeSpin->value();
+        appendLog(distBtn->isChecked()
+            ? QString("Balayage continu : vitesse=%1 mm/s, acquisition toutes les %2 mm")
+                .arg(scanConfig_.scanSpeedMmPerS, 0, 'f', 3)
+                .arg(scanConfig_.triggerDistanceMm, 0, 'f', 3)
+            : QString("Balayage continu : vitesse=%1 mm/s, acquisition toutes les %2 s")
+                .arg(scanConfig_.scanSpeedMmPerS, 0, 'f', 3)
+                .arg(scanConfig_.triggerTimeS, 0, 'f', 2));
+    }
 }
 
 }  // namespace laserbench::ui

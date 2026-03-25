@@ -172,6 +172,7 @@ void CameraPreviewWidget::setZoomFactor(double zoomFactor)
     }
 
     zoomFactor_ = bounded;
+    clampPanOffset();
     emit zoomFactorChanged(zoomFactor_);
     invalidateScaledCache();
     update();
@@ -194,6 +195,7 @@ void CameraPreviewWidget::zoomOut()
 
 void CameraPreviewWidget::resetZoom()
 {
+    panOffset_ = QPointF(0.0, 0.0);
     setZoomFactor(1.0);
 }
 
@@ -216,8 +218,8 @@ bool CameraPreviewWidget::computeDisplayGeometry(QRectF& targetRect, double& dis
     );
 
     targetRect = QRectF(
-        (static_cast<double>(width()) - targetSize.width()) * 0.5,
-        (static_cast<double>(height()) - targetSize.height()) * 0.5,
+        (static_cast<double>(width()) - targetSize.width()) * 0.5 + panOffset_.x(),
+        (static_cast<double>(height()) - targetSize.height()) * 0.5 + panOffset_.y(),
         targetSize.width(),
         targetSize.height()
     );
@@ -626,17 +628,42 @@ void CameraPreviewWidget::paintEvent(QPaintEvent* event)
 
 void CameraPreviewWidget::wheelEvent(QWheelEvent* event)
 {
-    if (event->angleDelta().y() > 0) {
-        zoomIn();
-    } else if (event->angleDelta().y() < 0) {
-        zoomOut();
+    const double delta = event->angleDelta().y() > 0 ? 1.25 : 0.8;
+    const double newZoom = std::clamp(zoomFactor_ * delta, 1.0, 12.0);
+    if (qFuzzyCompare(newZoom, zoomFactor_)) { event->accept(); return; }
+
+    // Adjust panOffset so the pixel under the mouse stays fixed
+    QRectF oldRect;
+    double oldScale = 1.0;
+    if (computeDisplayGeometry(oldRect, oldScale) && oldScale > 0.0) {
+        const QPointF mousePos = event->position();
+        // Frame pixel under the mouse (in old geometry)
+        const double fpx = (mousePos.x() - oldRect.left()) / oldScale;
+        const double fpy = (mousePos.y() - oldRect.top())  / oldScale;
+
+        // New display scale = coverScale * newZoom
+        const double newScale = (oldScale / zoomFactor_) * newZoom;
+
+        // Where the new image origin (topLeft) must be so fp stays at mousePos
+        const double newLeft = mousePos.x() - fpx * newScale;
+        const double newTop  = mousePos.y() - fpy * newScale;
+
+        // Where the centered origin would be at the new scale
+        const double centeredLeft = (width()  - frameSize_.width()  * newScale) * 0.5;
+        const double centeredTop  = (height() - frameSize_.height() * newScale) * 0.5;
+
+        panOffset_.setX(newLeft - centeredLeft);
+        panOffset_.setY(newTop  - centeredTop);
     }
+
+    setZoomFactor(newZoom);  // clamps panOffset and triggers repaint
     event->accept();
 }
 
 void CameraPreviewWidget::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
+    clampPanOffset();
     rebuildScaledCache();
 }
 
@@ -673,6 +700,20 @@ void CameraPreviewWidget::rebuildScaledCache()
     );
     scaledCacheRect_ = targetRect;
     scaledCacheValid_ = true;
+}
+
+void CameraPreviewWidget::clampPanOffset()
+{
+    if (frameSize_.isEmpty()) { panOffset_ = QPointF(0.0, 0.0); return; }
+    const double coverSc = std::max(
+        static_cast<double>(width())  / static_cast<double>(frameSize_.width()),
+        static_cast<double>(height()) / static_cast<double>(frameSize_.height())
+    );
+    const double s    = coverSc * zoomFactor_;
+    const double maxX = std::max(0.0, (frameSize_.width()  * s - width())  * 0.5);
+    const double maxY = std::max(0.0, (frameSize_.height() * s - height()) * 0.5);
+    panOffset_.setX(std::clamp(panOffset_.x(), -maxX, maxX));
+    panOffset_.setY(std::clamp(panOffset_.y(), -maxY, maxY));
 }
 
 void CameraPreviewWidget::updateZoom(double deltaFactor)

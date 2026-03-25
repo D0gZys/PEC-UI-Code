@@ -53,6 +53,23 @@ class MainWindow final : public QMainWindow
     Q_OBJECT
 
 public:
+    // ── Scan configuration (set via dialog when zone is drawn) ────────────────
+    struct ScanConfig {
+        enum class AcquisitionMode { PointByPoint, Continuous };
+        enum class ContinuousTrigger { Distance, Time };
+
+        AcquisitionMode   mode             {AcquisitionMode::PointByPoint};
+        // Point par point
+        double            stepMm           {0.05};
+        double            dwellS           {0.5};
+        // Balayage continu
+        double            scanSpeedMmPerS  {1.0};
+        ContinuousTrigger trigger          {ContinuousTrigger::Distance};
+        double            triggerDistanceMm{0.1};
+        double            triggerTimeS     {1.0};
+    };
+
+public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
 
@@ -83,6 +100,8 @@ private:
     void updatePreviewCursor();
     void setGotoArmed(bool armed);
     void setSequenceSelectArmed(bool armed);
+    void loadCalibrationPresets();
+    void saveCalibrationPresets();
     void syncCalibrationUi();
     void clearSequencePreviewSelection();
     void updateSequenceLabels(const QPointF& startMm, const QPointF& endMm);
@@ -285,7 +304,8 @@ private:
     QDialog* motorConnectionDialog_ {nullptr};
     QDialog* cameraConnectionDialog_ {nullptr};
     QDialog* cameraSettingsDialog_ {nullptr};
-    QDialog* calibrationDialog_ {nullptr};
+    QDialog*   calibrationDialog_     {nullptr};
+    QComboBox* calibObjectiveCombo_   {nullptr};
 
     QComboBox* xPortCombo_ {nullptr};
     QComboBox* yPortCombo_ {nullptr};
@@ -328,6 +348,7 @@ private:
     int potentiostatRows_ {0};
     int potentiostatCols_ {0};
     int potentiostatSampleCount_ {0};
+    std::pair<int,int> potentiostatLastSampledCell_ {0, 0};
     int currentWaypointIndex_ {-1};
     std::optional<QPointF> cachedMotorMm_;
     bool sequenceRectFollowSample_ {false};
@@ -381,6 +402,9 @@ private:
     void disarmAllMeasureTools();
     void onPreviewFrameDoubleClicked(const QPoint& framePointPx);
     void onCapturePosition();
+    void showScanConfigDialog();
+
+    ScanConfig scanConfig_;
 };
 
 }  // namespace laserbench::ui

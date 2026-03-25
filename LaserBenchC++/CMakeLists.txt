@@ -96,6 +96,15 @@ set_target_properties(LaserBench PROPERTIES
 )
 
 add_custom_command(TARGET LaserBench POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+        "-DSRC_FILE=${CMAKE_CURRENT_SOURCE_DIR}/calibration.json"
+        "-DDST_FILE=$<TARGET_FILE_DIR:LaserBench>/calibration.json"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CopyIfNotExists.cmake"
+    COMMENT "Deploying default calibration.json (if not already present)"
+    VERBATIM
+)
+
+add_custom_command(TARGET LaserBench POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${NEWPORT_DOTNET_DLL}"
         "$<TARGET_FILE_DIR:LaserBench>/Newport.CONEXCC.CommandInterface.dll"
