@@ -1,0 +1,7 @@
+{
+    "objectives": [
+        { "name": "4x",  "laserX": 2588, "laserY": 1350, "laserRadiusPx": 32 },
+        { "name": "10x", "laserX": 2588, "laserY": 1350, "laserRadiusPx": 32 },
+        { "name": "50x", "laserX": 2588, "laserY": 1350, "laserRadiusPx": 32 }
+    ]
+}
