@@ -13,6 +13,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
+set(CMAKE_INSTALL_UCRT_LIBRARIES TRUE)
+set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
+
+include(InstallRequiredSystemLibraries)
 
 set(NEWPORT_DOTNET_DLL "${CMAKE_CURRENT_SOURCE_DIR}/../MotorController/lib/Newport.CONEXCC.CommandInterface.dll")
 set(BIOLOGIC_SDK_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../Potentiostat/Examples/C-C++/include")
@@ -114,7 +118,9 @@ add_custom_command(TARGET LaserBench POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${THORLABS_CAMERA_DLL_DIR}"
         "$<TARGET_FILE_DIR:LaserBench>"
-    COMMAND "${CSHARP_COMPILER}"
+    COMMAND ${CMAKE_COMMAND} -E env
+        --unset=LIB
+        "${CSHARP_COMPILER}"
         /nologo
         /target:exe
         /platform:x64
@@ -125,25 +131,43 @@ add_custom_command(TARGET LaserBench POST_BUILD
     VERBATIM
 )
 
+if (CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS)
+    set(LASERBENCH_RUNTIME_COPY_COMMANDS)
+    foreach(RUNTIME_DLL IN LISTS CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS)
+        list(APPEND LASERBENCH_RUNTIME_COPY_COMMANDS
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${RUNTIME_DLL}"
+                "$<TARGET_FILE_DIR:LaserBench>"
+        )
+    endforeach()
+
+    add_custom_command(TARGET LaserBench POST_BUILD
+        ${LASERBENCH_RUNTIME_COPY_COMMANDS}
+        COMMENT "Deploying MSVC runtime dependencies"
+        VERBATIM
+    )
+endif()
+
 if (TARGET Qt6::qmake)
     get_target_property(QT_QMAKE_EXECUTABLE Qt6::qmake IMPORTED_LOCATION)
     get_filename_component(QT_BIN_DIR "${QT_QMAKE_EXECUTABLE}" DIRECTORY)
+    get_filename_component(QT_PREFIX_DIR "${QT_BIN_DIR}" DIRECTORY)
+    set(QT_PLUGINS_DIR "${QT_PREFIX_DIR}/plugins")
     set(WINDEPLOYQT_EXECUTABLE "${QT_BIN_DIR}/windeployqt.exe")
 
-    if (EXISTS "${WINDEPLOYQT_EXECUTABLE}")
-        add_custom_command(TARGET LaserBench POST_BUILD
-            COMMAND "${WINDEPLOYQT_EXECUTABLE}"
-                --no-translations
-                --no-system-d3d-compiler
-                --no-opengl-sw
-                "$<TARGET_FILE:LaserBench>"
-            VERBATIM
-        )
-    else()
-        message(WARNING "windeployqt.exe not found; Qt runtime dependencies will not be copied automatically.")
-    endif()
+    add_custom_command(TARGET LaserBench POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+            "-DTARGET_FILE=$<TARGET_FILE:LaserBench>"
+            "-DTARGET_DIR=$<TARGET_FILE_DIR:LaserBench>"
+            "-DQT_BIN_DIR=${QT_BIN_DIR}"
+            "-DQT_PLUGINS_DIR=${QT_PLUGINS_DIR}"
+            "-DWINDEPLOYQT_EXECUTABLE=${WINDEPLOYQT_EXECUTABLE}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/DeployQtRuntime.cmake"
+        COMMENT "Deploying Qt runtime dependencies"
+        VERBATIM
+    )
 else()
-    message(WARNING "Qt6::qmake target not found; automatic Qt dependency deployment is disabled.")
+    message(WARNING "Qt6::qmake target not found; Qt runtime deployment will be skipped.")
 endif()
 
 install(TARGETS LaserBench

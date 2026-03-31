@@ -4,6 +4,7 @@
 #include <QMainWindow>
 #include <QPoint>
 #include <QSize>
+#include <QStringList>
 
 #include <atomic>
 #include <chrono>
@@ -67,6 +68,7 @@ public:
         ContinuousTrigger trigger          {ContinuousTrigger::Distance};
         double            triggerDistanceMm{0.1};
         double            triggerTimeS     {1.0};
+        double            rowStepMm        {0.05};
     };
 
 public:
@@ -94,6 +96,10 @@ private:
     void openCameraConnectionDialog();
     void openCameraSettingsDialog();
     void openCalibrationDialog();
+    void initializeSessionLog();
+    void scheduleRuntimeDependencyCheck();
+    void runRuntimeDependencyCheck();
+    [[nodiscard]] QStringList collectRuntimeDependencyIssues() const;
     void applyObjectivePreset();
     void syncLaserOverlay(const QSize& frameSize = QSize());
     void updateLaserLabel();
@@ -133,6 +139,7 @@ private:
     void onConnectPotentiostat();
     void onStartCaPotentiostat();
     void onStopCaPotentiostat();
+    void onExportPotentiostatMatrix();
     void onDisconnectPotentiostat();
     void onLoadFirmware();
 
@@ -219,6 +226,7 @@ private:
     std::atomic_bool sequenceStopRequested_ {false};
     mutable std::mutex motorSnapshotMutex_;
     std::mutex cameraSnapshotMutex_;
+    std::mutex logMutex_;
     mutable std::mutex predictedMotionMutex_;
     hardware::MotorAxisSnapshot polledXSnapshot_ {hardware::AxisId::X};
     hardware::MotorAxisSnapshot polledYSnapshot_ {hardware::AxisId::Y};
@@ -227,6 +235,7 @@ private:
     bool cameraFrameReady_ {false};
     QString pendingMotorPollError_;
     QString pendingCameraPollError_;
+    QString sessionLogPath_;
     bool motorTaskRunning_ {false};
     bool sequenceRunning_ {false};
     bool gotoArmed_ {false};
@@ -294,6 +303,7 @@ private:
     QLabel*      potentiostatStatusLabel_      {nullptr};
     QPushButton* potentiostatRunButton_        {nullptr};
     QPushButton* potentiostatStopButton_       {nullptr};
+    QPushButton* potentiostatExportButton_     {nullptr};
     PotentiostatGraphWidget*  potentiostatGraphWidget_  {nullptr};
     PotentiostatHeatmapWidget* potentiostatHeatmapWidget_ {nullptr};
     Potentiostat3DWidget*     potentiostat3DWidget_     {nullptr};
@@ -349,6 +359,10 @@ private:
     int potentiostatCols_ {0};
     int potentiostatSampleCount_ {0};
     std::pair<int,int> potentiostatLastSampledCell_ {0, 0};
+    double potentiostatXMin_ {0.0};
+    double potentiostatXMax_ {0.0};
+    double potentiostatYMin_ {0.0};
+    double potentiostatYMax_ {0.0};
     int currentWaypointIndex_ {-1};
     std::optional<QPointF> cachedMotorMm_;
     bool sequenceRectFollowSample_ {false};

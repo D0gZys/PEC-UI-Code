@@ -1,7 +1,22 @@
 {
     "objectives": [
-        { "name": "4x",  "laserX": 2588, "laserY": 1350, "laserRadiusPx": 32 },
-        { "name": "10x", "laserX": 2588, "laserY": 1350, "laserRadiusPx": 32 },
-        { "name": "50x", "laserX": 2588, "laserY": 1350, "laserRadiusPx": 32 }
+        {
+            "laserRadiusPx": 8,
+            "laserX": 2597,
+            "laserY": 1261,
+            "name": "4x"
+        },
+        {
+            "laserRadiusPx": 32,
+            "laserX": 2588,
+            "laserY": 1350,
+            "name": "10x"
+        },
+        {
+            "laserRadiusPx": 32,
+            "laserX": 2588,
+            "laserY": 1350,
+            "name": "50x"
+        }
     ]
 }
