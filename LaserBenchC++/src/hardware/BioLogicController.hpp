@@ -4,6 +4,7 @@
 
 #include <QString>
 
+#include <array>
 #include <cstdint>
 #include <mutex>
 #include <vector>
@@ -30,10 +31,34 @@ struct CaParams
 
 struct OcvParams
 {
-    int    channel  {1};
-    double duration {1.0};
-    double recordDt {0.1};
-    int    eRange   {0};
+    int    channel   {1};
+    double duration  {1.0};
+    double recordDt  {0.1};
+    double recordDE  {0.01};
+    int    eRange    {0};
+};
+
+struct CvaParams
+{
+    int                      channel             {1};
+    std::array<bool, 4>      vsInitialScan      {false, false, false, false};
+    std::array<double, 4>    voltageScan        {0.0, 2.5, -0.2, 0.0};
+    std::array<double, 4>    scanRateMvPerS     {80.0, 80.0, 80.0, 80.0};
+    double                   recordDE           {0.001};
+    bool                     averageOverDE      {true};
+    int                      nCycles            {1};
+    double                   beginMeasuringI    {0.5};
+    double                   endMeasuringI      {1.0};
+    std::array<bool, 2>      vsInitialStep      {false, false};
+    std::array<double, 2>    voltageStep        {0.0, 0.0};
+    std::array<double, 2>    durationStep       {5.0, 5.0};
+    std::array<double, 2>    recordDtStep       {1.0, 0.1};
+    double                   recordDt           {0.1};
+    double                   recordDI           {1.0};
+    bool                     trigOnOff          {false};
+    int                      iRange             {12};
+    int                      eRange             {0};
+    int                      bandwidth          {5};
 };
 
 struct PotDataPoint
@@ -47,6 +72,12 @@ struct PotDataResult
 {
     bool                      ok      {false};
     bool                      stopped {false};
+    int                       techniqueId {-1};
+    int                       processIndex {-1};
+    int                       nbRows {0};
+    int                       nbCols {0};
+    int                       currentState {-1};
+    double                    startTime {0.0};
     std::vector<PotDataPoint> points;
     QString                   error;
 };
@@ -78,6 +109,8 @@ public:
     void             loadFirmware(int channel);
     bool             startCa(const CaParams& p);
     bool             startOcv(const OcvParams& p);
+    bool             startCva(const CvaParams& p);
+    bool             startCvaSimple(const CvaParams& p);
     void             stopChannel(int channel);
     PotDataResult    getData(int channel);
     PotCurrentValues getCurrentValues(int channel);
@@ -85,6 +118,7 @@ public:
     bool    isConnected()    const { return connected_; }
     QString connectedModel() const { return connectedModel_; }
     QString lastError()      const { return lastError_; }
+    QString lastStartDetails() const { return lastStartDetails_; }
 
 private:
     // Function pointer types (all __stdcall as per BioLogic API)
@@ -143,6 +177,7 @@ private:
     bool    connected_      {false};
     QString connectedModel_;
     QString lastError_;
+    QString lastStartDetails_;
 };
 
 } // namespace laserbench::hardware

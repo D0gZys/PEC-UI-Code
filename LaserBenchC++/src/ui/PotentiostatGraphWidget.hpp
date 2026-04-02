@@ -37,7 +37,7 @@ protected:
     void paintEvent(QPaintEvent* event) override;
 
 private:
-    QString formatAxisValue(double value) const;
+    QString formatAxisValue(double value, double step) const;
 
     Mode mode_ {Mode::CurrentVsTime};
     std::vector<double>     times_;

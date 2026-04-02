@@ -15,7 +15,7 @@ namespace laserbench::ui {
 namespace {
 
 constexpr int kLeftMargin   = 52;
-constexpr int kRightMargin  = 95;   // room for color bar + tick labels
+constexpr int kRightMargin  = 115;  // room for color bar + tick labels (4 decimal places)
 constexpr int kTopMargin    = 28;
 constexpr int kBottomMargin = 20;
 
@@ -73,7 +73,7 @@ QColor PotentiostatHeatmapWidget::valueToColor(double value, double minValue, do
 
 QString PotentiostatHeatmapWidget::formatCurrent(double value)
 {
-    return QString::number(value, 'e', 2);
+    return QString::number(value, 'e', 4);
 }
 
 QRectF PotentiostatHeatmapWidget::gridRect() const
@@ -114,7 +114,7 @@ void PotentiostatHeatmapWidget::paintEvent(QPaintEvent* event)
         return;
     }
 
-    // Compute min / max over acquired values
+    // Collect acquired values and compute min/max for colour mapping
     std::vector<double> acquired;
     acquired.reserve(values_.size());
     for (const auto& v : values_)
@@ -183,7 +183,7 @@ void PotentiostatHeatmapWidget::paintEvent(QPaintEvent* event)
 
         // Tick labels: max (top), mid (centre), min (bottom)
         const double lx = barX + kBarWidth + kLabelGap;
-        const double lw = 62.0;
+        const double lw = 80.0;
         painter.setRenderHint(QPainter::Antialiasing, true);
         QFont f = painter.font(); f.setPointSizeF(7.5); painter.setFont(f);
 

@@ -204,7 +204,7 @@ QString MockPotentiostatController::channelSummary() const
 
 QString MockPotentiostatController::acquisitionSummary() const
 {
-    return "Chronoamperometrie spatiale - acquisition ponctuelle par position";
+    return "Acquisition spatiale potentio - CA / OCV / CVA";
 }
 
 }  // namespace laserbench::hardware

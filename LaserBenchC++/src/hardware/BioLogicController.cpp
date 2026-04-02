@@ -20,6 +20,29 @@ static constexpr uint32_t BOARD_DIGICORE  = 3;  // SP-300 series  -> ca5.ecc / o
 
 static constexpr int ERR_OK = 0;
 
+static float scanRateVoltsPerSecond(double scanRateMvPerS)
+{
+    return static_cast<float>(scanRateMvPerS * 1e-3);
+}
+
+static bool supportsNativeCvaForModel(const QString& model)
+{
+    const QString normalized = model.trimmed().toUpper();
+    return normalized == "VMP"
+        || normalized == "VMP2"
+        || normalized == "MPG"
+        || normalized == "BISTAT"
+        || normalized == "MCS200"
+        || normalized == "VMP3"
+        || normalized == "VSP"
+        || normalized == "HCP803"
+        || normalized == "EPP400"
+        || normalized == "EPP4000"
+        || normalized == "BISTAT2"
+        || normalized == "FCT150S"
+        || normalized == "FCT50S";
+}
+
 [[noreturn]] static void throwErr(const QString& msg)
 {
     throw std::runtime_error(msg.toStdString());
@@ -139,13 +162,14 @@ QString BioLogicController::backendSummary()     const
     return connected_ ? QString("Connecte - %1").arg(connectedModel_) : "Deconnecte";
 }
 QString BioLogicController::channelSummary()     const { return connected_ ? connectedModel_ : "---"; }
-QString BioLogicController::acquisitionSummary() const { return "CA / OCV par point"; }
+QString BioLogicController::acquisitionSummary() const { return "CA / OCV / CVA"; }
 
 bool BioLogicController::connect(const QString& dllPath, const QString& address, int channel)
 {
     connected_ = false;
     connectedModel_.clear();
     lastError_.clear();
+    lastStartDetails_.clear();
 
     std::lock_guard<std::mutex> lock(impl_.mutex);
     try {
@@ -216,6 +240,7 @@ void BioLogicController::disconnect()
 {
     connected_ = false;
     connectedModel_.clear();
+    lastStartDetails_.clear();
     std::lock_guard<std::mutex> lock(impl_.mutex);
     impl_.unload();
 }
@@ -255,6 +280,7 @@ bool BioLogicController::startCa(const CaParams& p)
     std::lock_guard<std::mutex> lock(impl_.mutex);
     try {
         if (!impl_.isConnected()) throwErr("Non connecte");
+        lastStartDetails_.clear();
 
         constexpr int kNParams = 9;
         std::vector<TEccParam_t> params(kNParams);
@@ -282,9 +308,18 @@ bool BioLogicController::startCa(const CaParams& p)
         rc = impl_.blStartChannel(impl_.connectionId, ch);
         if (rc != ERR_OK) throwErr(QString("BL_StartChannel : %1").arg(impl_.errorMsg(rc)));
 
+        lastStartDetails_ = QString("[POTDBG] controller start: technique=CA path=direct model=%1 boardType=%2 tech=%3 voltage=%4 V duration=%5 s recordDt=%6 s")
+            .arg(connectedModel_)
+            .arg(impl_.boardType)
+            .arg(tech)
+            .arg(p.voltage, 0, 'f', 6)
+            .arg(p.duration, 0, 'f', 3)
+            .arg(p.recordDt, 0, 'f', 3);
+
         return true;
     } catch (const std::exception& ex) {
         lastError_ = QString::fromUtf8(ex.what());
+        lastStartDetails_.clear();
         return false;
     }
 }
@@ -294,13 +329,15 @@ bool BioLogicController::startOcv(const OcvParams& p)
     std::lock_guard<std::mutex> lock(impl_.mutex);
     try {
         if (!impl_.isConnected()) throwErr("Non connecte");
+        lastStartDetails_.clear();
 
-        constexpr int kNParams = 3;
+        constexpr int kNParams = 4;
         std::vector<TEccParam_t> params(kNParams);
 
         impl_.blDefineSgl("Rest_time_T",     static_cast<float>(p.duration),  0, &params[0]);
-        impl_.blDefineSgl("Record_every_dT", static_cast<float>(p.recordDt),  0, &params[1]);
-        impl_.blDefineInt("E_Range",         p.eRange,                        0, &params[2]);
+        impl_.blDefineSgl("Record_every_dE", static_cast<float>(p.recordDE),  0, &params[1]);
+        impl_.blDefineSgl("Record_every_dT", static_cast<float>(p.recordDt),  0, &params[2]);
+        impl_.blDefineInt("E_Range",         p.eRange,                        0, &params[3]);
 
         TEccParams_t eccParams;
         eccParams.len     = kNParams;
@@ -315,9 +352,388 @@ bool BioLogicController::startOcv(const OcvParams& p)
         rc = impl_.blStartChannel(impl_.connectionId, ch);
         if (rc != ERR_OK) throwErr(QString("BL_StartChannel : %1").arg(impl_.errorMsg(rc)));
 
+        lastStartDetails_ = QString("[POTDBG] controller start: technique=OCV path=direct model=%1 boardType=%2 tech=%3 rest=%4 s recordDE=%5 V recordDt=%6 s")
+            .arg(connectedModel_)
+            .arg(impl_.boardType)
+            .arg(tech)
+            .arg(p.duration, 0, 'f', 3)
+            .arg(p.recordDE, 0, 'f', 6)
+            .arg(p.recordDt, 0, 'f', 3);
+
         return true;
     } catch (const std::exception& ex) {
         lastError_ = QString::fromUtf8(ex.what());
+        lastStartDetails_.clear();
+        return false;
+    }
+}
+
+bool BioLogicController::startCva(const CvaParams& p)
+{
+    std::lock_guard<std::mutex> lock(impl_.mutex);
+    try {
+        if (!impl_.isConnected()) throwErr("Non connecte");
+
+        const uint8 ch = static_cast<uint8>(p.channel - 1);
+
+        // The native CVA technique (biovscan.ecc) is only available on the
+        // legacy VMP3 family. On newer boards such as SP-50/SP-150, EC-Lab
+        // exposes the same workflow but the OEM SDK is more reliable when we
+        // sequence an initial hold, a VSCAN segment, then an optional final hold.
+        if (impl_.boardType != BOARD_ESSENTIAL) {
+            const auto loadCaHold =
+                [&](double voltage, bool vsInitial, double durationS, double recordDtS, bool first, bool last) {
+                    constexpr int kCaParamCount = 9;
+                    std::vector<TEccParam_t> params(kCaParamCount);
+
+                    impl_.blDefineSgl ("Voltage_step",    static_cast<float>(voltage),                    0, &params[0]);
+                    impl_.blDefineSgl ("Duration_step",   static_cast<float>(durationS),                  0, &params[1]);
+                    impl_.blDefineBool("vs_initial",      vsInitial,                                      0, &params[2]);
+                    impl_.blDefineInt ("Step_number",     0,                                              0, &params[3]);
+                    impl_.blDefineSgl ("Record_every_dT", static_cast<float>(std::max(recordDtS, 1e-3)), 0, &params[4]);
+                    impl_.blDefineInt ("I_Range",         p.iRange,                                       0, &params[5]);
+                    impl_.blDefineInt ("E_Range",         p.eRange,                                       0, &params[6]);
+                    impl_.blDefineInt ("Bandwidth",       p.bandwidth,                                    0, &params[7]);
+                    impl_.blDefineInt ("N_Cycles",        0,                                              0, &params[8]);
+
+                    TEccParams_t eccParams;
+                    eccParams.len = kCaParamCount;
+                    eccParams.pParams = params.data();
+
+                    const QString tech = impl_.techFile("ca4.ecc", "ca5.ecc", "ca.ecc");
+                    const int rc = impl_.blLoadTechnique(
+                        impl_.connectionId, ch, tech.toLatin1().constData(), eccParams, first, last, false);
+                    if (rc != ERR_OK) {
+                        throwErr(QString("BL_LoadTechnique CA (CVA emulee) : %1").arg(impl_.errorMsg(rc)));
+                    }
+                };
+
+            const auto loadVscan =
+                [&](bool first, bool last) {
+                    constexpr int kVertexCount = 4;
+                    constexpr int kParamCount = 20;
+                    std::vector<TEccParam_t> params(kParamCount);
+                    int paramIndex = 0;
+
+                    for (int i = 0; i < kVertexCount; ++i) {
+                        impl_.blDefineSgl(
+                            "Voltage_step",
+                            static_cast<float>(p.voltageScan[static_cast<std::size_t>(i)]),
+                            i,
+                            &params[paramIndex++]);
+                        impl_.blDefineBool(
+                            "vs_initial",
+                            p.vsInitialScan[static_cast<std::size_t>(i)],
+                            i,
+                            &params[paramIndex++]);
+                        impl_.blDefineSgl(
+                            "Scan_Rate",
+                            static_cast<float>(p.scanRateMvPerS[static_cast<std::size_t>(i)] * 1e-3),
+                            i,
+                            &params[paramIndex++]);
+                    }
+
+                    impl_.blDefineInt ("Scan_number",       2,                                     0, &params[paramIndex++]);
+                    impl_.blDefineInt ("N_Cycles",          p.nCycles,                             0, &params[paramIndex++]);
+                    impl_.blDefineSgl ("Record_every_dE",   static_cast<float>(p.recordDE),       0, &params[paramIndex++]);
+                    impl_.blDefineSgl ("Begin_measuring_I", static_cast<float>(p.beginMeasuringI),0, &params[paramIndex++]);
+                    impl_.blDefineSgl ("End_measuring_I",   static_cast<float>(p.endMeasuringI),  0, &params[paramIndex++]);
+                    impl_.blDefineInt ("I_Range",           p.iRange,                              0, &params[paramIndex++]);
+                    impl_.blDefineInt ("E_Range",           p.eRange,                              0, &params[paramIndex++]);
+                    impl_.blDefineInt ("Bandwidth",         p.bandwidth,                           0, &params[paramIndex++]);
+
+                    TEccParams_t eccParams;
+                    eccParams.len = paramIndex;
+                    eccParams.pParams = params.data();
+
+                    const QString tech = impl_.techFile("vscan4.ecc", "vscan5.ecc", "vscan.ecc");
+                    const int rc = impl_.blLoadTechnique(
+                        impl_.connectionId, ch, tech.toLatin1().constData(), eccParams, first, last, false);
+                    if (rc != ERR_OK) {
+                        throwErr(QString("BL_LoadTechnique VSCAN (CVA emulee) : %1").arg(impl_.errorMsg(rc)));
+                    }
+                };
+
+            const bool hasInitialHold = p.durationStep[0] > 1e-9;
+            const bool hasFinalHold = p.durationStep[1] > 1e-9;
+            bool firstTechnique = true;
+
+            if (hasInitialHold) {
+                loadCaHold(
+                    p.voltageStep[0],
+                    p.vsInitialStep[0],
+                    p.durationStep[0],
+                    p.recordDtStep[0],
+                    true,
+                    false);
+                firstTechnique = false;
+            }
+
+            loadVscan(firstTechnique, !hasFinalHold);
+
+            if (hasFinalHold) {
+                loadCaHold(
+                    p.voltageStep[1],
+                    p.vsInitialStep[1],
+                    p.durationStep[1],
+                    p.recordDtStep[1],
+                    false,
+                    true);
+            }
+        } else {
+            constexpr int kNativeParamCount = 31;
+            std::vector<TEccParam_t> params(kNativeParamCount);
+            int paramIndex = 0;
+
+            for (int i = 0; i < static_cast<int>(p.vsInitialScan.size()); ++i)
+                impl_.blDefineBool("vs_initial_scan", p.vsInitialScan[static_cast<std::size_t>(i)], i, &params[paramIndex++]);
+            for (int i = 0; i < static_cast<int>(p.voltageScan.size()); ++i)
+                impl_.blDefineSgl("Voltage_scan", static_cast<float>(p.voltageScan[static_cast<std::size_t>(i)]), i, &params[paramIndex++]);
+            for (int i = 0; i < static_cast<int>(p.scanRateMvPerS.size()); ++i)
+                impl_.blDefineSgl("Scan_Rate", static_cast<float>(p.scanRateMvPerS[static_cast<std::size_t>(i)]), i, &params[paramIndex++]);
+
+            impl_.blDefineInt ("Scan_number",       2,                                        0, &params[paramIndex++]);
+            impl_.blDefineSgl ("Record_every_dE",   static_cast<float>(p.recordDE),           0, &params[paramIndex++]);
+            impl_.blDefineBool("Average_over_dE",   p.averageOverDE,                          0, &params[paramIndex++]);
+            impl_.blDefineInt ("N_Cycles",          p.nCycles,                                0, &params[paramIndex++]);
+            impl_.blDefineSgl ("Begin_measuring_I", static_cast<float>(p.beginMeasuringI),    0, &params[paramIndex++]);
+            impl_.blDefineSgl ("End_measuring_I",   static_cast<float>(p.endMeasuringI),      0, &params[paramIndex++]);
+
+            for (int i = 0; i < static_cast<int>(p.vsInitialStep.size()); ++i)
+                impl_.blDefineBool("vs_initial_step", p.vsInitialStep[static_cast<std::size_t>(i)], i, &params[paramIndex++]);
+            for (int i = 0; i < static_cast<int>(p.voltageStep.size()); ++i)
+                impl_.blDefineSgl("Voltage_step", static_cast<float>(p.voltageStep[static_cast<std::size_t>(i)]), i, &params[paramIndex++]);
+            for (int i = 0; i < static_cast<int>(p.durationStep.size()); ++i)
+                impl_.blDefineSgl("Duration_step", static_cast<float>(p.durationStep[static_cast<std::size_t>(i)]), i, &params[paramIndex++]);
+
+            impl_.blDefineInt ("Step_number",      0,                                        0, &params[paramIndex++]);
+            impl_.blDefineSgl ("Record_every_dT",  static_cast<float>(p.recordDt),           0, &params[paramIndex++]);
+            impl_.blDefineSgl ("Record_every_dI",  static_cast<float>(p.recordDI),           0, &params[paramIndex++]);
+            impl_.blDefineBool("Trig_on_off",      p.trigOnOff,                              0, &params[paramIndex++]);
+            impl_.blDefineInt ("I_Range",          p.iRange,                                 0, &params[paramIndex++]);
+            impl_.blDefineInt ("E_Range",          p.eRange,                                 0, &params[paramIndex++]);
+            impl_.blDefineInt ("Bandwidth",        p.bandwidth,                              0, &params[paramIndex++]);
+
+            TEccParams_t eccParams;
+            eccParams.len = paramIndex;
+            eccParams.pParams = params.data();
+
+            QString tech = QDir(impl_.dllDir).filePath("biovscan.ecc");
+            if (!QFileInfo::exists(tech))
+                tech = "biovscan.ecc";
+
+            const int rc = impl_.blLoadTechnique(
+                impl_.connectionId, ch, tech.toLatin1().constData(), eccParams, true, true, false);
+            if (rc != ERR_OK) throwErr(QString("BL_LoadTechnique CVA : %1").arg(impl_.errorMsg(rc)));
+        }
+
+        const int rc = impl_.blStartChannel(impl_.connectionId, ch);
+        if (rc != ERR_OK) throwErr(QString("BL_StartChannel : %1").arg(impl_.errorMsg(rc)));
+
+        return true;
+    } catch (const std::exception& ex) {
+        lastError_ = QString::fromUtf8(ex.what());
+        return false;
+    }
+}
+
+bool BioLogicController::startCvaSimple(const CvaParams& p)
+{
+    std::lock_guard<std::mutex> lock(impl_.mutex);
+    try {
+        if (!impl_.isConnected()) throwErr("Non connecte");
+
+        const uint8 ch = static_cast<uint8>(p.channel - 1);
+        const bool useNativeCva = supportsNativeCvaForModel(connectedModel_);
+        lastStartDetails_.clear();
+
+        if (useNativeCva) {
+            constexpr int kNativeParamCount = 31;
+            std::vector<TEccParam_t> params(kNativeParamCount);
+            int paramIndex = 0;
+
+            for (int i = 0; i < static_cast<int>(p.vsInitialScan.size()); ++i)
+                impl_.blDefineBool("vs_initial_scan", p.vsInitialScan[static_cast<std::size_t>(i)], i, &params[paramIndex++]);
+            for (int i = 0; i < static_cast<int>(p.voltageScan.size()); ++i)
+                impl_.blDefineSgl("Voltage_scan", static_cast<float>(p.voltageScan[static_cast<std::size_t>(i)]), i, &params[paramIndex++]);
+            for (int i = 0; i < static_cast<int>(p.scanRateMvPerS.size()); ++i)
+                impl_.blDefineSgl("Scan_Rate", scanRateVoltsPerSecond(p.scanRateMvPerS[static_cast<std::size_t>(i)]), i, &params[paramIndex++]);
+
+            impl_.blDefineInt ("Scan_number",       2,                                        0, &params[paramIndex++]);
+            impl_.blDefineSgl ("Record_every_dE",   static_cast<float>(p.recordDE),           0, &params[paramIndex++]);
+            impl_.blDefineBool("Average_over_dE",   p.averageOverDE,                          0, &params[paramIndex++]);
+            impl_.blDefineInt ("N_Cycles",          p.nCycles,                                0, &params[paramIndex++]);
+            impl_.blDefineSgl ("Begin_measuring_I", static_cast<float>(p.beginMeasuringI),    0, &params[paramIndex++]);
+            impl_.blDefineSgl ("End_measuring_I",   static_cast<float>(p.endMeasuringI),      0, &params[paramIndex++]);
+
+            for (int i = 0; i < static_cast<int>(p.vsInitialStep.size()); ++i)
+                impl_.blDefineBool("vs_initial_step", p.vsInitialStep[static_cast<std::size_t>(i)], i, &params[paramIndex++]);
+            for (int i = 0; i < static_cast<int>(p.voltageStep.size()); ++i)
+                impl_.blDefineSgl("Voltage_step", static_cast<float>(p.voltageStep[static_cast<std::size_t>(i)]), i, &params[paramIndex++]);
+            for (int i = 0; i < static_cast<int>(p.durationStep.size()); ++i)
+                impl_.blDefineSgl("Duration_step", static_cast<float>(p.durationStep[static_cast<std::size_t>(i)]), i, &params[paramIndex++]);
+
+            impl_.blDefineInt ("Step_number",      0,                                        0, &params[paramIndex++]);
+            impl_.blDefineSgl ("Record_every_dT",  static_cast<float>(p.recordDt),           0, &params[paramIndex++]);
+            impl_.blDefineSgl ("Record_every_dI",  static_cast<float>(p.recordDI),           0, &params[paramIndex++]);
+            impl_.blDefineBool("Trig_on_off",      p.trigOnOff,                              0, &params[paramIndex++]);
+            impl_.blDefineInt ("I_Range",          p.iRange,                                 0, &params[paramIndex++]);
+            impl_.blDefineInt ("E_Range",          p.eRange,                                 0, &params[paramIndex++]);
+            impl_.blDefineInt ("Bandwidth",        p.bandwidth,                              0, &params[paramIndex++]);
+
+            TEccParams_t eccParams;
+            eccParams.len = paramIndex;
+            eccParams.pParams = params.data();
+
+            QString tech = QDir(impl_.dllDir).filePath("biovscan.ecc");
+            if (!QFileInfo::exists(tech))
+                tech = "biovscan.ecc";
+
+            int rc = impl_.blLoadTechnique(
+                impl_.connectionId, ch, tech.toLatin1().constData(), eccParams, true, true, false);
+            if (rc != ERR_OK) throwErr(QString("BL_LoadTechnique CVA : %1").arg(impl_.errorMsg(rc)));
+
+            rc = impl_.blStartChannel(impl_.connectionId, ch);
+            if (rc != ERR_OK) throwErr(QString("BL_StartChannel : %1").arg(impl_.errorMsg(rc)));
+
+            lastStartDetails_ = QString("[POTDBG] controller start: technique=CVA simple path=native-biovscan model=%1 boardType=%2 tech=%3 scanRateSdk=%4 V/s")
+                .arg(connectedModel_)
+                .arg(impl_.boardType)
+                .arg(tech)
+                .arg(scanRateVoltsPerSecond(p.scanRateMvPerS[1]), 0, 'f', 6);
+
+            return true;
+        }
+
+        const auto loadCaHold =
+            [&](double voltage, bool vsInitial, double durationS, double recordDtS, bool first, bool last) {
+                constexpr int kCaParamCount = 9;
+                std::vector<TEccParam_t> params(kCaParamCount);
+
+                impl_.blDefineSgl ("Voltage_step",    static_cast<float>(voltage),                    0, &params[0]);
+                impl_.blDefineSgl ("Duration_step",   static_cast<float>(durationS),                  0, &params[1]);
+                impl_.blDefineBool("vs_initial",      vsInitial,                                      0, &params[2]);
+                impl_.blDefineInt ("Step_number",     0,                                              0, &params[3]);
+                impl_.blDefineSgl ("Record_every_dT", static_cast<float>(std::max(recordDtS, 1e-3)), 0, &params[4]);
+                impl_.blDefineInt ("I_Range",         p.iRange,                                       0, &params[5]);
+                impl_.blDefineInt ("E_Range",         p.eRange,                                       0, &params[6]);
+                impl_.blDefineInt ("Bandwidth",       p.bandwidth,                                    0, &params[7]);
+                impl_.blDefineInt ("N_Cycles",        0,                                              0, &params[8]);
+
+                TEccParams_t eccParams;
+                eccParams.len = kCaParamCount;
+                eccParams.pParams = params.data();
+
+                const QString tech = impl_.techFile("ca4.ecc", "ca5.ecc", "ca.ecc");
+                const int rc = impl_.blLoadTechnique(
+                    impl_.connectionId, ch, tech.toLatin1().constData(), eccParams, first, last, false);
+                if (rc != ERR_OK) {
+                    throwErr(QString("BL_LoadTechnique CA (CVA simple) : %1").arg(impl_.errorMsg(rc)));
+                }
+            };
+
+        const auto loadCvScan =
+            [&](bool first, bool last) {
+                constexpr int kVertexCount = 5;
+                constexpr int kParamCount = 24;
+                std::vector<TEccParam_t> params(kParamCount);
+                int paramIndex = 0;
+
+                const std::array<double, kVertexCount> voltages = {
+                    p.voltageScan[0],
+                    p.voltageScan[1],
+                    p.voltageScan[2],
+                    p.voltageScan[0],
+                    p.voltageScan[3]
+                };
+                const std::array<bool, kVertexCount> vsInitial = {
+                    p.vsInitialScan[0],
+                    p.vsInitialScan[1],
+                    p.vsInitialScan[2],
+                    p.vsInitialScan[0],
+                    p.vsInitialScan[3]
+                };
+                const std::array<double, kVertexCount> scanRatesMvPerS = {
+                    0.0,
+                    p.scanRateMvPerS[1],
+                    p.scanRateMvPerS[2],
+                    p.scanRateMvPerS[1],
+                    p.scanRateMvPerS[3]
+                };
+
+                for (int i = 0; i < kVertexCount; ++i) {
+                    impl_.blDefineBool("vs_initial", vsInitial[static_cast<std::size_t>(i)], i, &params[paramIndex++]);
+                }
+                for (int i = 0; i < kVertexCount; ++i) {
+                    impl_.blDefineSgl("Voltage_step", static_cast<float>(voltages[static_cast<std::size_t>(i)]), i, &params[paramIndex++]);
+                }
+                for (int i = 0; i < kVertexCount; ++i) {
+                    impl_.blDefineSgl("Scan_Rate", scanRateVoltsPerSecond(scanRatesMvPerS[static_cast<std::size_t>(i)]), i, &params[paramIndex++]);
+                }
+
+                impl_.blDefineInt ("Scan_number",       2,                                     0, &params[paramIndex++]);
+                impl_.blDefineSgl ("Record_every_dE",   static_cast<float>(p.recordDE),       0, &params[paramIndex++]);
+                impl_.blDefineBool("Average_over_dE",   p.averageOverDE,                      0, &params[paramIndex++]);
+                impl_.blDefineInt ("N_Cycles",          p.nCycles,                             0, &params[paramIndex++]);
+                impl_.blDefineSgl ("Begin_measuring_I", static_cast<float>(p.beginMeasuringI),0, &params[paramIndex++]);
+                impl_.blDefineSgl ("End_measuring_I",   static_cast<float>(p.endMeasuringI),  0, &params[paramIndex++]);
+                impl_.blDefineInt ("I_Range",           p.iRange,                              0, &params[paramIndex++]);
+                impl_.blDefineInt ("E_Range",           p.eRange,                              0, &params[paramIndex++]);
+                impl_.blDefineInt ("Bandwidth",         p.bandwidth,                           0, &params[paramIndex++]);
+
+                TEccParams_t eccParams;
+                eccParams.len = paramIndex;
+                eccParams.pParams = params.data();
+
+                const QString tech = impl_.techFile("cv4.ecc", "cv5.ecc", "cv.ecc");
+                const int rc = impl_.blLoadTechnique(
+                    impl_.connectionId, ch, tech.toLatin1().constData(), eccParams, first, last, false);
+                if (rc != ERR_OK) {
+                    throwErr(QString("BL_LoadTechnique CV (CVA simple) : %1").arg(impl_.errorMsg(rc)));
+                }
+            };
+
+        const bool hasInitialHold = p.durationStep[0] > 1e-9;
+        const bool hasFinalHold = p.durationStep[1] > 1e-9;
+        bool firstTechnique = true;
+
+        if (hasInitialHold) {
+            loadCaHold(
+                p.voltageStep[0],
+                p.vsInitialStep[0],
+                p.durationStep[0],
+                p.recordDtStep[0],
+                true,
+                false);
+            firstTechnique = false;
+        }
+
+        loadCvScan(firstTechnique, !hasFinalHold);
+
+        if (hasFinalHold) {
+            loadCaHold(
+                p.voltageStep[1],
+                p.vsInitialStep[1],
+                p.durationStep[1],
+                p.recordDtStep[1],
+                false,
+                true);
+        }
+
+        const int rc = impl_.blStartChannel(impl_.connectionId, ch);
+        if (rc != ERR_OK) throwErr(QString("BL_StartChannel : %1").arg(impl_.errorMsg(rc)));
+
+        lastStartDetails_ = QString("[POTDBG] controller start: technique=CVA simple path=emulated-ca-cv-ca model=%1 boardType=%2 tech=cv scanRateSdk=%3 V/s holdEi=%4 s holdEf=%5 s")
+            .arg(connectedModel_)
+            .arg(impl_.boardType)
+            .arg(scanRateVoltsPerSecond(p.scanRateMvPerS[1]), 0, 'f', 6)
+            .arg(p.durationStep[0], 0, 'f', 3)
+            .arg(p.durationStep[1], 0, 'f', 3);
+
+        return true;
+    } catch (const std::exception& ex) {
+        lastError_ = QString::fromUtf8(ex.what());
+        lastStartDetails_.clear();
         return false;
     }
 }
@@ -346,11 +762,13 @@ PotDataResult BioLogicController::getData(int channel)
 
         result.ok      = true;
         result.stopped = (curr.State == KBIO_STATE_STOP);
+        result.techniqueId = info.TechniqueID;
+        result.processIndex = info.ProcessIndex;
+        result.nbRows = info.NbRows;
+        result.nbCols = info.NbCols;
+        result.currentState = curr.State;
+        result.startTime = info.StartTime;
 
-        // Data layout per row: [t_lo, t_hi, Ewe, I?, ...] (NbCols columns)
-        // Column 0-1 : time encoding -> BL_ConvertTimeChannelNumericIntoSeconds
-        // Column 2   : Ewe (V)
-        // Column 3   : I (A)  -- only for CA (NbCols >= 4)
         for (int i = 0; i < info.NbRows; ++i) {
             const int offset = i * info.NbCols;
 
@@ -362,12 +780,47 @@ PotDataResult BioLogicController::getData(int channel)
             }
 
             float ewe = 0.0f;
-            if (info.NbCols >= 3 && impl_.blConvertNumSgl)
-                impl_.blConvertNumSgl(buf.data[offset + 2], &ewe, impl_.boardType);
-
             float I = 0.0f;
-            if (info.NbCols >= 4 && impl_.blConvertNumSgl)
-                impl_.blConvertNumSgl(buf.data[offset + 3], &I, impl_.boardType);
+            switch (info.TechniqueID) {
+            case KBIO_TECHID_CV:
+            case KBIO_TECHID_CVA:
+            case KBIO_TECHID_PDYN:
+                // CV/CVA/VSCAN scans return VMP3 rows as:
+                //   t_high, t_low, Ec, <I>, <Ewe>, cycle
+                // and VMP-300/SP rows as:
+                //   t_high, t_low, <I>, <Ewe>, cycle
+                if (impl_.blConvertNumSgl) {
+                    if (info.NbCols >= 6) {
+                        impl_.blConvertNumSgl(buf.data[offset + 3], &I, impl_.boardType);
+                        impl_.blConvertNumSgl(buf.data[offset + 4], &ewe, impl_.boardType);
+                    } else if (info.NbCols >= 5) {
+                        impl_.blConvertNumSgl(buf.data[offset + 2], &I, impl_.boardType);
+                        impl_.blConvertNumSgl(buf.data[offset + 3], &ewe, impl_.boardType);
+                    } else if (info.NbCols >= 4) {
+                        impl_.blConvertNumSgl(buf.data[offset + 2], &ewe, impl_.boardType);
+                        impl_.blConvertNumSgl(buf.data[offset + 3], &I, impl_.boardType);
+                    }
+                }
+                break;
+            case KBIO_TECHID_OCV:
+                // Official OCV format: t_high, t_low, Ewe, [Ece].
+                if (info.NbCols >= 3 && impl_.blConvertNumSgl) {
+                    impl_.blConvertNumSgl(buf.data[offset + 2], &ewe, impl_.boardType);
+                }
+                I = 0.0f;
+                break;
+            case KBIO_TECHID_CA:
+            case KBIO_TECHID_CP:
+            default:
+                // CA/CP format: t_high, t_low, Ewe, I, cycle.
+                if (info.NbCols >= 3 && impl_.blConvertNumSgl) {
+                    impl_.blConvertNumSgl(buf.data[offset + 2], &ewe, impl_.boardType);
+                }
+                if (info.NbCols >= 4 && impl_.blConvertNumSgl) {
+                    impl_.blConvertNumSgl(buf.data[offset + 3], &I, impl_.boardType);
+                }
+                break;
+            }
 
             result.points.push_back({t, static_cast<double>(ewe), static_cast<double>(I)});
         }

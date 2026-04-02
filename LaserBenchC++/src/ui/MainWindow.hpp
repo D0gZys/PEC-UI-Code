@@ -26,6 +26,7 @@ class QCloseEvent;
 class QComboBox;
 class QDialog;
 class QEvent;
+class QGroupBox;
 class QLabel;
 class QLineEdit;
 class QObject;
@@ -58,6 +59,8 @@ public:
     struct ScanConfig {
         enum class AcquisitionMode { PointByPoint, Continuous };
         enum class ContinuousTrigger { Distance, Time };
+        enum class RectangleStartCorner { TopLeft, TopRight, BottomLeft, BottomRight };
+        enum class RectanglePrimaryAxis { Horizontal, Vertical };
 
         AcquisitionMode   mode             {AcquisitionMode::PointByPoint};
         // Point par point
@@ -69,6 +72,9 @@ public:
         double            triggerDistanceMm{0.1};
         double            triggerTimeS     {1.0};
         double            rowStepMm        {0.05};
+        RectangleStartCorner rectangleStartCorner {RectangleStartCorner::TopLeft};
+        RectanglePrimaryAxis rectanglePrimaryAxis {RectanglePrimaryAxis::Horizontal};
+        bool              rectangleTraversalExplicit {false};
     };
 
 public:
@@ -90,6 +96,7 @@ private:
     void buildMenus();
     void buildUi();
     QWidget* buildSetupTab();
+    QWidget* buildPotentiostatTab();
     QWidget* buildMeasureTab();
     void openStartupConnectionDialog();
     void openMotorConnectionDialog();
@@ -125,6 +132,10 @@ private:
     void stopCameraPolling();
     void cameraPollingLoop();
     void appendLog(const QString& message);
+    void initializeMeasurementLog(const QString& fileStem, const QStringList& headerLines);
+    void appendMeasurementLog(const QString& message);
+    void appendMeasurementLogEvent(const QString& category, const QString& message);
+    void finalizeMeasurementLog(const QString& outcome);
     void runMotorTask(const QString& label, std::function<MotorTaskResult()> worker);
     void startMotorPolling();
     void stopMotorPolling();
@@ -142,6 +153,7 @@ private:
     void onExportPotentiostatMatrix();
     void onDisconnectPotentiostat();
     void onLoadFirmware();
+    void syncPotentiostatTechniqueUi();
 
     void onScanPorts();
     void onConnectAxes();
@@ -236,6 +248,8 @@ private:
     QString pendingMotorPollError_;
     QString pendingCameraPollError_;
     QString sessionLogPath_;
+    QString measurementLogPath_;
+    bool measurementLogActive_ {false};
     bool motorTaskRunning_ {false};
     bool sequenceRunning_ {false};
     bool gotoArmed_ {false};
@@ -281,7 +295,9 @@ private:
     QLabel* cameraSummaryLabel_ {nullptr};
     QLabel* potentiostatSummaryLabel_ {nullptr};
     QLabel* mouseCoordsLabel_ {nullptr};
+    QLabel* cameraPageStatusLabel_ {nullptr};
     QComboBox*   potentiostatTechniqueCombo_    {nullptr};
+    QStackedWidget* potentiostatTechniqueStack_ {nullptr};
     QLineEdit*   potentiostatDllPathEdit_      {nullptr};
     QLineEdit*   potentiostatAddressEdit_      {nullptr};
     QComboBox*   potentiostatChannelCombo_     {nullptr};
@@ -295,6 +311,45 @@ private:
     QLabel*      potentiostatPointCountLabel_  {nullptr};
     QLabel*      potentiostatProgressLabel_    {nullptr};
     QLineEdit*   potentiostatNbCyclesEdit_     {nullptr};
+    QLineEdit*   potentiostatOcvRestHoursEdit_   {nullptr};
+    QLineEdit*   potentiostatOcvRestMinutesEdit_ {nullptr};
+    QLineEdit*   potentiostatOcvRestSecondsEdit_ {nullptr};
+    QLineEdit*   potentiostatOcvRecordDEEdit_    {nullptr};
+    QLineEdit*   potentiostatOcvRecordDtEdit_    {nullptr};
+    QComboBox*   potentiostatOcvErangeCombo_     {nullptr};
+    QLineEdit*   potentiostatCvaEiEdit_          {nullptr};
+    QComboBox*   potentiostatCvaEiVsCombo_       {nullptr};
+    QLineEdit*   potentiostatCvaTiHoursEdit_     {nullptr};
+    QLineEdit*   potentiostatCvaTiMinutesEdit_   {nullptr};
+    QLineEdit*   potentiostatCvaTiSecondsEdit_   {nullptr};
+    QLineEdit*   potentiostatCvaDtiEdit_         {nullptr};
+    QLineEdit*   potentiostatCvaScanRateEdit_    {nullptr};
+    QComboBox*   potentiostatCvaScanRateUnitCombo_ {nullptr};
+    QLineEdit*   potentiostatCvaE1Edit_          {nullptr};
+    QComboBox*   potentiostatCvaE1VsCombo_       {nullptr};
+    QLineEdit*   potentiostatCvaT1HoursEdit_     {nullptr};
+    QLineEdit*   potentiostatCvaT1MinutesEdit_   {nullptr};
+    QLineEdit*   potentiostatCvaT1SecondsEdit_   {nullptr};
+    QLineEdit*   potentiostatCvaDt1Edit_         {nullptr};
+    QLineEdit*   potentiostatCvaE2Edit_          {nullptr};
+    QComboBox*   potentiostatCvaE2VsCombo_       {nullptr};
+    QLineEdit*   potentiostatCvaT2HoursEdit_     {nullptr};
+    QLineEdit*   potentiostatCvaT2MinutesEdit_   {nullptr};
+    QLineEdit*   potentiostatCvaT2SecondsEdit_   {nullptr};
+    QLineEdit*   potentiostatCvaDt2Edit_         {nullptr};
+    QLineEdit*   potentiostatCvaMeasurePercentEdit_ {nullptr};
+    QLineEdit*   potentiostatCvaAverageNStepsEdit_ {nullptr};
+    QLineEdit*   potentiostatCvaRepeatCyclesEdit_ {nullptr};
+    QComboBox*   potentiostatCvaErangeCombo_     {nullptr};
+    QComboBox*   potentiostatCvaCurrentRangeCombo_ {nullptr};
+    QComboBox*   potentiostatCvaBandwidthCombo_  {nullptr};
+    QCheckBox*   potentiostatCvaEndScanCheck_    {nullptr};
+    QLineEdit*   potentiostatCvaEfEdit_          {nullptr};
+    QComboBox*   potentiostatCvaEfVsCombo_       {nullptr};
+    QLineEdit*   potentiostatCvaTfHoursEdit_     {nullptr};
+    QLineEdit*   potentiostatCvaTfMinutesEdit_   {nullptr};
+    QLineEdit*   potentiostatCvaTfSecondsEdit_   {nullptr};
+    QLineEdit*   potentiostatCvaDtfEdit_         {nullptr};
     QComboBox*   potentiostatGraphTypeCombo_   {nullptr};
     QPushButton* colorGraphButton_             {nullptr};
     QPushButton* potentiostatConnectButton_    {nullptr};
@@ -304,6 +359,8 @@ private:
     QPushButton* potentiostatRunButton_        {nullptr};
     QPushButton* potentiostatStopButton_       {nullptr};
     QPushButton* potentiostatExportButton_     {nullptr};
+    QGroupBox*   potentiostatGraphBox_         {nullptr};
+    QGroupBox*   potentiostatMapBox_           {nullptr};
     PotentiostatGraphWidget*  potentiostatGraphWidget_  {nullptr};
     PotentiostatHeatmapWidget* potentiostatHeatmapWidget_ {nullptr};
     Potentiostat3DWidget*     potentiostat3DWidget_     {nullptr};
@@ -384,6 +441,8 @@ private:
     QPushButton* scanCameraButton_ {nullptr};
     QPushButton* connectCameraButton_ {nullptr};
     QPushButton* disconnectCameraButton_ {nullptr};
+    QPushButton* cameraPageLiveButton_ {nullptr};
+    QPushButton* cameraPageStopButton_ {nullptr};
     QPushButton* applyCameraSettingsButton_ {nullptr};
     QPushButton* startCameraLiveButton_ {nullptr};
     QPushButton* stopCameraLiveButton_ {nullptr};
@@ -417,6 +476,20 @@ private:
     void onPreviewFrameDoubleClicked(const QPoint& framePointPx);
     void onCapturePosition();
     void showScanConfigDialog();
+    [[nodiscard]] std::optional<std::pair<ScanConfig::RectangleStartCorner, ScanConfig::RectanglePrimaryAxis>> promptRectangleTraversalSelection();
+    [[nodiscard]] ScanConfig::RectangleStartCorner effectiveRectangleStartCorner() const;
+    [[nodiscard]] ScanConfig::RectanglePrimaryAxis effectiveRectanglePrimaryAxis() const;
+    [[nodiscard]] std::vector<std::pair<int, int>> buildRectangleTraversalOrder(int rows, int cols) const;
+    [[nodiscard]] QString selectedPotentiostatTechniqueLabel() const;
+
+    enum class PotentiostatTechnique
+    {
+        CA,
+        OCV,
+        CVA
+    };
+
+    [[nodiscard]] PotentiostatTechnique selectedPotentiostatTechnique() const;
 
     ScanConfig scanConfig_;
 };
