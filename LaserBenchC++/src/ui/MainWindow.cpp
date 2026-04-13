@@ -13,6 +13,7 @@
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QRadioButton>
+#include <QSpinBox>
 #include <QEvent>
 #include <QFile>
 #include <QFileDialog>
@@ -37,9 +38,11 @@
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QScrollArea>
 #include <QSplitter>
 #include <QStackedWidget>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QTimer>
@@ -55,6 +58,8 @@
 #include <chrono>
 #include <cmath>
 #include <exception>
+#include <map>
+#include <numeric>
 #include <thread>
 #include <variant>
 
@@ -79,6 +84,7 @@ constexpr double kScanPlanningEpsilonMm = 1e-9;
 constexpr double kContinuousPollingPeriodS = 0.002;
 constexpr double kContinuousGuaranteedSamplePeriodS = 0.02;
 constexpr double kContinuousFreshValueTimeoutS = 0.25;
+constexpr double kContinuousRunUpMm = 0.04;
 
 QGroupBox* createGroupBox(const QString& title)
 {
@@ -953,6 +959,85 @@ ContinuousRasterPlan buildContinuousLinearPlan(const QPointF& startMm, const QPo
     return plan;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Minimal uncompressed baseline TIFF writer (RGB24, little-endian).
+// Indépendant du plugin Qt imageformats/qtiff.
+// ─────────────────────────────────────────────────────────────────────────────
+bool saveTiff(const QImage& src, const QString& filePath)
+{
+    const QImage img = src.convertToFormat(QImage::Format_RGB32);
+    const int W = img.width(), H = img.height();
+    if (W <= 0 || H <= 0) return false;
+
+    // Offsets dans le fichier :
+    //   0   : header TIFF (8 octets)
+    //   8   : IFD  (2 + 11×12 + 4 = 138 octets)
+    //   146 : BitsPerSample extra (3 × uint16 = 6 octets)
+    //   152 : XResolution rational (2 × uint32 = 8 octets)
+    //   160 : YResolution rational (2 × uint32 = 8 octets)
+    //   168 : données pixel (W × H × 3 octets)
+    constexpr quint32 kIfdOffset  = 8;
+    constexpr quint32 kBpsOffset  = 146;
+    constexpr quint32 kXResOffset = 152;
+    constexpr quint32 kYResOffset = 160;
+    constexpr quint32 kDataOffset = 168;
+    const quint32 dataSize = static_cast<quint32>(W) * static_cast<quint32>(H) * 3u;
+
+    QByteArray buf(static_cast<int>(kDataOffset + dataSize), '\0');
+
+    auto w16 = [&](int off, quint16 v) {
+        buf[off]     = static_cast<char>(v & 0xFF);
+        buf[off + 1] = static_cast<char>((v >> 8) & 0xFF);
+    };
+    auto w32 = [&](int off, quint32 v) {
+        buf[off]     = static_cast<char>(v & 0xFF);
+        buf[off + 1] = static_cast<char>((v >>  8) & 0xFF);
+        buf[off + 2] = static_cast<char>((v >> 16) & 0xFF);
+        buf[off + 3] = static_cast<char>((v >> 24) & 0xFF);
+    };
+    auto wEntry = [&](int off, quint16 tag, quint16 type, quint32 count, quint32 val) {
+        w16(off, tag); w16(off + 2, type); w32(off + 4, count); w32(off + 8, val);
+    };
+
+    buf[0] = 'I'; buf[1] = 'I';
+    w16(2, 42); w32(4, kIfdOffset);
+
+    constexpr int kNEntries = 11;
+    w16(static_cast<int>(kIfdOffset), kNEntries);
+    int e = static_cast<int>(kIfdOffset) + 2;
+    wEntry(e, 256, 4, 1, static_cast<quint32>(W));  e += 12; // ImageWidth
+    wEntry(e, 257, 4, 1, static_cast<quint32>(H));  e += 12; // ImageLength
+    wEntry(e, 258, 3, 3, kBpsOffset);               e += 12; // BitsPerSample (offset)
+    wEntry(e, 259, 3, 1, 1);                        e += 12; // Compression: none
+    wEntry(e, 262, 3, 1, 2);                        e += 12; // PhotometricInterp: RGB
+    wEntry(e, 273, 4, 1, kDataOffset);              e += 12; // StripOffsets
+    wEntry(e, 277, 3, 1, 3);                        e += 12; // SamplesPerPixel
+    wEntry(e, 278, 4, 1, static_cast<quint32>(H));  e += 12; // RowsPerStrip
+    wEntry(e, 279, 4, 1, dataSize);                 e += 12; // StripByteCounts
+    wEntry(e, 282, 5, 1, kXResOffset);              e += 12; // XResolution
+    wEntry(e, 283, 5, 1, kYResOffset);              e += 12; // YResolution
+    w32(e, 0); // next IFD = 0
+
+    w16(static_cast<int>(kBpsOffset),     8);
+    w16(static_cast<int>(kBpsOffset) + 2, 8);
+    w16(static_cast<int>(kBpsOffset) + 4, 8);
+    w32(static_cast<int>(kXResOffset),     96); w32(static_cast<int>(kXResOffset) + 4, 1);
+    w32(static_cast<int>(kYResOffset),     96); w32(static_cast<int>(kYResOffset) + 4, 1);
+
+    int pos = static_cast<int>(kDataOffset);
+    for (int y = 0; y < H; ++y) {
+        const QRgb* line = reinterpret_cast<const QRgb*>(img.constScanLine(y));
+        for (int x = 0; x < W; ++x) {
+            buf[pos++] = static_cast<char>(qRed(line[x]));
+            buf[pos++] = static_cast<char>(qGreen(line[x]));
+            buf[pos++] = static_cast<char>(qBlue(line[x]));
+        }
+    }
+    QFile f(filePath);
+    if (!f.open(QIODevice::WriteOnly)) return false;
+    return f.write(buf) == static_cast<qint64>(buf.size());
+}
+
 }  // namespace
 
 MainWindow::MainWindow(QWidget* parent)
@@ -1299,6 +1384,7 @@ void MainWindow::buildUi()
     tabWidget_->addTab(buildSetupTab(), "Camera");
     tabWidget_->addTab(buildPotentiostatTab(), "Potentiostat");
     tabWidget_->addTab(buildMeasureTab(), "Resultat");
+    tabWidget_->addTab(buildImportTab(), "Import");
     mainLayout->addWidget(tabWidget_, 1);
 
     setCentralWidget(central);
@@ -2161,7 +2247,7 @@ void MainWindow::openStartupConnectionDialog()
 
         // IP + channel
         potConnGrid->addWidget(new QLabel("IP"), 1, 0);
-        potentiostatAddressEdit_ = new QLineEdit("169.254.3.150");
+        potentiostatAddressEdit_ = new QLineEdit("192.109.209.128");
         potConnGrid->addWidget(potentiostatAddressEdit_, 1, 1);
         potConnGrid->addWidget(new QLabel("Canal"), 1, 2);
         potentiostatChannelCombo_ = new QComboBox;
@@ -2959,8 +3045,14 @@ std::vector<QPointF> MainWindow::buildWaypointsRect(const QPointF& startMm, cons
     const double yMin = std::min(startMm.y(), endMm.y());
     const double yMax = std::max(startMm.y(), endMm.y());
 
-    const int cols = std::max(1, static_cast<int>(std::lround((xMax - xMin) / stepMm))) + 1;
-    const int rows = std::max(1, static_cast<int>(std::lround((yMax - yMin) / stepMm))) + 1;
+    // Use ceil to ensure the zone covers all points at the exact step distance.
+    // The zone is slightly enlarged if the span is not an exact multiple of stepMm.
+    const int xIntervals = std::max(1, static_cast<int>(std::ceil((xMax - xMin) / stepMm - 1e-9)));
+    const int yIntervals = std::max(1, static_cast<int>(std::ceil((yMax - yMin) / stepMm - 1e-9)));
+    const int cols = xIntervals + 1;
+    const int rows = yIntervals + 1;
+    const double effectiveXSpan = static_cast<double>(xIntervals) * stepMm;
+    const double effectiveYSpan = static_cast<double>(yIntervals) * stepMm;
 
     const auto scale = currentGotoScale();
     const bool visualLeftToRightIsIncreasingX = scale.first > 0.0;
@@ -2969,21 +3061,21 @@ std::vector<QPointF> MainWindow::buildWaypointsRect(const QPointF& startMm, cons
     std::vector<double> xRangeVisual;
     xRangeVisual.reserve(static_cast<std::size_t>(cols));
     for (int i = 0; i < cols; ++i) {
-        const double t = cols <= 1 ? 0.0 : static_cast<double>(i) / static_cast<double>(cols - 1);
+        const double pos = xMin + static_cast<double>(i) * stepMm;
         xRangeVisual.push_back(
             visualLeftToRightIsIncreasingX
-                ? (xMin + ((xMax - xMin) * t))
-                : (xMax - ((xMax - xMin) * t)));
+                ? pos
+                : (xMin + effectiveXSpan - static_cast<double>(i) * stepMm));
     }
 
     std::vector<double> yRangeVisual;
     yRangeVisual.reserve(static_cast<std::size_t>(rows));
     for (int j = 0; j < rows; ++j) {
-        const double t = rows <= 1 ? 0.0 : static_cast<double>(j) / static_cast<double>(rows - 1);
+        const double pos = yMin + static_cast<double>(j) * stepMm;
         yRangeVisual.push_back(
             visualTopToBottomIsIncreasingY
-                ? (yMin + ((yMax - yMin) * t))
-                : (yMax - ((yMax - yMin) * t)));
+                ? pos
+                : (yMin + effectiveYSpan - static_cast<double>(j) * stepMm));
     }
 
     std::vector<QPointF> waypoints;
@@ -3574,6 +3666,12 @@ void MainWindow::onRunSequence()
                 }
 
                 const QPointF waypoint = waypoints[static_cast<std::size_t>(index)];
+                // Determine which axes actually need to move by comparing to the
+                // previous waypoint (avoids motor noise / settling issues with live snapshot).
+                const bool needMoveX = (index == 0)
+                    || std::abs(waypoint.x() - waypoints[static_cast<std::size_t>(index - 1)].x()) > 1e-6;
+                const bool needMoveY = (index == 0)
+                    || std::abs(waypoint.y() - waypoints[static_cast<std::size_t>(index - 1)].y()) > 1e-6;
                 QMetaObject::invokeMethod(this, [this, index, total, waypoint]() {
                     currentWaypointIndex_ = index;
                     if (sequenceStatusLabel_ != nullptr) {
@@ -3586,7 +3684,9 @@ void MainWindow::onRunSequence()
                 }, Qt::QueuedConnection);
 
                 const auto stepBoth = controller->snapshotBoth();
-                if (stepBoth.x.positionValid && stepBoth.y.positionValid) {
+
+                if (stepBoth.x.positionValid && stepBoth.y.positionValid
+                    && (needMoveX || needMoveY)) {
                     startPredictedMotorMotion(
                         stepBoth.x.positionMm,
                         stepBoth.y.positionMm,
@@ -3597,10 +3697,10 @@ void MainWindow::onRunSequence()
                     );
                 }
 
-                controller->moveAbsoluteNoWait(hardware::AxisId::X, waypoint.x());
-                controller->moveAbsoluteNoWait(hardware::AxisId::Y, waypoint.y());
-                controller->waitAxis(hardware::AxisId::X, kDefaultMotorTimeoutMs);
-                controller->waitAxis(hardware::AxisId::Y, kDefaultMotorTimeoutMs);
+                if (needMoveX) controller->moveAbsoluteNoWait(hardware::AxisId::X, waypoint.x());
+                if (needMoveY) controller->moveAbsoluteNoWait(hardware::AxisId::Y, waypoint.y());
+                if (needMoveX) controller->waitAxis(hardware::AxisId::X, kDefaultMotorTimeoutMs);
+                if (needMoveY) controller->waitAxis(hardware::AxisId::Y, kDefaultMotorTimeoutMs);
                 stopPredictedMotorMotion(waypoint.x(), waypoint.y());
                 const QString waypointMotorText = currentMotorPositionLogText(controller);
                 QMetaObject::invokeMethod(this, [this, index, total, waypoint, waypointMotorText]() {
@@ -4020,12 +4120,12 @@ QWidget* MainWindow::buildMeasureTab()
     potentiostatProgressLabel_->setStyleSheet("font-weight:600; color:#111927;");
     potStatusLayout->addWidget(potentiostatProgressLabel_, 4, 2, 1, 2);
 
-    potentiostatExportButton_ = createActionButton("Exporter (.gsf)");
+    potentiostatExportButton_ = createActionButton("Exporter...");
     potStatusLayout->addWidget(potentiostatExportButton_, 5, 0, 1, 4);
 
     connect(potentiostatRunButton_,    &QPushButton::clicked, this, &MainWindow::onStartCaPotentiostat);
     connect(potentiostatStopButton_,   &QPushButton::clicked, this, &MainWindow::onStopCaPotentiostat);
-    connect(potentiostatExportButton_, &QPushButton::clicked, this, &MainWindow::onExportPotentiostatMatrix);
+    connect(potentiostatExportButton_, &QPushButton::clicked, this, &MainWindow::onExportPotentiostat);
     potentiostatRunButton_->setEnabled(false);
     potentiostatStopButton_->setEnabled(false);
     potentiostatExportButton_->setEnabled(false);
@@ -4089,6 +4189,8 @@ QWidget* MainWindow::buildMeasureTab()
     auto* mapLayout = new QVBoxLayout(potentiostatMapBox_);
     potentiostatHeatmapWidget_ = new PotentiostatHeatmapWidget;
     mapLayout->addWidget(potentiostatHeatmapWidget_, 1);
+    connect(potentiostatHeatmapWidget_, &PotentiostatHeatmapWidget::cellClicked,
+            this, &MainWindow::showCellDetailDialog);
     rightLayout2D->addWidget(potentiostatMapBox_, 1);
 
     measureRightStack_->addWidget(rightPanel2D);  // index 0
@@ -4109,12 +4211,112 @@ QWidget* MainWindow::buildMeasureTab()
     return page;
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  Import tab — independent visualization for imported CSV data
+// ══════════════════════════════════════════════════════════════════════════════
+QWidget* MainWindow::buildImportTab()
+{
+    auto* page = new QWidget;
+    auto* outerLayout = new QHBoxLayout(page);
+    outerLayout->setContentsMargins(10, 10, 10, 10);
+    outerLayout->setSpacing(10);
+
+    auto* splitter = new QSplitter(Qt::Horizontal);
+    outerLayout->addWidget(splitter);
+
+    // ── Left panel ────────────────────────────────────────────────────────────
+    auto* leftPanel = new QWidget;
+    leftPanel->setMinimumWidth(280);
+    auto* leftLayout = new QVBoxLayout(leftPanel);
+    leftLayout->setContentsMargins(0, 0, 0, 0);
+    leftLayout->setSpacing(6);
+
+    auto* importBox = createGroupBox("Importer");
+    auto* importLayout = new QVBoxLayout(importBox);
+    importButton_ = createActionButton("Importer CSV...");
+    importLayout->addWidget(importButton_);
+    importInfoLabel_ = new QLabel("Aucun fichier importé");
+    importInfoLabel_->setWordWrap(true);
+    importLayout->addWidget(importInfoLabel_);
+    leftLayout->addWidget(importBox);
+
+    auto* graphModeBox = createGroupBox("Graphe");
+    auto* graphModeLayout = new QGridLayout(graphModeBox);
+    graphModeLayout->addWidget(new QLabel("Type"), 0, 0);
+    importGraphTypeCombo_ = new QComboBox;
+    importGraphTypeCombo_->addItems({"I = f(t)", "Ewe = f(t)", "I = f(Ewe)", "Ewe = f(I)"});
+    graphModeLayout->addWidget(importGraphTypeCombo_, 0, 1);
+    connect(importGraphTypeCombo_, &QComboBox::currentIndexChanged, this, [this](int) {
+        refreshImportVisualization();
+    });
+    leftLayout->addWidget(graphModeBox);
+
+    importView3DButton_ = createActionButton("Vue 3D");
+    importView3DButton_->setCheckable(true);
+    importView3DButton_->setVisible(false);
+    connect(importView3DButton_, &QPushButton::toggled, this, [this](bool checked) {
+        if (importRightStack_ != nullptr) {
+            importRightStack_->setCurrentIndex(checked ? 1 : 0);
+        }
+        importView3DButton_->setText(checked ? "Vue 2D" : "Vue 3D");
+    });
+    leftLayout->addWidget(importView3DButton_);
+
+    leftLayout->addStretch();
+
+    // ── Right panel ───────────────────────────────────────────────────────────
+    importRightStack_ = new QStackedWidget;
+
+    // Page 0: 2D graph + heatmap
+    auto* page2D = new QWidget;
+    auto* layout2D = new QVBoxLayout(page2D);
+    layout2D->setContentsMargins(0, 0, 0, 0);
+
+    importGraphBox_ = createGroupBox("Courbes");
+    auto* graphLayout = new QVBoxLayout(importGraphBox_);
+    importGraphWidget_ = new PotentiostatGraphWidget;
+    graphLayout->addWidget(importGraphWidget_, 1);
+    layout2D->addWidget(importGraphBox_, 1);
+
+    importMapBox_ = createGroupBox("Cartographie");
+    importMapBox_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+    auto* mapLayout = new QVBoxLayout(importMapBox_);
+    importHeatmapWidget_ = new PotentiostatHeatmapWidget;
+    mapLayout->addWidget(importHeatmapWidget_, 1);
+    connect(importHeatmapWidget_, &PotentiostatHeatmapWidget::cellClicked,
+            this, &MainWindow::showImportCellDetailDialog);
+    layout2D->addWidget(importMapBox_, 1);
+    importRightStack_->addWidget(page2D);  // index 0
+
+    // Page 1: 3D surface
+    auto* map3DBox = createGroupBox("Surface 3D");
+    auto* map3DLayout = new QVBoxLayout(map3DBox);
+    import3DWidget_ = new Potentiostat3DWidget;
+    map3DLayout->addWidget(import3DWidget_, 1);
+    importRightStack_->addWidget(map3DBox);  // index 1
+
+    splitter->addWidget(leftPanel);
+    splitter->addWidget(importRightStack_);
+    splitter->setStretchFactor(0, 0);
+    splitter->setStretchFactor(1, 1);
+    splitter->setSizes({300, 900});
+
+    connect(importButton_, &QPushButton::clicked, this, &MainWindow::onImportCsv);
+
+    return page;
+}
+
 void MainWindow::clearPotentiostatVisualization()
 {
     potentiostatPlotTimes_.clear();
     potentiostatPlotCurrents_.clear();
     potentiostatPlotEwe_.clear();
     potentiostatMatrix_.clear();
+    potentiostatCellCurrentSamples_.clear();
+    potentiostatCellEweSamples_.clear();
+    potentiostatEweMatrix_.clear();
+    potentiostatCellPositions_.clear();
+    potentiostatCellTimes_.clear();
     potentiostatScanOrder_.clear();
     potentiostatRows_ = 0;
     potentiostatCols_ = 0;
@@ -4144,6 +4346,11 @@ void MainWindow::resetPotentiostatVisualization(int rows, int cols, const std::v
     potentiostatCols_ = cols;
     potentiostatScanOrder_ = order;
     potentiostatMatrix_.assign(static_cast<std::size_t>(std::max(0, rows * cols)), std::nullopt);
+    potentiostatCellCurrentSamples_.assign(static_cast<std::size_t>(std::max(0, rows * cols)), {});
+    potentiostatEweMatrix_.assign(static_cast<std::size_t>(std::max(0, rows * cols)), std::nullopt);
+    potentiostatCellEweSamples_.assign(static_cast<std::size_t>(std::max(0, rows * cols)), {});
+    potentiostatCellPositions_.assign(static_cast<std::size_t>(std::max(0, rows * cols)), QPointF());
+    potentiostatCellTimes_.assign(static_cast<std::size_t>(std::max(0, rows * cols)), 0.0);
     refreshPotentiostatVisualization();
 }
 
@@ -4155,7 +4362,9 @@ void MainWindow::appendPotentiostatVisualizationSample(
     const QPointF& waypointMm,
     double elapsedTime,
     double ewe,
-    double current
+    double current,
+    std::vector<double> cellCurrentSamples,
+    std::vector<double> cellEweSamples
 )
 {
     potentiostatPlotTimes_.push_back(elapsedTime);
@@ -4167,6 +4376,21 @@ void MainWindow::appendPotentiostatVisualizationSample(
         const std::size_t matrixIndex = static_cast<std::size_t>(row * potentiostatCols_ + col);
         if (matrixIndex < potentiostatMatrix_.size()) {
             potentiostatMatrix_[matrixIndex] = current;
+        }
+        if (matrixIndex < potentiostatEweMatrix_.size()) {
+            potentiostatEweMatrix_[matrixIndex] = ewe;
+        }
+        if (matrixIndex < potentiostatCellPositions_.size()) {
+            potentiostatCellPositions_[matrixIndex] = waypointMm;
+        }
+        if (matrixIndex < potentiostatCellTimes_.size()) {
+            potentiostatCellTimes_[matrixIndex] = elapsedTime;
+        }
+        if (matrixIndex < potentiostatCellCurrentSamples_.size() && !cellCurrentSamples.empty()) {
+            potentiostatCellCurrentSamples_[matrixIndex] = std::move(cellCurrentSamples);
+        }
+        if (matrixIndex < potentiostatCellEweSamples_.size() && !cellEweSamples.empty()) {
+            potentiostatCellEweSamples_[matrixIndex] = std::move(cellEweSamples);
         }
         potentiostatLastSampledCell_ = {row, col};
     }
@@ -4245,6 +4469,130 @@ void MainWindow::refreshPotentiostatVisualization()
             ySpan
         );
     }
+}
+
+void MainWindow::showCellDetailDialog(int row, int col)
+{
+    const std::size_t cellIdx = static_cast<std::size_t>(row * potentiostatCols_ + col);
+    if (cellIdx >= potentiostatCellCurrentSamples_.size()) return;
+    const std::vector<double>& samples = potentiostatCellCurrentSamples_[cellIdx];
+    if (samples.empty()) return;
+
+    const int n = static_cast<int>(samples.size());
+    const double meanI = std::accumulate(samples.begin(), samples.end(), 0.0) / n;
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QString("D\u00e9tail cellule \u2014 ligne %1, col %2").arg(row + 1).arg(col + 1));
+    dlg.setMinimumSize(500, 320);
+    auto* vl = new QVBoxLayout(&dlg);
+
+    auto* infoLabel = new QLabel(
+        QString("%1 mesure(s) sur %2 s  |  moyenne : %3 A")
+            .arg(n)
+            .arg(potentiostatLastDwellS_, 0, 'f', 3)
+            .arg(meanI, 0, 'e', 4));
+    infoLabel->setAlignment(Qt::AlignCenter);
+    vl->addWidget(infoLabel);
+
+    auto* graphWidget = new PotentiostatGraphWidget;
+    graphWidget->setMinimumHeight(220);
+
+    std::vector<double> times;
+    times.reserve(static_cast<std::size_t>(n));
+    const double intervalS = (n > 0 ? potentiostatLastDwellS_ / n : 1.0);
+    for (int s = 0; s < n; ++s) {
+        times.push_back((s + 1) * intervalS);
+    }
+    graphWidget->setSeries(std::move(times), samples,
+                           std::vector<double>(static_cast<std::size_t>(n), 0.0));
+    vl->addWidget(graphWidget, 1);
+
+    auto* btnBox = new QDialogButtonBox(QDialogButtonBox::Close);
+    connect(btnBox, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    connect(btnBox, &QDialogButtonBox::accepted,  &dlg, &QDialog::accept);
+    vl->addWidget(btnBox);
+
+    dlg.exec();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  Import tab — visualization refresh
+// ══════════════════════════════════════════════════════════════════════════════
+void MainWindow::refreshImportVisualization()
+{
+    if (importGraphWidget_ != nullptr) {
+        PotentiostatGraphWidget::Mode graphMode = PotentiostatGraphWidget::Mode::CurrentVsTime;
+        const int modeIndex = importGraphTypeCombo_ != nullptr ? importGraphTypeCombo_->currentIndex() : 0;
+        switch (modeIndex) {
+        case 1: graphMode = PotentiostatGraphWidget::Mode::EweVsTime; break;
+        case 2: graphMode = PotentiostatGraphWidget::Mode::CurrentVsEwe; break;
+        case 3: graphMode = PotentiostatGraphWidget::Mode::EweVsCurrent; break;
+        default: break;
+        }
+        importGraphWidget_->setGraphMode(graphMode);
+        importGraphWidget_->setSeries(importPlotTimes_, importPlotCurrents_, importPlotEwe_);
+    }
+
+    if (importHeatmapWidget_ != nullptr) {
+        importHeatmapWidget_->setGrid(importRows_, importCols_, importMatrix_, std::nullopt);
+    }
+
+    if (import3DWidget_ != nullptr) {
+        const double xSpan = importCols_ > 0
+            ? std::max(1e-6, std::abs(importXMax_ - importXMin_)) : 1.0;
+        const double ySpan = importRows_ > 0
+            ? std::max(1e-6, std::abs(importYMax_ - importYMin_)) : 1.0;
+        import3DWidget_->setGrid(importRows_, importCols_, importMatrix_, xSpan, ySpan);
+    }
+}
+
+void MainWindow::showImportCellDetailDialog(int row, int col)
+{
+    const std::size_t cellIdx = static_cast<std::size_t>(row * importCols_ + col);
+    if (cellIdx >= importCellCurrentSamples_.size()) return;
+    const std::vector<double>& samples = importCellCurrentSamples_[cellIdx];
+    if (samples.empty()) return;
+
+    const int n = static_cast<int>(samples.size());
+    const double meanI = std::accumulate(samples.begin(), samples.end(), 0.0) / n;
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QString("D\u00e9tail cellule import\u00e9e \u2014 ligne %1, col %2").arg(row + 1).arg(col + 1));
+    dlg.setMinimumSize(500, 320);
+    auto* vl = new QVBoxLayout(&dlg);
+
+    auto* infoLabel = new QLabel(
+        importLastDwellS_ > 0.0
+            ? QString("%1 mesure(s) sur %2 s  |  moyenne : %3 A")
+                  .arg(n).arg(importLastDwellS_, 0, 'f', 3).arg(meanI, 0, 'e', 4)
+            : QString("%1 mesure(s)  |  moyenne : %2 A")
+                  .arg(n).arg(meanI, 0, 'e', 4));
+    infoLabel->setAlignment(Qt::AlignCenter);
+    vl->addWidget(infoLabel);
+
+    auto* graphWidget = new PotentiostatGraphWidget;
+    graphWidget->setMinimumHeight(220);
+
+    std::vector<double> times;
+    times.reserve(static_cast<std::size_t>(n));
+    const double intervalS = importLastDwellS_ > 0.0 ? importLastDwellS_ / n : 1.0;
+    for (int s = 0; s < n; ++s) {
+        times.push_back((s + 1) * intervalS);
+    }
+    const std::vector<double>& eweSamples = (cellIdx < importCellEweSamples_.size())
+        ? importCellEweSamples_[cellIdx] : samples;
+    graphWidget->setSeries(std::move(times), samples,
+                           eweSamples.size() == static_cast<std::size_t>(n)
+                               ? eweSamples
+                               : std::vector<double>(static_cast<std::size_t>(n), 0.0));
+    vl->addWidget(graphWidget, 1);
+
+    auto* btnBox = new QDialogButtonBox(QDialogButtonBox::Close);
+    connect(btnBox, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    connect(btnBox, &QDialogButtonBox::accepted,  &dlg, &QDialog::accept);
+    vl->addWidget(btnBox);
+
+    dlg.exec();
 }
 
 void MainWindow::refreshSummaries()
@@ -5396,11 +5744,16 @@ void MainWindow::onStartCaPotentiostat()
             ? buildWaypointsRect(startMm, endMm, stepMm)
             : buildWaypointsLinear(startMm, endMm, stepMm);
         cols = rectangleMode
-            ? std::max(1, static_cast<int>(std::lround(std::abs(endMm.x() - startMm.x()) / stepMm))) + 1
+            ? std::max(1, static_cast<int>(std::ceil(std::abs(endMm.x() - startMm.x()) / stepMm - 1e-9))) + 1
             : static_cast<int>(waypoints.size());
         rows = rectangleMode
-            ? std::max(1, static_cast<int>(std::lround(std::abs(endMm.y() - startMm.y()) / stepMm))) + 1
+            ? std::max(1, static_cast<int>(std::ceil(std::abs(endMm.y() - startMm.y()) / stepMm - 1e-9))) + 1
             : 1;
+        // Update scan bounds to the effective (possibly enlarged) zone
+        if (rectangleMode) {
+            scanXMaxMm = scanXMinMm + static_cast<double>(cols - 1) * stepMm;
+            scanYMaxMm = scanYMinMm + static_cast<double>(rows - 1) * stepMm;
+        }
 
         if (rectangleMode) {
             order = buildRectangleTraversalOrder(rows, cols);
@@ -5537,13 +5890,16 @@ void MainWindow::onStartCaPotentiostat()
         } else {
             double totalLineTimeS = 0.0;
             for (const ContinuousRasterRow& rowPlan : continuousPlan.linePlans) {
-                totalLineTimeS += (cfg.scanSpeedMmPerS > 0.0) ? (rowPlan.lengthMm / cfg.scanSpeedMmPerS) : 0.0;
+                const double extendedLengthMm = rowPlan.lengthMm + 2.0 * kContinuousRunUpMm;
+                totalLineTimeS += (cfg.scanSpeedMmPerS > 0.0) ? (extendedLengthMm / cfg.scanSpeedMmPerS) : 0.0;
             }
             const double transitionDistanceMm = (rectangleMode && rows > 1) ? continuousRowStepMm : 0.0;
-            const double transitionTimeS = (rows > 1 && stageSpeedMmPerS > 0.0)
-                ? (transitionDistanceMm / stageSpeedMmPerS + 1.0)
+            const double repoExtraMm = 2.0 * kContinuousRunUpMm; // extendedEnd → next extendedStart
+            const int nSweepLines = static_cast<int>(continuousPlan.linePlans.size());
+            const double transitionTimeS = (nSweepLines > 1 && stageSpeedMmPerS > 0.0)
+                ? ((transitionDistanceMm + repoExtraMm) / stageSpeedMmPerS + 1.0)
                 : 0.0;
-            params.duration = totalLineTimeS + std::max(0, rows - 1) * transitionTimeS + 15.0;
+            params.duration = totalLineTimeS + std::max(0, nSweepLines - 1) * transitionTimeS + 15.0;
         }
         if (!simpleMeasurement) {
             params.recordDt = std::max(60.0, params.duration);
@@ -5706,10 +6062,6 @@ void MainWindow::onStartCaPotentiostat()
     potentiostatStopRequested_.store(false);
     waypointsMm_ = waypoints;
     currentWaypointIndex_ = simpleMeasurement ? -1 : 0;
-    potentiostatXMin_ = scanXMinMm;
-    potentiostatXMax_ = scanXMaxMm;
-    potentiostatYMin_ = scanYMinMm;
-    potentiostatYMax_ = scanYMaxMm;
     if (measureRightStack_ != nullptr) {
         measureRightStack_->setCurrentIndex(0);
     }
@@ -5734,6 +6086,13 @@ void MainWindow::onStartCaPotentiostat()
         potentiostatMapBox_->setVisible(!simpleMeasurement);
     }
     resetPotentiostatVisualization(rows, cols, order);
+    potentiostatXMin_ = scanXMinMm;
+    potentiostatXMax_ = scanXMaxMm;
+    potentiostatYMin_ = scanYMinMm;
+    potentiostatYMax_ = scanYMaxMm;
+    if (!simpleMeasurement && cfg.mode == ScanConfig::AcquisitionMode::PointByPoint) {
+        potentiostatLastDwellS_ = durationS;
+    }
     if (potentiostatRunButton_   != nullptr) potentiostatRunButton_->setEnabled(false);
     if (potentiostatStopButton_  != nullptr) potentiostatStopButton_->setEnabled(true);
     if (potentiostatExportButton_ != nullptr) potentiostatExportButton_->setEnabled(false);
@@ -5878,9 +6237,10 @@ void MainWindow::onStartCaPotentiostat()
     if (simpleMeasurement) {
         measurementHeaderLines << QString("Acquisition simple: periode UI=%1 s").arg(simpleMeasurementSamplePeriodS, 0, 'f', 3);
     } else if (cfg.mode == ScanConfig::AcquisitionMode::PointByPoint) {
-        measurementHeaderLines << QString("Balayage pas a pas: pas=%1 mm | dwell=%2 s | vitesse reposition=%3 mm/s")
+        measurementHeaderLines << QString("Balayage pas a pas: pas=%1 mm | dwell=%2 s | mesures_par_point=%3 | vitesse reposition=%4 mm/s")
             .arg(stepMm, 0, 'f', 4)
             .arg(durationS, 0, 'f', 4)
+            .arg(cfg.dwellSamples)
             .arg(stageSpeedMmPerS, 0, 'f', 4);
     } else {
         QString triggerLine = QString("Balayage continu: pas acquisition=%1 mm | vitesse=%2 mm/s | trigger=%3")
@@ -5894,15 +6254,17 @@ void MainWindow::onStartCaPotentiostat()
         }
         if (rectangleMode) {
             triggerLine += QString(" | saut inter-ligne=%1 mm").arg(continuousRowStepMm, 0, 'f', 4);
-            measurementHeaderLines << QString("Zone continue effective: largeur=%1 mm (origine=%2) | hauteur=%3 mm (origine=%4)")
+            measurementHeaderLines << QString("Zone continue effective: largeur=%1 mm (origine=%2) | hauteur=%3 mm (origine=%4) | marge_acceleration=%5 mm")
                 .arg(continuousPlan.effectiveWidthMm, 0, 'f', 4)
                 .arg(continuousPlan.originalWidthMm, 0, 'f', 4)
                 .arg(continuousPlan.effectiveHeightMm, 0, 'f', 4)
-                .arg(continuousPlan.originalHeightMm, 0, 'f', 4);
+                .arg(continuousPlan.originalHeightMm, 0, 'f', 4)
+                .arg(kContinuousRunUpMm, 0, 'f', 4);
         } else {
-            measurementHeaderLines << QString("Ligne continue effective: longueur=%1 mm (origine=%2)")
+            measurementHeaderLines << QString("Ligne continue effective: longueur=%1 mm (origine=%2) | marge_acceleration=%3 mm")
                 .arg(continuousPlan.effectiveWidthMm, 0, 'f', 4)
-                .arg(continuousPlan.originalWidthMm, 0, 'f', 4);
+                .arg(continuousPlan.originalWidthMm, 0, 'f', 4)
+                .arg(kContinuousRunUpMm, 0, 'f', 4);
         }
         measurementHeaderLines << triggerLine;
     }
@@ -5959,7 +6321,7 @@ void MainWindow::onStartCaPotentiostat()
                 if (potentiostatRunButton_   != nullptr) potentiostatRunButton_->setEnabled(true);
                 if (potentiostatStopButton_  != nullptr) potentiostatStopButton_->setEnabled(false);
                 if (potentiostatExportButton_ != nullptr)
-                    potentiostatExportButton_->setEnabled(!simpleMeasurement && potentiostatSampleCount_ > 0);
+                    potentiostatExportButton_->setEnabled(potentiostatSampleCount_ > 0);
                 if (potentiostatMeasureStateLabel_ != nullptr) potentiostatMeasureStateLabel_->setText(stateMsg);
             }, Qt::QueuedConnection);
         };
@@ -5973,7 +6335,12 @@ void MainWindow::onStartCaPotentiostat()
 
             if (!simpleMeasurement) {
                 // ── Phase 0 : move to first waypoint ──
-                const QPointF firstPt = waypoints.front();
+                QPointF firstPt = waypoints.front();
+                // For continuous mode, go directly to the extended start (before first sample)
+                if (cfg.mode == ScanConfig::AcquisitionMode::Continuous && !continuousPlan.linePlans.empty()) {
+                    const auto& firstRow = continuousPlan.linePlans.front();
+                    firstPt = firstRow.startPointMm - kContinuousRunUpMm * firstRow.unitDirection;
+                }
                 QMetaObject::invokeMethod(this, [this]() {
                     if (potentiostatMeasureStateLabel_ != nullptr)
                         potentiostatMeasureStateLabel_->setText("Mise en position...");
@@ -6291,7 +6658,8 @@ void MainWindow::onStartCaPotentiostat()
                 };
 
                 const auto appendScheduledSample =
-                    [&](int row, int col, const QPointF& plannedPoint, double timeoutS) -> bool {
+                    [&](int row, int col, const QPointF& plannedPoint, double timeoutS,
+                        std::optional<QPointF> triggerMotorPos = std::nullopt) -> bool {
                     const auto maybeCv = waitForFreshValue(timeoutS);
                     if (!maybeCv.has_value()) {
                         return false;
@@ -6303,14 +6671,23 @@ void MainWindow::onStartCaPotentiostat()
                     const QString acquisitionTimestamp = currentLogTimestampText();
 
                     QString actualMotorText = "X=--- Y=---";
-                    try {
-                        const auto motorSnapshot = motorCtrl->snapshotBoth();
-                        if (motorSnapshot.x.positionValid && motorSnapshot.y.positionValid) {
-                            actualMotorText = QString("X=%1 Y=%2")
-                                .arg(motorSnapshot.x.positionMm, 0, 'f', 4)
-                                .arg(motorSnapshot.y.positionMm, 0, 'f', 4);
+                    if (triggerMotorPos.has_value()) {
+                        // Use the motor position captured at trigger time (avoids
+                        // systematic offset from calling snapshotBoth() after the
+                        // potentiostat read while the motor keeps moving).
+                        actualMotorText = QString("X=%1 Y=%2")
+                            .arg(triggerMotorPos->x(), 0, 'f', 4)
+                            .arg(triggerMotorPos->y(), 0, 'f', 4);
+                    } else {
+                        try {
+                            const auto motorSnapshot = motorCtrl->snapshotBoth();
+                            if (motorSnapshot.x.positionValid && motorSnapshot.y.positionValid) {
+                                actualMotorText = QString("X=%1 Y=%2")
+                                    .arg(motorSnapshot.x.positionMm, 0, 'f', 4)
+                                    .arg(motorSnapshot.y.positionMm, 0, 'f', 4);
+                            }
+                        } catch (...) {
                         }
-                    } catch (...) {
                     }
 
                     appendLog(
@@ -6378,61 +6755,66 @@ void MainWindow::onStartCaPotentiostat()
                     const QPointF rowEnd = rowPlan.endPointMm;
                     const bool moveLineX = std::abs(rowEnd.x() - rowStart.x()) > 0.0005;
                     const bool moveLineY = std::abs(rowEnd.y() - rowStart.y()) > 0.0005;
-                    appendMeasurementLogEvent("LINE", QString("ligne=%1/%2 | depart=%3 | arrivee=%4 | axe=%5 | longueur=%6 mm | echantillons=%7")
+
+                    // ── Run-up / overrun margins for motor acceleration ──
+                    const QPointF extendedStart = rowStart - kContinuousRunUpMm * rowPlan.unitDirection;
+                    const QPointF extendedEnd   = rowEnd   + kContinuousRunUpMm * rowPlan.unitDirection;
+
+                    appendMeasurementLogEvent("LINE", QString("ligne=%1/%2 | depart=%3 | arrivee=%4 | axe=%5 | longueur=%6 mm | longueur_mouvement=%7 mm | echantillons=%8 | marge=%9 mm")
                         .arg(lineIndex + 1)
                         .arg(static_cast<int>(continuousPlan.linePlans.size()))
                         .arg(formatPointMm(rowStart))
                         .arg(formatPointMm(rowEnd))
                         .arg(rowPlan.primaryAxisHorizontal ? "horizontal" : "vertical")
                         .arg(rowPlan.lengthMm, 0, 'f', 4)
-                        .arg(static_cast<int>(rowPlan.samplePoints.size())));
+                        .arg(rowPlan.lengthMm + 2.0 * kContinuousRunUpMm, 0, 'f', 4)
+                        .arg(static_cast<int>(rowPlan.samplePoints.size()))
+                        .arg(kContinuousRunUpMm, 0, 'f', 4));
 
-                    if (lineIndex > 0) {
+                    // ── Reposition to extended start (before first sample) ──
+                    {
+                        const QPointF repoTarget = (lineIndex == 0) ? extendedStart : extendedStart;
                         appendMeasurementLogEvent("MOVE", QString("repositionnement_ligne_debut | ligne=%1/%2 | cible=%3 | moteur_avant=(%4) | vitesse=%5 mm/s")
                             .arg(lineIndex + 1)
                             .arg(static_cast<int>(continuousPlan.linePlans.size()))
-                            .arg(formatPointMm(rowStart))
+                            .arg(formatPointMm(repoTarget))
                             .arg(currentMotorPositionLogText(motorCtrl))
                             .arg(stageSpeedMmPerS, 0, 'f', 4));
                         const auto both = motorCtrl->snapshotBoth();
                         if (both.x.positionValid && both.y.positionValid) {
                             startPredictedMotorMotion(
                                 both.x.positionMm, both.y.positionMm,
-                                rowStart.x(), rowStart.y(),
+                                repoTarget.x(), repoTarget.y(),
                                 stageSpeedMmPerS, stageSpeedMmPerS);
                         }
                         motorCtrl->setVelocity(hardware::AxisId::X, stageSpeedMmPerS);
                         motorCtrl->setVelocity(hardware::AxisId::Y, stageSpeedMmPerS);
-                        motorCtrl->moveAbsoluteNoWait(hardware::AxisId::X, rowStart.x());
-                        motorCtrl->moveAbsoluteNoWait(hardware::AxisId::Y, rowStart.y());
+                        motorCtrl->moveAbsoluteNoWait(hardware::AxisId::X, repoTarget.x());
+                        motorCtrl->moveAbsoluteNoWait(hardware::AxisId::Y, repoTarget.y());
                         motorCtrl->waitAxis(hardware::AxisId::X, kDefaultMotorTimeoutMs);
                         motorCtrl->waitAxis(hardware::AxisId::Y, kDefaultMotorTimeoutMs);
-                        stopPredictedMotorMotion(rowStart.x(), rowStart.y());
+                        stopPredictedMotorMotion(repoTarget.x(), repoTarget.y());
                         appendMeasurementLogEvent("MOVE", QString("repositionnement_ligne_fin | ligne=%1/%2 | moteur_apres=(%3)")
                             .arg(lineIndex + 1)
                             .arg(static_cast<int>(continuousPlan.linePlans.size()))
                             .arg(currentMotorPositionLogText(motorCtrl)));
                     }
 
-                    const auto [firstRow, firstCol] = rowPlan.sampleCells.front();
-                    if (!appendScheduledSample(firstRow, firstCol, rowStart, kContinuousFreshValueTimeoutS)) {
-                        throw std::runtime_error(QString("Aucune nouvelle valeur au debut de la ligne %1.")
-                            .arg(lineIndex + 1).toStdString());
-                    }
                     if (potentiostatStopRequested_.load() || instrumentStopped) {
                         break;
                     }
-                    if (rowPlan.samplePoints.size() <= 1) {
+                    if (rowPlan.samplePoints.size() < 1) {
                         continue;
                     }
 
+                    // ── Start sweep from extended start toward extended end ──
                     const double velocityX = std::abs(rowPlan.unitDirection.x()) * cfg.scanSpeedMmPerS;
                     const double velocityY = std::abs(rowPlan.unitDirection.y()) * cfg.scanSpeedMmPerS;
                     appendMeasurementLogEvent("MOVE", QString("balayage_ligne_debut | ligne=%1/%2 | depart=%3 | arrivee=%4 | vitesse_x=%5 mm/s | vitesse_y=%6 mm/s | moteur_avant=(%7)")
                         .arg(lineIndex + 1)
                         .arg(static_cast<int>(continuousPlan.linePlans.size()))
-                        .arg(formatPointMm(rowStart))
-                        .arg(formatPointMm(rowEnd))
+                        .arg(formatPointMm(extendedStart))
+                        .arg(formatPointMm(extendedEnd))
                         .arg(velocityX, 0, 'f', 4)
                         .arg(velocityY, 0, 'f', 4)
                         .arg(currentMotorPositionLogText(motorCtrl)));
@@ -6440,53 +6822,115 @@ void MainWindow::onStartCaPotentiostat()
                     if (both.x.positionValid && both.y.positionValid) {
                         startPredictedMotorMotion(
                             both.x.positionMm, both.y.positionMm,
-                            rowEnd.x(), rowEnd.y(),
+                            extendedEnd.x(), extendedEnd.y(),
                             moveLineX ? std::optional<double>(velocityX) : std::nullopt,
                             moveLineY ? std::optional<double>(velocityY) : std::nullopt);
                     }
                     if (moveLineX) {
                         motorCtrl->setVelocity(hardware::AxisId::X, velocityX);
-                        motorCtrl->moveAbsoluteNoWait(hardware::AxisId::X, rowEnd.x());
+                        motorCtrl->moveAbsoluteNoWait(hardware::AxisId::X, extendedEnd.x());
                     }
                     if (moveLineY) {
                         motorCtrl->setVelocity(hardware::AxisId::Y, velocityY);
-                        motorCtrl->moveAbsoluteNoWait(hardware::AxisId::Y, rowEnd.y());
+                        motorCtrl->moveAbsoluteNoWait(hardware::AxisId::Y, extendedEnd.y());
                     }
 
-                    const auto lineStartTime = std::chrono::steady_clock::now();
-                    const auto waitForTargetDistanceMm = [&](double targetDistanceMm) {
-                        while (!potentiostatStopRequested_.load() && !instrumentStopped) {
+                    // ── Time-based calibration during run-up ──
+                    // Take snapshots until the motor moves, then compute the
+                    // exact wall-clock ↔ motor-position mapping.  One calibration
+                    // snapshot is enough because the motor speed is constant.
+                    //
+                    // The position returned by snapshotBoth() was measured ~10 ms
+                    // into the call (TS + TP on the scan axis only; Y and JSON
+                    // overhead occur afterwards).  Using the *start* of the call
+                    // as the position timestamp therefore introduces a systematic
+                    // offset of only ~10 ms × speed = 0.5 µm at 0.05 mm/s.
+                    // That is well below 1 µm, so we use the call start time.
+                    auto calibSnapTime = std::chrono::steady_clock::now();
+                    QPointF calibSnapPos = extendedStart;
+                    {
+                        constexpr double kMotionDetectThresholdMm = 0.001;  // 1 µm
+                        const auto deadline = calibSnapTime + std::chrono::seconds(3);
+                        while (!potentiostatStopRequested_.load()
+                               && !instrumentStopped
+                               && std::chrono::steady_clock::now() < deadline) {
+                            const auto beforeSnap = std::chrono::steady_clock::now();
                             const auto pos = motorCtrl->snapshotBoth();
                             if (pos.x.positionValid && pos.y.positionValid) {
-                                const QPointF currentPoint(pos.x.positionMm, pos.y.positionMm);
-                                const QPointF delta = currentPoint - rowStart;
-                                const double travelledMm =
-                                    delta.x() * rowPlan.unitDirection.x() + delta.y() * rowPlan.unitDirection.y();
-                                if (travelledMm + 0.002 >= targetDistanceMm) {
+                                const QPointF p(pos.x.positionMm, pos.y.positionMm);
+                                const QPointF delta = p - extendedStart;
+                                const double travelled =
+                                    delta.x() * rowPlan.unitDirection.x()
+                                    + delta.y() * rowPlan.unitDirection.y();
+                                if (travelled > kMotionDetectThresholdMm) {
+                                    calibSnapTime = beforeSnap;
+                                    calibSnapPos  = p;
+                                    appendMeasurementLogEvent("SYNC",
+                                        QString("ligne=%1/%2 | calibration_temps | deplacement=%3 mm | pos=%4")
+                                            .arg(lineIndex + 1)
+                                            .arg(static_cast<int>(continuousPlan.linePlans.size()))
+                                            .arg(travelled, 0, 'f', 4)
+                                            .arg(formatPointMm(p)));
                                     break;
                                 }
                             }
-                            std::this_thread::sleep_for(std::chrono::duration<double>(kContinuousPollingPeriodS));
+                            std::this_thread::sleep_for(std::chrono::milliseconds(2));
                         }
+                    }
+
+                    // ── Pure time-based trigger ──
+                    // No snapshotBoth() in the trigger loop ⇒ sub-µm resolution.
+                    // Trigger time for a target at distance D from rowStart:
+                    //   T = calibSnapTime + (rowStart + D − calibSnapPos) / speed
+                    // because at calibSnapTime the motor was at calibSnapPos
+                    // and it advances at exactly cfg.scanSpeedMmPerS.
+                    const auto waitForTargetDistanceMm = [&](double targetDistanceMm) -> std::optional<QPointF> {
+                        const QPointF targetPos = rowStart + rowPlan.unitDirection * targetDistanceMm;
+                        const double distFromCalib =
+                            (targetPos.x() - calibSnapPos.x()) * rowPlan.unitDirection.x()
+                            + (targetPos.y() - calibSnapPos.y()) * rowPlan.unitDirection.y();
+                        const double dtS = distFromCalib / std::max(cfg.scanSpeedMmPerS, kScanPlanningEpsilonMm);
+                        const auto expectedTime = calibSnapTime
+                            + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                std::chrono::duration<double>(dtS));
+
+                        while (!potentiostatStopRequested_.load() && !instrumentStopped) {
+                            const auto now = std::chrono::steady_clock::now();
+                            if (now >= expectedTime) {
+                                // Trigger fired at the right time.
+                                // Take a real snapshot for logging/verification.
+                                // This adds ~100ms but doesn't affect trigger precision.
+                                try {
+                                    const auto snap = motorCtrl->snapshotBoth();
+                                    if (snap.x.positionValid && snap.y.positionValid) {
+                                        return QPointF(snap.x.positionMm, snap.y.positionMm);
+                                    }
+                                } catch (...) {}
+                                return targetPos; // fallback if snapshot fails
+                            }
+                            const double remainingS = std::chrono::duration<double>(expectedTime - now).count();
+                            const double sleepS = std::clamp(remainingS * 0.5, 0.0005, kContinuousPollingPeriodS);
+                            std::this_thread::sleep_for(std::chrono::duration<double>(sleepS));
+                        }
+                        return std::nullopt;
                     };
 
-                    for (int sampleOffset = 1; sampleOffset < static_cast<int>(rowPlan.samplePoints.size()); ++sampleOffset) {
+                    // All samples (including the first) are acquired while the motor is moving.
+                    // The run-up margin ensures the motor is at full speed by the time it reaches
+                    // the first sample point (distance 0.0 from rowStart).
+                    for (int sampleOffset = 0; sampleOffset < static_cast<int>(rowPlan.samplePoints.size()); ++sampleOffset) {
                         if (potentiostatStopRequested_.load() || instrumentStopped) {
                             break;
                         }
 
                         const double targetDistanceMm = continuousPlan.samplePitchMm * static_cast<double>(sampleOffset);
+                        std::optional<QPointF> triggerMotorPos;
                         if (cfg.trigger == ScanConfig::ContinuousTrigger::Distance) {
-                            waitForTargetDistanceMm(targetDistanceMm);
+                            triggerMotorPos = waitForTargetDistanceMm(targetDistanceMm);
                         } else {
-                            const auto scheduledTime = lineStartTime
-                                + std::chrono::duration<double>(cfg.triggerTimeS * static_cast<double>(sampleOffset));
-                            while (!potentiostatStopRequested_.load()
-                                   && !instrumentStopped
-                                   && std::chrono::steady_clock::now() < scheduledTime) {
-                                std::this_thread::sleep_for(std::chrono::duration<double>(kContinuousPollingPeriodS));
-                            }
-                            waitForTargetDistanceMm(targetDistanceMm);
+                            // For time-based trigger: use the calibrated time prediction
+                            // rather than a fixed lineStartTime offset, for consistency.
+                            triggerMotorPos = waitForTargetDistanceMm(targetDistanceMm);
                         }
 
                         if (potentiostatStopRequested_.load() || instrumentStopped) {
@@ -6495,7 +6939,8 @@ void MainWindow::onStartCaPotentiostat()
 
                         const auto [row, col] = rowPlan.sampleCells[static_cast<std::size_t>(sampleOffset)];
                         const QPointF plannedPoint = rowPlan.samplePoints[static_cast<std::size_t>(sampleOffset)];
-                        if (!appendScheduledSample(row, col, plannedPoint, regularSampleTimeoutS)) {
+                        const double sampleTimeout = (sampleOffset == 0) ? kContinuousFreshValueTimeoutS : regularSampleTimeoutS;
+                        if (!appendScheduledSample(row, col, plannedPoint, sampleTimeout, triggerMotorPos)) {
                             throw std::runtime_error(QString("Aucune nouvelle valeur au point %1 de la ligne %2.")
                                 .arg(sampleOffset + 1).arg(lineIndex + 1).toStdString());
                         }
@@ -6507,7 +6952,7 @@ void MainWindow::onStartCaPotentiostat()
                     if (moveLineY) {
                         motorCtrl->waitAxis(hardware::AxisId::Y, kDefaultMotorTimeoutMs);
                     }
-                    stopPredictedMotorMotion(rowEnd.x(), rowEnd.y());
+                    stopPredictedMotorMotion(extendedEnd.x(), extendedEnd.y());
                     appendMeasurementLogEvent("MOVE", QString("balayage_ligne_fin | ligne=%1/%2 | moteur_apres=(%3)")
                         .arg(lineIndex + 1)
                         .arg(static_cast<int>(continuousPlan.linePlans.size()))
@@ -6558,26 +7003,84 @@ void MainWindow::onStartCaPotentiostat()
 
                 if (potentiostatStopRequested_.load()) break;
 
-                // Wait dwell time
-                appendMeasurementLogEvent("DWELL", QString("pt=%1/%2 | duree=%3 s | moteur=(%4)")
+                // ── Multi-sample dwell ──────────────────────────────────────
+                const int nDwellSamples = std::max(1, cfg.dwellSamples);
+                const double sampleIntervalS = durationS / nDwellSamples;
+                const auto dwellStart = std::chrono::steady_clock::now();
+                std::vector<double> dwellCurrents;
+                std::vector<double> dwellEwes;
+                dwellCurrents.reserve(static_cast<std::size_t>(nDwellSamples));
+                dwellEwes.reserve(static_cast<std::size_t>(nDwellSamples));
+                hardware::PotCurrentValues lastCv;
+                appendMeasurementLogEvent("DWELL", QString("pt=%1/%2 | duree=%3 s | n_mesures=%4 | moteur=(%5)")
                     .arg(idx + 1)
                     .arg(nPoints)
                     .arg(durationS, 0, 'f', 4)
+                    .arg(nDwellSamples)
                     .arg(currentMotorPositionLogText(motorCtrl)));
-                const auto dwellDur   = std::chrono::duration<double>(durationS);
-                const auto dwellStart = std::chrono::steady_clock::now();
-                while (std::chrono::steady_clock::now() - dwellStart < dwellDur) {
+                for (int s = 0; s < nDwellSamples; ++s) {
+                    const auto slotEnd = dwellStart
+                        + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                            std::chrono::duration<double>((s + 1) * sampleIntervalS));
+                    while (std::chrono::steady_clock::now() < slotEnd) {
+                        if (potentiostatStopRequested_.load()) break;
+                        std::this_thread::sleep_for(20ms);
+                    }
                     if (potentiostatStopRequested_.load()) break;
-                    std::this_thread::sleep_for(20ms);
+                    const auto cv_s = ctrl->getCurrentValues(channel);
+                    if (!cv_s.ok) {
+                        throw std::runtime_error(
+                            QString("GetCurrentValues a echoue (sous-mesure %1/%2) : %3")
+                                .arg(s + 1).arg(nDwellSamples).arg(cv_s.error).toStdString());
+                    }
+                    dwellCurrents.push_back(cv_s.I);
+                    dwellEwes.push_back(cv_s.ewe);
+                    lastCv = cv_s;
+                    appendMeasurementLogEvent("SUBSAMPLE", QString("pt=%1/%2 | sample=%3/%4 | t_pot=%5 s | Ewe=%6 V | I=%7 A")
+                        .arg(idx + 1).arg(nPoints)
+                        .arg(s + 1).arg(nDwellSamples)
+                        .arg(cv_s.elapsedTime, 0, 'f', 6)
+                        .arg(cv_s.ewe, 0, 'e', 6)
+                        .arg(cv_s.I, 0, 'e', 6));
+                    if (cv_s.stopped) break;
                 }
 
                 if (potentiostatStopRequested_.load()) break;
+                if (dwellCurrents.empty()) break;
 
-                // Sample instantaneous current (same as Python GetCurrentValues)
-                const auto cv = ctrl->getCurrentValues(channel);
-                if (!cv.ok) {
-                    throw std::runtime_error(QString("GetCurrentValues a echoue : %1").arg(cv.error).toStdString());
+                const double meanI = std::accumulate(
+                    dwellCurrents.begin(), dwellCurrents.end(), 0.0)
+                    / static_cast<double>(dwellCurrents.size());
+                const double meanEwe = std::accumulate(
+                    dwellEwes.begin(), dwellEwes.end(), 0.0)
+                    / static_cast<double>(dwellEwes.size());
+                const int nActualSamples = static_cast<int>(dwellCurrents.size());
+
+                // Compute standard deviations
+                double stdI = 0.0, stdEwe = 0.0;
+                if (nActualSamples > 1) {
+                    double sumSqI = 0.0, sumSqEwe = 0.0;
+                    for (int si = 0; si < nActualSamples; ++si) {
+                        const double dI = dwellCurrents[static_cast<std::size_t>(si)] - meanI;
+                        const double dE = dwellEwes[static_cast<std::size_t>(si)] - meanEwe;
+                        sumSqI  += dI * dI;
+                        sumSqEwe += dE * dE;
+                    }
+                    stdI   = std::sqrt(sumSqI   / nActualSamples);
+                    stdEwe = std::sqrt(sumSqEwe / nActualSamples);
                 }
+
+                // Serialize raw sample lists as comma-separated strings
+                auto joinSamples = [](const std::vector<double>& vec) -> QString {
+                    QStringList parts;
+                    parts.reserve(static_cast<int>(vec.size()));
+                    for (double v : vec)
+                        parts << QString::number(v, 'e', 6);
+                    return parts.join(",");
+                };
+                const QString rawISamples   = joinSamples(dwellCurrents);
+                const QString rawEweSamples = joinSamples(dwellEwes);
+
                 acquiredSampleCount = idx + 1;
                 const QString acquisitionTimestamp = currentLogTimestampText();
                 const QString actualMotorText = currentMotorPositionLogText(motorCtrl);
@@ -6590,7 +7093,7 @@ void MainWindow::onStartCaPotentiostat()
 
                 // Record motor phases aligned on kbio ElapsedTime
                 {
-                    const double t = cv.elapsedTime;
+                    const double t = lastCv.elapsedTime;
                     const double tDwellStart = std::max(0.0, t - durationS);
                     if (idx > 0 && prevMeasureT < tDwellStart)
                         motorPhases.push_back({prevMeasureT, tDwellStart, true});  // MOVING
@@ -6598,41 +7101,53 @@ void MainWindow::onStartCaPotentiostat()
                     prevMeasureT = t;
                 }
 
-                QMetaObject::invokeMethod(this, [this, idx, nPoints, row, col, wp, cv,
+                QMetaObject::invokeMethod(this, [this, idx, nPoints, row, col, wp,
+                                                 lastCv, meanI, meanEwe, nActualSamples,
                                                  acquisitionTimestamp, actualMotorText,
-                                                 phases = motorPhases]() {
+                                                 phases = motorPhases,
+                                                 cellSamples = dwellCurrents,
+                                                 eweSamples = dwellEwes]() mutable {
                     currentWaypointIndex_ = idx + 1;
                     if (potentiostatGraphWidget_ != nullptr)
                         potentiostatGraphWidget_->setPhases(phases);
-                    appendPotentiostatVisualizationSample(idx, nPoints, row, col, wp, cv.elapsedTime, cv.ewe, cv.I);
-                    appendLog(QString("[POTSTEP] t_abs=%1 pt=%2/%3 row=%4 col=%5 t_pot=%6 s cible=(%7,%8) mm moteur=(%9) Ewe=%10 V I=%11 A stopped=%12 ok=%13%14")
+                    appendPotentiostatVisualizationSample(
+                        idx, nPoints, row, col, wp,
+                        lastCv.elapsedTime, meanEwe, meanI,
+                        std::move(cellSamples), std::move(eweSamples));
+                    appendLog(QString("[POTSTEP] t_abs=%1 pt=%2/%3 row=%4 col=%5 t_pot=%6 s cible=(%7,%8) mm moteur=(%9) Ewe=%10 V I=%11 A (moy %12 mesures) stopped=%13 ok=%14%15")
                         .arg(acquisitionTimestamp)
                         .arg(idx + 1).arg(nPoints)
                         .arg(row + 1)
                         .arg(col + 1)
-                        .arg(cv.elapsedTime, 0, 'f', 6)
+                        .arg(lastCv.elapsedTime, 0, 'f', 6)
                         .arg(wp.x(), 0, 'f', 4)
                         .arg(wp.y(), 0, 'f', 4)
                         .arg(actualMotorText)
-                        .arg(cv.ewe, 0, 'e', 3).arg(cv.I, 0, 'e', 3)
-                        .arg(cv.stopped ? "oui" : "non")
-                        .arg(cv.ok ? "oui" : "non")
-                        .arg(cv.ok ? "" : " err=" + cv.error));
+                        .arg(meanEwe, 0, 'e', 3).arg(meanI, 0, 'e', 3)
+                        .arg(nActualSamples)
+                        .arg(lastCv.stopped ? "oui" : "non")
+                        .arg(lastCv.ok ? "oui" : "non")
+                        .arg(lastCv.ok ? "" : " err=" + lastCv.error));
                 }, Qt::QueuedConnection);
-                appendMeasurementLogEvent("ACQ", QString("pas_a_pas | t_abs=%1 | pt=%2/%3 | row=%4 | col=%5 | t_pot=%6 s | cible=%7 | moteur=(%8) | Ewe=%9 V | I=%10 A | stopped=%11")
+                appendMeasurementLogEvent("ACQ", QString("pas_a_pas | t_abs=%1 | pt=%2/%3 | row=%4 | col=%5 | t_pot=%6 s | cible=%7 | moteur=(%8) | Ewe_moy=%9 V | I_moy=%10 A | I_std=%11 A | Ewe_std=%12 V | n_mesures=%13 | I_samples=%14 | Ewe_samples=%15 | stopped=%16")
                     .arg(acquisitionTimestamp)
                     .arg(idx + 1)
                     .arg(nPoints)
                     .arg(row + 1)
                     .arg(col + 1)
-                    .arg(cv.elapsedTime, 0, 'f', 6)
+                    .arg(lastCv.elapsedTime, 0, 'f', 6)
                     .arg(formatPointMm(wp))
                     .arg(actualMotorText)
-                    .arg(cv.ewe, 0, 'e', 3)
-                    .arg(cv.I, 0, 'e', 3)
-                    .arg(yesNoText(cv.stopped)));
+                    .arg(meanEwe, 0, 'e', 3)
+                    .arg(meanI, 0, 'e', 3)
+                    .arg(stdI, 0, 'e', 3)
+                    .arg(stdEwe, 0, 'e', 3)
+                    .arg(nActualSamples)
+                    .arg(rawISamples)
+                    .arg(rawEweSamples)
+                    .arg(yesNoText(lastCv.stopped)));
 
-                if (cv.stopped) {
+                if (lastCv.stopped) {
                     const auto confirm = ctrl->getData(channel);
                     if (confirm.ok && confirm.stopped) {
                         measurementOutcome = "instrument_stop_pas_a_pas";
@@ -6648,7 +7163,7 @@ void MainWindow::onStartCaPotentiostat()
                     appendMeasurementLogEvent("STATE", QString("STOP transitoire ignore | pt=%1/%2 | t_pot=%3 s")
                         .arg(idx + 1)
                         .arg(nPoints)
-                        .arg(cv.elapsedTime, 0, 'f', 6));
+                        .arg(lastCv.elapsedTime, 0, 'f', 6));
                     QMetaObject::invokeMethod(this, [this, techniqueLabel]() {
                         appendLog(QString("Etat STOP transitoire ignore: %1 continue.").arg(techniqueLabel));
                     }, Qt::QueuedConnection);
@@ -6684,7 +7199,7 @@ void MainWindow::onStartCaPotentiostat()
                 if (potentiostatRunButton_    != nullptr) potentiostatRunButton_->setEnabled(true);
                 if (potentiostatStopButton_   != nullptr) potentiostatStopButton_->setEnabled(false);
                 if (potentiostatExportButton_ != nullptr) {
-                    potentiostatExportButton_->setEnabled(!simpleMeasurement && potentiostatSampleCount_ > 0);
+                    potentiostatExportButton_->setEnabled(potentiostatSampleCount_ > 0);
                 }
                 if (potentiostatProgressLabel_ != nullptr) {
                     if (stopped) {
@@ -6721,66 +7236,582 @@ void MainWindow::onStartCaPotentiostat()
     });
 }
 
-void MainWindow::onExportPotentiostatMatrix()
+void MainWindow::onExportPotentiostat()
 {
-    if (potentiostatRows_ <= 0 || potentiostatCols_ <= 0 || potentiostatMatrix_.empty()) {
+    const bool hasGrid = potentiostatRows_ > 0 && potentiostatCols_ > 0 && !potentiostatMatrix_.empty();
+    const bool hasTimeSeries = !potentiostatPlotTimes_.empty();
+    if (!hasGrid && !hasTimeSeries) {
         QMessageBox::information(this, "Export", "Aucune donnée à exporter.");
         return;
     }
 
-    const QString filePath = QFileDialog::getSaveFileName(
-        this, "Exporter la matrice",
-        QString("carte_I_%1x%2.gsf").arg(potentiostatCols_).arg(potentiostatRows_),
-        "Gwyddion Simple Field (*.gsf);;Tous les fichiers (*)");
-    if (filePath.isEmpty()) return;
+    // ── Dialog ────────────────────────────────────────────────────────────────
+    QDialog dlg(this);
+    dlg.setWindowTitle("Exporter les données");
+    dlg.setMinimumWidth(500);
+    auto* vl = new QVBoxLayout(&dlg);
 
-    QFile file(filePath);
-    if (!file.open(QIODevice::WriteOnly)) {
+    // Formats (checkboxes — export all selected at once)
+    auto* fmtBox = new QGroupBox("Formats à exporter");
+    auto* fmtLayout = new QVBoxLayout(fmtBox);
+    auto* cbCsv  = new QCheckBox("Tableau CSV  (.csv)  —  données tabulaires pour Excel / Python");
+    auto* cbGsf  = new QCheckBox("Gwyddion Simple Field  (.gsf)  —  données brutes float32");
+    auto* cbHeat = new QCheckBox("Carte 2D  (.tiff)  —  image de la heatmap");
+    auto* cb3D   = new QCheckBox("Surface 3D  (.tiff)  —  image de la vue 3D");
+    cbCsv->setChecked(true);
+    cbGsf->setChecked(hasGrid);
+    cbHeat->setChecked(hasGrid);
+    cb3D->setChecked(hasGrid);
+    // Grid-only formats hidden for simple measurements
+    cbGsf->setVisible(hasGrid);
+    cbHeat->setVisible(hasGrid);
+    cb3D->setVisible(hasGrid);
+    fmtLayout->addWidget(cbCsv);
+    fmtLayout->addWidget(cbGsf);
+    fmtLayout->addWidget(cbHeat);
+    fmtLayout->addWidget(cb3D);
+    vl->addWidget(fmtBox);
+
+    // Dossier de destination
+    auto* dirBox = new QGroupBox("Dossier de destination");
+    auto* dirHl  = new QHBoxLayout(dirBox);
+    auto* dirEdit = new QLineEdit;
+    dirEdit->setPlaceholderText("Dossier...");
+    dirEdit->setText(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation));
+    auto* browseBtn = new QPushButton("Parcourir...");
+    browseBtn->setFixedWidth(100);
+    dirHl->addWidget(dirEdit);
+    dirHl->addWidget(browseBtn);
+    vl->addWidget(dirBox);
+
+    // Nom de base
+    auto* nameBox = new QGroupBox("Nom de base (les extensions seront ajoutées automatiquement)");
+    auto* nameHl  = new QHBoxLayout(nameBox);
+    auto* nameEdit = new QLineEdit;
+    const QString baseName = hasGrid
+        ? QString("carte_I_%1x%2").arg(potentiostatCols_).arg(potentiostatRows_)
+        : QString("mesure_simple");
+    nameEdit->setText(baseName);
+    nameHl->addWidget(nameEdit);
+    vl->addWidget(nameBox);
+
+    // Parcourir
+    QObject::connect(browseBtn, &QPushButton::clicked, &dlg, [&]() {
+        const QString dir = QFileDialog::getExistingDirectory(
+            &dlg, "Choisir un dossier", dirEdit->text());
+        if (!dir.isEmpty()) dirEdit->setText(dir);
+    });
+
+    // Boutons OK / Annuler
+    auto* btnBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    btnBox->button(QDialogButtonBox::Ok)->setText("Exporter");
+    QObject::connect(btnBox, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    QObject::connect(btnBox, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    vl->addWidget(btnBox);
+
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    // ── Build paths ──────────────────────────────────────────────────────────
+    QString name = nameEdit->text().trimmed();
+    if (name.isEmpty()) name = baseName;
+    // Strip any extension the user may have typed
+    for (const auto& ext : {".csv", ".gsf", ".tiff"}) {
+        if (name.endsWith(ext, Qt::CaseInsensitive))
+            name.chop(static_cast<int>(strlen(ext)));
+    }
+    // Create a subfolder with the base name inside the selected directory
+    QDir parentDir(dirEdit->text());
+    if (!parentDir.mkpath(name)) {
         QMessageBox::critical(this, "Export",
-            QString("Impossible d'ouvrir le fichier :\n%1").arg(file.errorString()));
+            QString("Impossible de créer le dossier :\n%1").arg(parentDir.absoluteFilePath(name)));
         return;
     }
+    const QDir outDir(parentDir.absoluteFilePath(name));
+    int exportCount = 0;
 
-    // Dimensions physiques (mm → m pour Gwyddion SI)
-    const double xReal = (potentiostatXMax_ - potentiostatXMin_) * 1e-3;
-    const double yReal = (potentiostatYMax_ - potentiostatYMin_) * 1e-3;
-    const double xOff  = potentiostatXMin_ * 1e-3;
-    const double yOff  = potentiostatYMin_ * 1e-3;
+    // ── Export CSV ─────────────────────────────────────────────────────────────
+    if (cbCsv->isChecked()) {
+        const QString csvPath = outDir.absoluteFilePath(name + ".csv");
+        QFile csvFile(csvPath);
+        if (!csvFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QMessageBox::critical(this, "Export",
+                QString("Impossible d'ouvrir :\n%1").arg(csvFile.errorString()));
+        } else {
+            QTextStream ts(&csvFile);
 
-    // En-tête ASCII Gwyddion Simple Field 1.0
-    QByteArray header;
-    header += "Gwyddion Simple Field 1.0\n";
-    header += QStringLiteral("XRes = %1\n").arg(potentiostatCols_).toUtf8();
-    header += QStringLiteral("YRes = %1\n").arg(potentiostatRows_).toUtf8();
-    header += QStringLiteral("XReal = %1\n").arg(xReal, 0, 'e', 8).toUtf8();
-    header += QStringLiteral("YReal = %1\n").arg(yReal, 0, 'e', 8).toUtf8();
-    header += QStringLiteral("XOffset = %1\n").arg(xOff, 0, 'e', 8).toUtf8();
-    header += QStringLiteral("YOffset = %1\n").arg(yOff, 0, 'e', 8).toUtf8();
-    header += "XYUnits = m\n";
-    header += "ZUnits = A\n";
-    header += "Title = Courant I(x,y)\n";
-    // Terminateur NUL + rembourrage à l'alignement 4 octets (spec GSF)
-    header += '\0';
-    while (header.size() % 4 != 0) header += '\0';
-    file.write(header);
+            if (!hasGrid) {
+                // ── Simple measurement: time-series ──
+                ts << "# LaserBench - Export CSV - Mesure simple\n";
+                ts << "# Date: " << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss") << "\n";
+                ts << QString("# Points: %1\n").arg(potentiostatPlotTimes_.size());
+                ts << "#\n";
+                ts << "t_s;I_A;Ewe_V\n";
 
-    // Données float32 little-endian, ligne par ligne de haut (yMax) vers bas (yMin)
-    // pour correspondre à l'orientation naturelle Gwyddion (Y croissant vers le haut)
-    for (int r = potentiostatRows_ - 1; r >= 0; --r) {
-        for (int c = 0; c < potentiostatCols_; ++c) {
-            const std::size_t matIdx = static_cast<std::size_t>(r * potentiostatCols_ + c);
-            float val = std::numeric_limits<float>::quiet_NaN();
-            if (matIdx < potentiostatMatrix_.size() && potentiostatMatrix_[matIdx].has_value())
-                val = static_cast<float>(*potentiostatMatrix_[matIdx]);
-            file.write(reinterpret_cast<const char*>(&val), sizeof(float));
+                const std::size_t n = potentiostatPlotTimes_.size();
+                for (std::size_t i = 0; i < n; ++i) {
+                    const double t = potentiostatPlotTimes_[i];
+                    const QString iStr = (i < potentiostatPlotCurrents_.size())
+                        ? QString::number(potentiostatPlotCurrents_[i], 'e', 6) : QString();
+                    const QString eweStr = (i < potentiostatPlotEwe_.size())
+                        ? QString::number(potentiostatPlotEwe_[i], 'e', 6) : QString();
+                    ts << QString::number(t, 'f', 6) << ";" << iStr << ";" << eweStr << "\n";
+                }
+            } else {
+                // ── Grid measurement ──
+                ts << "# LaserBench - Export CSV\n";
+                ts << "# Date: " << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss") << "\n";
+                ts << QString("# Grille: %1 col x %2 row\n").arg(potentiostatCols_).arg(potentiostatRows_);
+                ts << QString("# X: [%1 ; %2] mm\n")
+                      .arg(potentiostatXMin_, 0, 'f', 4).arg(potentiostatXMax_, 0, 'f', 4);
+                ts << QString("# Y: [%1 ; %2] mm\n")
+                      .arg(potentiostatYMin_, 0, 'f', 4).arg(potentiostatYMax_, 0, 'f', 4);
+
+                bool hasDwellSamples = false;
+                for (const auto& v : potentiostatCellCurrentSamples_) {
+                    if (v.size() > 1) { hasDwellSamples = true; break; }
+                }
+                ts << QString("# Mode: %1\n").arg(hasDwellSamples
+                    ? "pas-a-pas (mesures multiples par point)" : "continu (1 mesure par point)");
+                if (hasDwellSamples && potentiostatLastDwellS_ > 0.0) {
+                    ts << QString("# Dwell: %1 s\n").arg(potentiostatLastDwellS_, 0, 'f', 6);
+                }
+                ts << "#\n";
+
+                // Build index sorted by time
+                const int nCells = potentiostatRows_ * potentiostatCols_;
+                std::vector<int> sortedIdx(static_cast<std::size_t>(nCells));
+                std::iota(sortedIdx.begin(), sortedIdx.end(), 0);
+                std::sort(sortedIdx.begin(), sortedIdx.end(), [&](int a, int b) {
+                    const double tA = (static_cast<std::size_t>(a) < potentiostatCellTimes_.size()) ? potentiostatCellTimes_[static_cast<std::size_t>(a)] : 0.0;
+                    const double tB = (static_cast<std::size_t>(b) < potentiostatCellTimes_.size()) ? potentiostatCellTimes_[static_cast<std::size_t>(b)] : 0.0;
+                    return tA < tB;
+                });
+
+                ts << "# ===========================================================================\n";
+                ts << "# TABLEAU PRINCIPAL - Valeurs par cellule (tri par temps)\n";
+                ts << "# ===========================================================================\n";
+                ts << "Row;Col;X_mm;Y_mm;t_s;I_mean_A;Ewe_mean_V\n";
+
+                for (int flatIdx : sortedIdx) {
+                    const std::size_t idx = static_cast<std::size_t>(flatIdx);
+                    const int r = flatIdx / potentiostatCols_;
+                    const int c = flatIdx % potentiostatCols_;
+                    double xMm = 0.0, yMm = 0.0, tS = 0.0;
+                    if (idx < potentiostatCellPositions_.size()) {
+                        xMm = potentiostatCellPositions_[idx].x();
+                        yMm = potentiostatCellPositions_[idx].y();
+                    }
+                    if (idx < potentiostatCellTimes_.size()) {
+                        tS = potentiostatCellTimes_[idx];
+                    }
+                    QString iStr, eweStr;
+                    if (idx < potentiostatMatrix_.size() && potentiostatMatrix_[idx].has_value())
+                        iStr = QString::number(*potentiostatMatrix_[idx], 'e', 6);
+                    if (idx < potentiostatEweMatrix_.size() && potentiostatEweMatrix_[idx].has_value())
+                        eweStr = QString::number(*potentiostatEweMatrix_[idx], 'e', 6);
+
+                    ts << (r + 1) << ";" << (c + 1) << ";"
+                       << QString::number(xMm, 'f', 4) << ";"
+                       << QString::number(yMm, 'f', 4) << ";"
+                       << QString::number(tS, 'f', 6) << ";"
+                       << iStr << ";" << eweStr << "\n";
+                }
+
+                // ── Individual cell tables ──
+                if (hasDwellSamples) {
+                    for (int flatIdx : sortedIdx) {
+                        const std::size_t idx = static_cast<std::size_t>(flatIdx);
+                        const int r = flatIdx / potentiostatCols_;
+                        const int c = flatIdx % potentiostatCols_;
+                        const auto& iSamples = (idx < potentiostatCellCurrentSamples_.size())
+                            ? potentiostatCellCurrentSamples_[idx] : std::vector<double>{};
+                        const auto& eweSamples = (idx < potentiostatCellEweSamples_.size())
+                            ? potentiostatCellEweSamples_[idx] : std::vector<double>{};
+                        const std::size_t nSamples = std::max(iSamples.size(), eweSamples.size());
+                        if (nSamples <= 1) continue;
+
+                        double xMm = 0.0, yMm = 0.0;
+                        if (idx < potentiostatCellPositions_.size()) {
+                            xMm = potentiostatCellPositions_[idx].x();
+                            yMm = potentiostatCellPositions_[idx].y();
+                        }
+                        ts << "#\n";
+                        ts << "# ===========================================================================\n";
+                        ts << QString("# CELLULE (%1,%2) - Position (%3 ; %4) mm - %5 mesures\n")
+                              .arg(r + 1).arg(c + 1)
+                              .arg(xMm, 0, 'f', 4).arg(yMm, 0, 'f', 4)
+                              .arg(nSamples);
+                        ts << "# ===========================================================================\n";
+                        ts << "Sample;I_A;Ewe_V\n";
+
+                        for (std::size_t s = 0; s < nSamples; ++s) {
+                            const QString iVal = (s < iSamples.size())
+                                ? QString::number(iSamples[s], 'e', 6) : QString();
+                            const QString eweVal = (s < eweSamples.size())
+                                ? QString::number(eweSamples[s], 'e', 6) : QString();
+                            ts << (s + 1) << ";" << iVal << ";" << eweVal << "\n";
+                        }
+                    }
+                }
+            }
+            ts.flush();
+            csvFile.close();
+            appendLog(QString("Export CSV : %1").arg(csvPath));
+            ++exportCount;
         }
     }
 
-    appendLog(QString("Export GSF : %1  (%2 x %3 px, X=[%4, %5] mm, Y=[%6, %7] mm)")
-        .arg(filePath)
-        .arg(potentiostatCols_).arg(potentiostatRows_)
-        .arg(potentiostatXMin_, 0, 'f', 4).arg(potentiostatXMax_, 0, 'f', 4)
-        .arg(potentiostatYMin_, 0, 'f', 4).arg(potentiostatYMax_, 0, 'f', 4));
+    // ── Export GSF ─────────────────────────────────────────────────────────────
+    if (cbGsf->isChecked() && hasGrid) {
+        const QString gsfPath = outDir.absoluteFilePath(name + ".gsf");
+        QFile file(gsfPath);
+        if (!file.open(QIODevice::WriteOnly)) {
+            QMessageBox::critical(this, "Export",
+                QString("Impossible d'ouvrir :\n%1").arg(file.errorString()));
+        } else {
+            const double xReal = (potentiostatXMax_ - potentiostatXMin_) * 1e-3;
+            const double yReal = (potentiostatYMax_ - potentiostatYMin_) * 1e-3;
+            const double xOff  = potentiostatXMin_ * 1e-3;
+            const double yOff  = potentiostatYMin_ * 1e-3;
+            appendLog(QString("GSF dims: XMin=%1 XMax=%2 YMin=%3 YMax=%4 mm → xReal=%5 yReal=%6 m")
+                .arg(potentiostatXMin_, 0, 'f', 4).arg(potentiostatXMax_, 0, 'f', 4)
+                .arg(potentiostatYMin_, 0, 'f', 4).arg(potentiostatYMax_, 0, 'f', 4)
+                .arg(xReal, 0, 'g', 10).arg(yReal, 0, 'g', 10));
+
+            QByteArray header;
+            header.append("Gwyddion Simple Field 1.0\n");
+            header.append("XRes = ");
+            header.append(QByteArray::number(potentiostatCols_));
+            header.append('\n');
+            header.append("YRes = ");
+            header.append(QByteArray::number(potentiostatRows_));
+            header.append('\n');
+            header.append("XReal = ");
+            header.append(QByteArray::number(xReal, 'g', 15));
+            header.append('\n');
+            header.append("YReal = ");
+            header.append(QByteArray::number(yReal, 'g', 15));
+            header.append('\n');
+            header.append("XOffset = ");
+            header.append(QByteArray::number(xOff, 'g', 15));
+            header.append('\n');
+            header.append("YOffset = ");
+            header.append(QByteArray::number(yOff, 'g', 15));
+            header.append('\n');
+            header.append("XYUnits = m\n");
+            header.append("ZUnits = A\n");
+            header.append("Title = Courant I(x,y)\n");
+            header += '\0';
+            while (header.size() % 4 != 0) header += '\0';
+            file.write(header);
+
+            for (int r = potentiostatRows_ - 1; r >= 0; --r) {
+                for (int c = 0; c < potentiostatCols_; ++c) {
+                    const std::size_t matIdx = static_cast<std::size_t>(r * potentiostatCols_ + c);
+                    float val = std::numeric_limits<float>::quiet_NaN();
+                    if (matIdx < potentiostatMatrix_.size() && potentiostatMatrix_[matIdx].has_value())
+                        val = static_cast<float>(*potentiostatMatrix_[matIdx]);
+                    file.write(reinterpret_cast<const char*>(&val), sizeof(float));
+                }
+            }
+            file.close();
+            appendLog(QString("Export GSF : %1").arg(gsfPath));
+            ++exportCount;
+        }
+    }
+
+    // ── Export TIFF heatmap ────────────────────────────────────────────────────
+    if (cbHeat->isChecked() && hasGrid) {
+        const QString heatPath = outDir.absoluteFilePath(name + "_heatmap.tiff");
+        if (potentiostatHeatmapWidget_ != nullptr) {
+            const QSize sz = potentiostatHeatmapWidget_->size().isEmpty()
+                ? QSize(1200, 800) : potentiostatHeatmapWidget_->size();
+            QImage img(sz, QImage::Format_ARGB32_Premultiplied);
+            img.fill(Qt::white);
+            { QPainter p(&img); potentiostatHeatmapWidget_->render(&p, {}, {}, QWidget::DrawChildren); }
+            if (saveTiff(img, heatPath)) {
+                appendLog(QString("Export TIFF heatmap : %1").arg(heatPath));
+                ++exportCount;
+            }
+        }
+    }
+
+    // ── Export TIFF 3D ─────────────────────────────────────────────────────────
+    if (cb3D->isChecked() && hasGrid) {
+        const QString tdPath = outDir.absoluteFilePath(name + "_3D.tiff");
+        if (potentiostat3DWidget_ != nullptr) {
+            const QSize sz = potentiostat3DWidget_->size().isEmpty()
+                ? QSize(1200, 900) : potentiostat3DWidget_->size();
+            QImage img(sz, QImage::Format_ARGB32_Premultiplied);
+            img.fill(Qt::white);
+            { QPainter p(&img); potentiostat3DWidget_->render(&p, {}, {}, QWidget::DrawChildren); }
+            if (saveTiff(img, tdPath)) {
+                appendLog(QString("Export TIFF 3D : %1").arg(tdPath));
+                ++exportCount;
+            }
+        }
+    }
+
+    if (exportCount == 0) {
+        QMessageBox::warning(this, "Export", "Aucun format sélectionné ou erreur d'écriture.");
+    } else {
+        appendLog(QString("Export terminé : %1 fichier(s) dans %2").arg(exportCount).arg(outDir.absolutePath()));
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  Import CSV → reconstructs visualization from previously exported data
+// ══════════════════════════════════════════════════════════════════════════════
+void MainWindow::onImportCsv()
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this, "Importer un fichier CSV", QString(), "CSV (*.csv);;Tous (*)");
+    if (path.isEmpty()) return;
+
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QMessageBox::critical(this, "Import",
+            QString("Impossible d'ouvrir :\n%1").arg(file.errorString()));
+        return;
+    }
+
+    QTextStream in(&file);
+    enum class Format { Unknown, Grid, TimeSeries };
+    Format fmt = Format::Unknown;
+
+    int metaRows = 0, metaCols = 0;
+    double metaXMin = 0, metaXMax = 0, metaYMin = 0, metaYMax = 0;
+    bool hasMeta = false;
+    double metaDwellS = 0.0;
+
+    struct GridRow { int row; int col; double x; double y; double t; double iMean; double ewe; };
+    std::vector<GridRow> gridData;
+
+    struct TimeRow { double t; double i; double ewe; };
+    std::vector<TimeRow> tsData;
+
+    struct CellDetail { std::vector<double> iSamples; std::vector<double> eweSamples; };
+    std::map<int, CellDetail> cellDetails;
+
+    int currentCellKey = -1;
+    bool inCellSection = false;
+    int parsedNSamples = 0;  // track max samples per cell for dwell estimation
+
+    while (!in.atEnd()) {
+        const QString rawLine = in.readLine();
+        const QString line = rawLine.trimmed();
+        if (line.isEmpty()) continue;
+
+        if (line.startsWith('#')) {
+            static const QRegularExpression reGrid(
+                R"(#\s*Grille\s*:\s*(\d+)\s*col\s*x\s*(\d+)\s*row)");
+            auto mGrid = reGrid.match(line);
+            if (mGrid.hasMatch()) {
+                metaCols = mGrid.captured(1).toInt();
+                metaRows = mGrid.captured(2).toInt();
+            }
+            static const QRegularExpression reX(
+                R"(#\s*X\s*:\s*\[\s*([-+0-9.eE]+)\s*;\s*([-+0-9.eE]+)\s*\]\s*mm)");
+            auto mX = reX.match(line);
+            if (mX.hasMatch()) {
+                metaXMin = mX.captured(1).toDouble();
+                metaXMax = mX.captured(2).toDouble();
+                hasMeta = true;
+            }
+            static const QRegularExpression reY(
+                R"(#\s*Y\s*:\s*\[\s*([-+0-9.eE]+)\s*;\s*([-+0-9.eE]+)\s*\]\s*mm)");
+            auto mY = reY.match(line);
+            if (mY.hasMatch()) {
+                metaYMin = mY.captured(1).toDouble();
+                metaYMax = mY.captured(2).toDouble();
+            }
+            static const QRegularExpression reDwell(
+                R"(#\s*Dwell\s*:\s*([-+0-9.eE]+)\s*s)");
+            auto mDwell = reDwell.match(line);
+            if (mDwell.hasMatch()) {
+                metaDwellS = mDwell.captured(1).toDouble();
+            }
+            static const QRegularExpression reCell(
+                R"(#\s*CELLULE\s*\(\s*(\d+)\s*,\s*(\d+)\s*\))");
+            auto mCell = reCell.match(line);
+            if (mCell.hasMatch() && metaCols > 0) {
+                const int cr = mCell.captured(1).toInt() - 1;
+                const int cc = mCell.captured(2).toInt() - 1;
+                currentCellKey = cr * metaCols + cc;
+                inCellSection = false;
+            }
+            continue;
+        }
+
+        if (line.startsWith("Row;Col;")) {
+            fmt = Format::Grid;
+            inCellSection = false;
+            currentCellKey = -1;
+            continue;
+        }
+        if (line.startsWith("t_s;I_A;Ewe_V")) {
+            fmt = Format::TimeSeries;
+            continue;
+        }
+        if (line.startsWith("Sample;I_A;Ewe_V")) {
+            inCellSection = true;
+            if (currentCellKey >= 0) cellDetails[currentCellKey] = {};
+            continue;
+        }
+
+        if (inCellSection && currentCellKey >= 0) {
+            const QStringList parts = line.split(';');
+            if (parts.size() >= 3) {
+                auto& cd = cellDetails[currentCellKey];
+                cd.iSamples.push_back(parts[1].toDouble());
+                cd.eweSamples.push_back(parts[2].toDouble());
+                parsedNSamples = std::max(parsedNSamples, static_cast<int>(cd.iSamples.size()));
+            }
+            continue;
+        }
+
+        const QStringList parts = line.split(';');
+        if (fmt == Format::Grid && parts.size() >= 7) {
+            GridRow gr;
+            gr.row  = parts[0].toInt();
+            gr.col  = parts[1].toInt();
+            gr.x    = parts[2].toDouble();
+            gr.y    = parts[3].toDouble();
+            gr.t    = parts[4].toDouble();
+            gr.iMean = parts[5].isEmpty() ? 0.0 : parts[5].toDouble();
+            gr.ewe   = parts[6].isEmpty() ? 0.0 : parts[6].toDouble();
+            gridData.push_back(gr);
+        } else if (fmt == Format::TimeSeries && parts.size() >= 3) {
+            TimeRow tr;
+            tr.t   = parts[0].toDouble();
+            tr.i   = parts[1].isEmpty() ? 0.0 : parts[1].toDouble();
+            tr.ewe = parts[2].isEmpty() ? 0.0 : parts[2].toDouble();
+            tsData.push_back(tr);
+        }
+    }
+    file.close();
+
+    if (gridData.empty() && tsData.empty()) {
+        QMessageBox::warning(this, "Import", "Aucune donnée valide trouvée dans le fichier CSV.");
+        return;
+    }
+
+    // ── Clear import data ─────────────────────────────────────────────────────
+    importPlotTimes_.clear();
+    importPlotCurrents_.clear();
+    importPlotEwe_.clear();
+    importMatrix_.clear();
+    importEweMatrix_.clear();
+    importCellCurrentSamples_.clear();
+    importCellEweSamples_.clear();
+    importCellPositions_.clear();
+    importCellTimes_.clear();
+    importRows_ = 0;
+    importCols_ = 0;
+    importXMin_ = importXMax_ = importYMin_ = importYMax_ = 0.0;
+    importLastDwellS_ = 0.0;
+
+    // ── Populate import data ──────────────────────────────────────────────────
+    if (!gridData.empty()) {
+        if (metaRows == 0 || metaCols == 0) {
+            int maxR = 0, maxC = 0;
+            for (const auto& g : gridData) {
+                maxR = std::max(maxR, g.row);
+                maxC = std::max(maxC, g.col);
+            }
+            metaRows = maxR;
+            metaCols = maxC;
+        }
+
+        importRows_ = metaRows;
+        importCols_ = metaCols;
+        const std::size_t nCells = static_cast<std::size_t>(metaRows * metaCols);
+        importMatrix_.assign(nCells, std::nullopt);
+        importEweMatrix_.assign(nCells, std::nullopt);
+        importCellCurrentSamples_.assign(nCells, {});
+        importCellEweSamples_.assign(nCells, {});
+        importCellPositions_.assign(nCells, QPointF());
+        importCellTimes_.assign(nCells, 0.0);
+
+        if (hasMeta) {
+            importXMin_ = metaXMin; importXMax_ = metaXMax;
+            importYMin_ = metaYMin; importYMax_ = metaYMax;
+        } else {
+            double xMin = 1e18, xMax = -1e18, yMin = 1e18, yMax = -1e18;
+            for (const auto& g : gridData) {
+                xMin = std::min(xMin, g.x); xMax = std::max(xMax, g.x);
+                yMin = std::min(yMin, g.y); yMax = std::max(yMax, g.y);
+            }
+            importXMin_ = xMin; importXMax_ = xMax;
+            importYMin_ = yMin; importYMax_ = yMax;
+        }
+
+        // Use dwell time from CSV header if available, otherwise estimate
+        if (metaDwellS > 0.0) {
+            importLastDwellS_ = metaDwellS;
+        } else {
+            std::sort(gridData.begin(), gridData.end(),
+                      [](const GridRow& a, const GridRow& b) { return a.t < b.t; });
+            if (gridData.size() >= 2 && parsedNSamples > 1) {
+                const double dt = gridData[1].t - gridData[0].t;
+                importLastDwellS_ = std::max(0.1, dt);
+            }
+        }
+
+        for (const auto& g : gridData) {
+            const int r = g.row - 1;
+            const int c = g.col - 1;
+            if (r < 0 || r >= metaRows || c < 0 || c >= metaCols) continue;
+            const std::size_t idx = static_cast<std::size_t>(r * metaCols + c);
+            importMatrix_[idx] = g.iMean;
+            importEweMatrix_[idx] = g.ewe;
+            importCellPositions_[idx] = QPointF(g.x, g.y);
+            importCellTimes_[idx] = g.t;
+
+            importPlotTimes_.push_back(g.t);
+            importPlotCurrents_.push_back(g.iMean);
+            importPlotEwe_.push_back(g.ewe);
+
+            auto it = cellDetails.find(r * metaCols + c);
+            if (it != cellDetails.end()) {
+                importCellCurrentSamples_[idx] = it->second.iSamples;
+                importCellEweSamples_[idx] = it->second.eweSamples;
+            }
+        }
+
+        if (importMapBox_ != nullptr) importMapBox_->setVisible(true);
+        if (importView3DButton_ != nullptr) {
+            importView3DButton_->setVisible(true);
+            importView3DButton_->setEnabled(true);
+        }
+    } else {
+        // Time-series
+        importPlotTimes_.reserve(tsData.size());
+        importPlotCurrents_.reserve(tsData.size());
+        importPlotEwe_.reserve(tsData.size());
+        for (const auto& tr : tsData) {
+            importPlotTimes_.push_back(tr.t);
+            importPlotCurrents_.push_back(tr.i);
+            importPlotEwe_.push_back(tr.ewe);
+        }
+        if (importMapBox_ != nullptr) importMapBox_->setVisible(false);
+        if (importView3DButton_ != nullptr) importView3DButton_->setVisible(false);
+    }
+
+    refreshImportVisualization();
+
+    if (importInfoLabel_ != nullptr) {
+        const QString info = gridData.empty()
+            ? QString("Mesure simple : %1 points").arg(tsData.size())
+            : QString("Grille %1×%2 : %3 cellules\n%4")
+                .arg(metaCols).arg(metaRows)
+                .arg(gridData.size())
+                .arg(QFileInfo(path).fileName());
+        importInfoLabel_->setText(info);
+    }
+    if (tabWidget_ != nullptr) tabWidget_->setCurrentIndex(3);  // Switch to "Import"
+    appendLog(QString("Import CSV : %1  (%2 points)")
+        .arg(path).arg(gridData.empty() ? tsData.size() : gridData.size()));
 }
 
 void MainWindow::onStopCaPotentiostat()
@@ -6879,6 +7910,11 @@ void MainWindow::showScanConfigDialog()
     dwellSpin->setRange(0.1, 3600.0); dwellSpin->setDecimals(2); dwellSpin->setSuffix(" s");
     dwellSpin->setValue(scanConfig_.dwellS);
     ppGrid->addWidget(dwellSpin, 1, 1);
+    ppGrid->addWidget(new QLabel("Nb mesures / point :"), 2, 0);
+    auto* dwellSamplesSpin = new QSpinBox;
+    dwellSamplesSpin->setRange(1, 999); dwellSamplesSpin->setSuffix(" mesure(s)");
+    dwellSamplesSpin->setValue(scanConfig_.dwellSamples);
+    ppGrid->addWidget(dwellSamplesSpin, 2, 1);
     stack->addWidget(ppWidget);   // index 0
 
     // Panel 1 — Balayage continu
@@ -6941,13 +7977,14 @@ void MainWindow::showScanConfigDialog()
     }
 
     if (ppBtn->isChecked()) {
-        scanConfig_.mode   = ScanConfig::AcquisitionMode::PointByPoint;
-        scanConfig_.stepMm = stepSpin->value();
-        scanConfig_.dwellS = dwellSpin->value();
+        scanConfig_.mode         = ScanConfig::AcquisitionMode::PointByPoint;
+        scanConfig_.stepMm       = stepSpin->value();
+        scanConfig_.dwellS       = dwellSpin->value();
+        scanConfig_.dwellSamples = dwellSamplesSpin->value();
         if (sequenceStepMmEdit_)   sequenceStepMmEdit_->setText(QString::number(scanConfig_.stepMm, 'g', 4));
         if (sequenceDurationEdit_) sequenceDurationEdit_->setText(QString::number(scanConfig_.dwellS, 'g', 3));
-        appendLog(QString("Balayage point par point : pas=%1 mm, dwell=%2 s")
-            .arg(scanConfig_.stepMm, 0, 'f', 3).arg(scanConfig_.dwellS, 0, 'f', 2));
+        appendLog(QString("Balayage point par point : pas=%1 mm, dwell=%2 s, %3 mesure(s)/pt")
+            .arg(scanConfig_.stepMm, 0, 'f', 3).arg(scanConfig_.dwellS, 0, 'f', 2).arg(scanConfig_.dwellSamples));
     } else {
         scanConfig_.mode              = ScanConfig::AcquisitionMode::Continuous;
         scanConfig_.scanSpeedMmPerS   = speedSpin->value();

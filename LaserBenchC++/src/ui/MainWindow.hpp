@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -66,6 +67,7 @@ public:
         // Point par point
         double            stepMm           {0.05};
         double            dwellS           {0.5};
+        int               dwellSamples     {1};
         // Balayage continu
         double            scanSpeedMmPerS  {1.0};
         ContinuousTrigger trigger          {ContinuousTrigger::Distance};
@@ -98,6 +100,9 @@ private:
     QWidget* buildSetupTab();
     QWidget* buildPotentiostatTab();
     QWidget* buildMeasureTab();
+    QWidget* buildImportTab();
+    void refreshImportVisualization();
+    void showImportCellDetailDialog(int row, int col);
     void openStartupConnectionDialog();
     void openMotorConnectionDialog();
     void openCameraConnectionDialog();
@@ -150,7 +155,8 @@ private:
     void onConnectPotentiostat();
     void onStartCaPotentiostat();
     void onStopCaPotentiostat();
-    void onExportPotentiostatMatrix();
+    void onExportPotentiostat();
+    void onImportCsv();
     void onDisconnectPotentiostat();
     void onLoadFirmware();
     void syncPotentiostatTechniqueUi();
@@ -178,10 +184,13 @@ private:
         const QPointF& waypointMm,
         double elapsedTime,
         double ewe,
-        double current
+        double current,
+        std::vector<double> cellCurrentSamples = {},
+        std::vector<double> cellEweSamples = {}
     );
     void clearPotentiostatVisualization();
     void refreshPotentiostatVisualization();
+    void showCellDetailDialog(int row, int col);
 
     double readJogStepMm() const;
     double readAbsoluteTargetMm(hardware::AxisId axis) const;
@@ -194,6 +203,10 @@ private:
     std::vector<QPointF> buildWaypointsRect(const QPointF& startMm, const QPointF& endMm, double stepMm) const;
     void setSequenceRunning(bool running);
     std::optional<QPointF> latestPolledMotorPosition();
+    void recordMotorPositionSample(
+        const QPointF& positionMm,
+        std::chrono::steady_clock::time_point timestamp = std::chrono::steady_clock::now());
+    std::optional<QPointF> estimateMotorPositionAt(std::chrono::steady_clock::time_point timestamp) const;
     void startPredictedMotorMotion(
         std::optional<double> startXmm,
         std::optional<double> startYmm,
@@ -215,6 +228,12 @@ private:
         double velocityMmPerS {0.0};
         int direction {0};
         std::chrono::steady_clock::time_point baseTimestamp {};
+    };
+
+    struct TimedMotorPositionSample
+    {
+        std::chrono::steady_clock::time_point timestamp {};
+        QPointF positionMm;
     };
 
     core::RuntimeSnapshot snapshot_;
@@ -366,6 +385,18 @@ private:
     Potentiostat3DWidget*     potentiostat3DWidget_     {nullptr};
     QStackedWidget*           measureRightStack_        {nullptr};
     QPushButton*              view3DButton_             {nullptr};
+
+    // Import tab widgets
+    QPushButton*              importButton_             {nullptr};
+    QComboBox*                importGraphTypeCombo_     {nullptr};
+    QGroupBox*                importGraphBox_           {nullptr};
+    QGroupBox*                importMapBox_             {nullptr};
+    PotentiostatGraphWidget*  importGraphWidget_        {nullptr};
+    PotentiostatHeatmapWidget* importHeatmapWidget_     {nullptr};
+    Potentiostat3DWidget*     import3DWidget_           {nullptr};
+    QStackedWidget*           importRightStack_         {nullptr};
+    QPushButton*              importView3DButton_       {nullptr};
+    QLabel*                   importInfoLabel_          {nullptr};
     QPlainTextEdit* logView_ {nullptr};
     QDialog* startupConnectionDialog_ {nullptr};
     QDialog* motorConnectionDialog_ {nullptr};
@@ -411,6 +442,12 @@ private:
     std::vector<double> potentiostatPlotCurrents_;
     std::vector<double> potentiostatPlotEwe_;
     std::vector<std::optional<double>> potentiostatMatrix_;
+    std::vector<std::vector<double>> potentiostatCellCurrentSamples_;
+    std::vector<std::vector<double>> potentiostatCellEweSamples_;
+    std::vector<std::optional<double>> potentiostatEweMatrix_;
+    std::vector<QPointF> potentiostatCellPositions_;
+    std::vector<double> potentiostatCellTimes_;
+    double potentiostatLastDwellS_ {0.0};
     std::vector<std::pair<int, int>> potentiostatScanOrder_;
     int potentiostatRows_ {0};
     int potentiostatCols_ {0};
@@ -420,8 +457,27 @@ private:
     double potentiostatXMax_ {0.0};
     double potentiostatYMin_ {0.0};
     double potentiostatYMax_ {0.0};
+
+    // Import tab data
+    std::vector<double> importPlotTimes_;
+    std::vector<double> importPlotCurrents_;
+    std::vector<double> importPlotEwe_;
+    std::vector<std::optional<double>> importMatrix_;
+    std::vector<std::optional<double>> importEweMatrix_;
+    std::vector<std::vector<double>> importCellCurrentSamples_;
+    std::vector<std::vector<double>> importCellEweSamples_;
+    std::vector<QPointF> importCellPositions_;
+    std::vector<double> importCellTimes_;
+    int importRows_ {0};
+    int importCols_ {0};
+    double importXMin_ {0.0};
+    double importXMax_ {0.0};
+    double importYMin_ {0.0};
+    double importYMax_ {0.0};
+    double importLastDwellS_ {0.0};
     int currentWaypointIndex_ {-1};
     std::optional<QPointF> cachedMotorMm_;
+    std::deque<TimedMotorPositionSample> motorPositionHistory_;
     bool sequenceRectFollowSample_ {false};
     QCheckBox* gotoInvertXCheck_ {nullptr};
     QCheckBox* gotoInvertYCheck_ {nullptr};

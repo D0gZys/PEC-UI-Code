@@ -36,7 +36,7 @@ import matplotlib.pyplot as plt
 EVENT_RE = re.compile(r"^\[(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\] \[(?P<cat>[A-Z_]+)\] (?P<body>.*)$")
 POINT_MM_RE = re.compile(r"\(([-+0-9.eE]+),([-+0-9.eE]+)\)\s*mm")
 POINT_PX_RE = re.compile(r"\(([-+0-9]+),([-+0-9]+)\)\s*px")
-MOTOR_RE = re.compile(r"X=([-+0-9.eE]+)\s+Y=([-+0-9.eE]+)(?:\s*mm)?")
+MOTOR_RE = re.compile(r"X=([-+]?[0-9][0-9.eE+-]*)\s+Y=([-+]?[0-9][0-9.eE+-]*)(?:\s*mm)?")
 FRACTION_RE = re.compile(r"^\s*(\d+)\s*/\s*(\d+)\s*$")
 
 
@@ -69,6 +69,7 @@ class ScanConfig:
     selection_height_px: int | None = None
     step_mm: float | None = None
     dwell_s: float | None = None
+    dwell_samples: int | None = None
     reposition_speed_mm_s: float | None = None
     sample_pitch_mm: float | None = None
     scan_speed_mm_s: float | None = None
@@ -78,6 +79,7 @@ class ScanConfig:
     start_corner: str | None = None
     primary_axis: str | None = None
     simple_period_s: float | None = None
+    run_up_margin_mm: float | None = None
 
 
 @dataclass
@@ -101,6 +103,11 @@ class Acquisition:
     motor_mm: tuple[float, float] | None
     ewe_v: float | None
     current_a: float | None
+    n_samples: int | None = None
+    current_std: float | None = None
+    ewe_std: float | None = None
+    current_samples: list[float] | None = None
+    ewe_samples: list[float] | None = None
 
 
 @dataclass
@@ -111,6 +118,7 @@ class AnalysisResult:
     spacing_rows: list[dict[str, Any]]
     point_timing_rows: list[dict[str, Any]]
     continuous_line_rows: list[dict[str, Any]]
+    multisample_rows: list[dict[str, Any]]
     warnings: list[str]
     summary: dict[str, Any]
     report: str
@@ -176,11 +184,16 @@ def parse_float(text: str) -> float | None:
 
 def parse_token_value(key: str, value: str) -> Any:
     key = normalize_key(key)
+
+    # Keep comma-separated sample lists as raw strings
+    if key in {"i_samples", "ewe_samples"}:
+        return value.strip()
+
     parsed_dt = parse_datetime(value)
     if parsed_dt is not None:
         return parsed_dt
 
-    if key in {"cible", "depart", "arrivee", "moteur_cible"}:
+    if key in {"cible", "depart", "arrivee", "moteur_cible", "pos_cible"}:
         point = parse_point_mm(value)
         if point is not None:
             return point
@@ -270,13 +283,24 @@ def parse_config(header_lines: list[str]) -> ScanConfig:
                 config.primary_axis = match.group(2).strip()
         elif line.startswith("Balayage pas a pas:"):
             match = re.search(
-                r"pas=([-+0-9.eE]+)\s*mm\s*\|\s*dwell=([-+0-9.eE]+)\s*s\s*\|\s*vitesse reposition=([-+0-9.eE]+)\s*mm/s",
+                r"pas=([-+0-9.eE]+)\s*mm\s*\|\s*dwell=([-+0-9.eE]+)\s*s\s*\|\s*mesures_par_point=(\d+)\s*\|\s*vitesse reposition=([-+0-9.eE]+)\s*mm/s",
                 line,
             )
             if match:
                 config.step_mm = float(match.group(1))
                 config.dwell_s = float(match.group(2))
-                config.reposition_speed_mm_s = float(match.group(3))
+                config.dwell_samples = int(match.group(3))
+                config.reposition_speed_mm_s = float(match.group(4))
+            else:
+                # Fallback for older logs without mesures_par_point
+                match_old = re.search(
+                    r"pas=([-+0-9.eE]+)\s*mm\s*\|\s*dwell=([-+0-9.eE]+)\s*s\s*\|\s*vitesse reposition=([-+0-9.eE]+)\s*mm/s",
+                    line,
+                )
+                if match_old:
+                    config.step_mm = float(match_old.group(1))
+                    config.dwell_s = float(match_old.group(2))
+                    config.reposition_speed_mm_s = float(match_old.group(3))
         elif line.startswith("Balayage continu:"):
             sample_pitch = re.search(r"pas acquisition=([-+0-9.eE]+)\s*mm", line)
             scan_speed = re.search(r"vitesse=([-+0-9.eE]+)\s*mm/s", line)
@@ -297,6 +321,10 @@ def parse_config(header_lines: list[str]) -> ScanConfig:
             match = re.search(r"periode UI=([-+0-9.eE]+)\s*s", line)
             if match:
                 config.simple_period_s = float(match.group(1))
+        elif line.startswith("Zone continue effective:") or line.startswith("Ligne continue effective:"):
+            margin_match = re.search(r"marge_acceleration=([-+0-9.eE]+)\s*mm", line)
+            if margin_match:
+                config.run_up_margin_mm = float(margin_match.group(1))
 
     return config
 
@@ -401,6 +429,19 @@ def same_sweep_relation(config: ScanConfig, previous: Acquisition, current: Acqu
     return "line_jump"
 
 
+def _parse_sample_list(value: Any) -> list[float] | None:
+    """Parse a comma-separated list of floats stored as a single field value."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return [float(v) for v in text.split(",") if v.strip()]
+    except ValueError:
+        return None
+
+
 def extract_acquisitions(log: MeasurementLog) -> list[Acquisition]:
     acquisitions: list[Acquisition] = []
     for event in log.events:
@@ -418,7 +459,11 @@ def extract_acquisitions(log: MeasurementLog) -> list[Acquisition]:
         row = int(event.fields["row"]) if "row" in event.fields else None
         col = int(event.fields["col"]) if "col" in event.fields else None
         target = event.fields.get("cible")
-        motor = event.fields.get("moteur")
+        motor = event.fields.get("moteur_interp")
+        if not isinstance(motor, tuple):
+            motor = event.fields.get("moteur")
+        if not isinstance(motor, tuple):
+            motor = event.fields.get("moteur_snap")
         acquisitions.append(
             Acquisition(
                 order=order,
@@ -430,8 +475,13 @@ def extract_acquisitions(log: MeasurementLog) -> list[Acquisition]:
                 col=col,
                 target_mm=target if isinstance(target, tuple) else None,
                 motor_mm=motor if isinstance(motor, tuple) else None,
-                ewe_v=float(event.fields["ewe"]) if "ewe" in event.fields else None,
-                current_a=float(event.fields["i"]) if "i" in event.fields else None,
+                ewe_v=float(event.fields.get("ewe_moy") or event.fields.get("ewe") or 0) if ("ewe_moy" in event.fields or "ewe" in event.fields) else None,
+                current_a=float(event.fields.get("i_moy") or event.fields.get("i") or 0) if ("i_moy" in event.fields or "i" in event.fields) else None,
+                n_samples=int(event.fields["n_mesures"]) if "n_mesures" in event.fields else None,
+                current_std=float(event.fields["i_std"]) if "i_std" in event.fields else None,
+                ewe_std=float(event.fields["ewe_std"]) if "ewe_std" in event.fields else None,
+                current_samples=_parse_sample_list(event.fields.get("i_samples")),
+                ewe_samples=_parse_sample_list(event.fields.get("ewe_samples")),
             )
         )
 
@@ -571,6 +621,7 @@ def build_continuous_line_rows(log: MeasurementLog) -> list[dict[str, Any]]:
             info["end_x_mm"], info["end_y_mm"] = event.fields.get("arrivee", (None, None))
             info["axis"] = event.fields.get("axe")
             info["length_mm"] = event.fields.get("longueur")
+            info["motion_length_mm"] = event.fields.get("longueur_mouvement")
             info["samples"] = event.fields.get("echantillons")
         elif event.category == "MOVE" and tag == "repositionnement_ligne_debut":
             info["reposition_start"] = event.timestamp
@@ -595,8 +646,11 @@ def build_continuous_line_rows(log: MeasurementLog) -> list[dict[str, Any]]:
         if log.config.row_step_mm is not None and isinstance(info.get("reposition_speed_mm_s"), (int, float)) and info["reposition_speed_mm_s"] > 0:
             reposition_expected = log.config.row_step_mm / float(info["reposition_speed_mm_s"])
         sweep_expected = None
-        if isinstance(info.get("length_mm"), (int, float)) and isinstance(info.get("sweep_speed_mm_s"), (int, float)) and info["sweep_speed_mm_s"] > 0:
-            sweep_expected = float(info["length_mm"]) / float(info["sweep_speed_mm_s"])
+        effective_length = info.get("motion_length_mm")
+        if not isinstance(effective_length, (int, float)):
+            effective_length = info.get("length_mm")
+        if isinstance(effective_length, (int, float)) and isinstance(info.get("sweep_speed_mm_s"), (int, float)) and info["sweep_speed_mm_s"] > 0:
+            sweep_expected = float(effective_length) / float(info["sweep_speed_mm_s"])
 
         rows.append(
             {
@@ -604,6 +658,7 @@ def build_continuous_line_rows(log: MeasurementLog) -> list[dict[str, Any]]:
                 "line_total": info.get("line_total"),
                 "axis": info.get("axis"),
                 "length_mm": info.get("length_mm"),
+                "motion_length_mm": info.get("motion_length_mm"),
                 "samples": info.get("samples"),
                 "start_x_mm": info.get("start_x_mm"),
                 "start_y_mm": info.get("start_y_mm"),
@@ -878,6 +933,96 @@ def analyze_point_by_point_timing(log: MeasurementLog) -> tuple[list[str], list[
     return lines, warnings
 
 
+def build_multisample_rows(acqs: list[Acquisition]) -> list[dict[str, Any]]:
+    """Build per-point multi-sample precision rows (only for points with >1 sample)."""
+    rows: list[dict[str, Any]] = []
+    for acq in acqs:
+        if acq.n_samples is None or acq.n_samples <= 1:
+            continue
+        row: dict[str, Any] = {
+            "order": acq.order,
+            "row": acq.row,
+            "col": acq.col,
+            "n_samples": acq.n_samples,
+            "I_mean_a": acq.current_a,
+            "Ewe_mean_v": acq.ewe_v,
+            "I_std_a": acq.current_std,
+            "Ewe_std_v": acq.ewe_std,
+        }
+        if acq.current_samples:
+            row["I_min_a"] = min(acq.current_samples)
+            row["I_max_a"] = max(acq.current_samples)
+            row["I_range_a"] = row["I_max_a"] - row["I_min_a"]
+        if acq.ewe_samples:
+            row["Ewe_min_v"] = min(acq.ewe_samples)
+            row["Ewe_max_v"] = max(acq.ewe_samples)
+            row["Ewe_range_v"] = row["Ewe_max_v"] - row["Ewe_min_v"]
+        if acq.current_a and acq.current_std and acq.current_a != 0:
+            row["I_cv_pct"] = abs(acq.current_std / acq.current_a) * 100.0
+        if acq.ewe_v and acq.ewe_std and acq.ewe_v != 0:
+            row["Ewe_cv_pct"] = abs(acq.ewe_std / acq.ewe_v) * 100.0
+        rows.append(row)
+    return rows
+
+
+def analyze_multisample_precision(acqs: list[Acquisition], config: ScanConfig) -> tuple[list[str], list[str]]:
+    """Analyze precision across multi-sample dwell acquisitions."""
+    lines: list[str] = []
+    warnings: list[str] = []
+
+    ms_acqs = [acq for acq in acqs if acq.n_samples is not None and acq.n_samples > 1]
+    if not ms_acqs:
+        return lines, warnings
+
+    n_samples_values = [acq.n_samples for acq in ms_acqs if acq.n_samples is not None]
+    expected_n = config.dwell_samples
+    lines.append(f"--- Precision multi-echantillon ({len(ms_acqs)} points, {n_samples_values[0] if n_samples_values else '?'} mesures/pt) ---")
+
+    # Current (I) standard deviations across all points
+    i_stds = [acq.current_std for acq in ms_acqs if acq.current_std is not None]
+    if i_stds:
+        mean_std = statistics.fmean(i_stds)
+        max_std = max(i_stds)
+        lines.append(f"I std: mean={mean_std:.3e} A  max={max_std:.3e} A")
+        if max_std > 0 and ms_acqs[0].current_a and abs(ms_acqs[0].current_a) > 0:
+            typical_I = statistics.fmean([abs(a.current_a) for a in ms_acqs if a.current_a])
+            if typical_I > 0:
+                mean_cv = mean_std / typical_I * 100.0
+                lines.append(f"I CV moyen: {mean_cv:.2f}%")
+                if mean_cv > 10.0:
+                    warnings.append(f"CV courant eleve: {mean_cv:.2f}%")
+
+    # Ewe standard deviations across all points
+    ewe_stds = [acq.ewe_std for acq in ms_acqs if acq.ewe_std is not None]
+    if ewe_stds:
+        mean_std = statistics.fmean(ewe_stds)
+        max_std = max(ewe_stds)
+        lines.append(f"Ewe std: mean={mean_std:.3e} V  max={max_std:.3e} V")
+
+    # Range analysis (max - min within each point)
+    i_ranges = []
+    ewe_ranges = []
+    for acq in ms_acqs:
+        if acq.current_samples and len(acq.current_samples) > 1:
+            i_ranges.append(max(acq.current_samples) - min(acq.current_samples))
+        if acq.ewe_samples and len(acq.ewe_samples) > 1:
+            ewe_ranges.append(max(acq.ewe_samples) - min(acq.ewe_samples))
+
+    if i_ranges:
+        lines.append(f"I range intra-point: mean={statistics.fmean(i_ranges):.3e} A  max={max(i_ranges):.3e} A")
+    if ewe_ranges:
+        lines.append(f"Ewe range intra-point: mean={statistics.fmean(ewe_ranges):.3e} V  max={max(ewe_ranges):.3e} V")
+
+    # Check that all points got the expected number of samples
+    if expected_n is not None:
+        incomplete = [acq.order for acq in ms_acqs if acq.n_samples != expected_n]
+        if incomplete:
+            warnings.append(f"{len(incomplete)} points avec nombre de mesures different du configure ({expected_n})")
+            lines.append(f"Points incomplets: {len(incomplete)}/{len(ms_acqs)}")
+
+    return lines, warnings
+
+
 def analyze_continuous_lines(log: MeasurementLog) -> tuple[list[str], list[str]]:
     lines: list[str] = []
     warnings: list[str] = []
@@ -894,8 +1039,11 @@ def analyze_continuous_lines(log: MeasurementLog) -> tuple[list[str], list[str]]
         tag = first_tag(event)
         line_field = event.fields.get("ligne")
         line_index = int(line_field[0]) if isinstance(line_field, tuple) else None
-        if event.category == "LINE" and line_index is not None and "longueur" in event.fields:
-            line_lengths[line_index] = float(event.fields["longueur"])
+        if event.category == "LINE" and line_index is not None:
+            if "longueur_mouvement" in event.fields:
+                line_lengths[line_index] = float(event.fields["longueur_mouvement"])
+            elif "longueur" in event.fields:
+                line_lengths[line_index] = float(event.fields["longueur"])
         elif event.category == "MOVE" and tag == "balayage_ligne_debut" and line_index is not None:
             speed = None
             vx = event.fields.get("vitesse_x")
@@ -962,6 +1110,7 @@ def build_summary(
     spacing_rows: list[dict[str, Any]],
     point_timing_rows: list[dict[str, Any]],
     continuous_line_rows: list[dict[str, Any]],
+    multisample_rows: list[dict[str, Any]],
     warnings: list[str],
 ) -> dict[str, Any]:
     tracking_errors = [float(row["error_mm"]) for row in tracking_rows if row.get("error_mm") is not None]
@@ -1013,6 +1162,7 @@ def build_summary(
             "columns": log.config.columns,
             "step_mm": log.config.step_mm,
             "dwell_s": log.config.dwell_s,
+            "dwell_samples": log.config.dwell_samples,
             "reposition_speed_mm_s": log.config.reposition_speed_mm_s,
             "sample_pitch_mm": log.config.sample_pitch_mm,
             "scan_speed_mm_s": log.config.scan_speed_mm_s,
@@ -1073,6 +1223,24 @@ def build_summary(
                 else None,
             ),
         },
+        "multisample": {
+            "dwell_samples_configured": log.config.dwell_samples,
+            "I_std_a": stats_dict(
+                [float(row["I_std_a"]) for row in multisample_rows if row.get("I_std_a") is not None]
+            ),
+            "Ewe_std_v": stats_dict(
+                [float(row["Ewe_std_v"]) for row in multisample_rows if row.get("Ewe_std_v") is not None]
+            ),
+            "I_range_a": stats_dict(
+                [float(row["I_range_a"]) for row in multisample_rows if row.get("I_range_a") is not None]
+            ),
+            "Ewe_range_v": stats_dict(
+                [float(row["Ewe_range_v"]) for row in multisample_rows if row.get("Ewe_range_v") is not None]
+            ),
+            "I_cv_pct": stats_dict(
+                [float(row["I_cv_pct"]) for row in multisample_rows if row.get("I_cv_pct") is not None]
+            ),
+        } if multisample_rows else None,
     }
 
 
@@ -1104,6 +1272,9 @@ def render_report(result: AnalysisResult) -> str:
     dwell_lines, _ = analyze_point_by_point_timing(log)
     report_lines.extend(dwell_lines)
 
+    multisample_lines, _ = analyze_multisample_precision(acqs, log.config)
+    report_lines.extend(multisample_lines)
+
     continuous_lines, _ = analyze_continuous_lines(log)
     report_lines.extend(continuous_lines)
 
@@ -1133,6 +1304,9 @@ def analyze_file(log: MeasurementLog) -> AnalysisResult:
     _, dwell_warnings = analyze_point_by_point_timing(log)
     warnings.extend(dwell_warnings)
 
+    _, multisample_warnings = analyze_multisample_precision(acqs, log.config)
+    warnings.extend(multisample_warnings)
+
     _, continuous_warnings = analyze_continuous_lines(log)
     warnings.extend(continuous_warnings)
 
@@ -1141,7 +1315,8 @@ def analyze_file(log: MeasurementLog) -> AnalysisResult:
     spacing_rows = build_spacing_rows(log, acqs)
     point_timing_rows = build_point_timing_rows(log)
     continuous_line_rows = build_continuous_line_rows(log)
-    summary = build_summary(log, acqs, tracking_rows, spacing_rows, point_timing_rows, continuous_line_rows, dedup_warnings)
+    multisample_rows = build_multisample_rows(acqs)
+    summary = build_summary(log, acqs, tracking_rows, spacing_rows, point_timing_rows, continuous_line_rows, multisample_rows, dedup_warnings)
     result = AnalysisResult(
         log=log,
         acquisitions=acqs,
@@ -1149,6 +1324,7 @@ def analyze_file(log: MeasurementLog) -> AnalysisResult:
         spacing_rows=spacing_rows,
         point_timing_rows=point_timing_rows,
         continuous_line_rows=continuous_line_rows,
+        multisample_rows=multisample_rows,
         warnings=dedup_warnings,
         summary=summary,
         report="",
@@ -1158,7 +1334,7 @@ def analyze_file(log: MeasurementLog) -> AnalysisResult:
 
 
 def acquisition_to_row(acq: Acquisition) -> dict[str, Any]:
-    return {
+    row: dict[str, Any] = {
         "order": acq.order,
         "kind": acq.kind,
         "t_abs": acq.t_abs.isoformat(sep=" ") if acq.t_abs else None,
@@ -1171,7 +1347,15 @@ def acquisition_to_row(acq: Acquisition) -> dict[str, Any]:
         "motor_y_mm": acq.motor_mm[1] if acq.motor_mm else None,
         "ewe_v": acq.ewe_v,
         "current_a": acq.current_a,
+        "n_samples": acq.n_samples,
+        "current_std": acq.current_std,
+        "ewe_std": acq.ewe_std,
     }
+    if acq.current_samples:
+        row["current_samples"] = ",".join(f"{v:.6e}" for v in acq.current_samples)
+    if acq.ewe_samples:
+        row["ewe_samples"] = ",".join(f"{v:.6e}" for v in acq.ewe_samples)
+    return row
 
 
 def json_default(value: Any) -> Any:
@@ -1283,6 +1467,7 @@ def export_analysis_results(results: list[AnalysisResult], export_dir: Path, wri
         write_csv_rows(target_dir / "spacing.csv", result.spacing_rows)
         write_csv_rows(target_dir / "point_timing.csv", result.point_timing_rows)
         write_csv_rows(target_dir / "continuous_lines.csv", result.continuous_line_rows)
+        write_csv_rows(target_dir / "multisample.csv", result.multisample_rows)
 
         if write_svg:
             if result.tracking_rows:
@@ -1347,6 +1532,46 @@ def export_analysis_results(results: list[AnalysisResult], export_dir: Path, wri
                     ],
                 )
 
+            if result.multisample_rows:
+                write_line_chart_svg(
+                    target_dir / "multisample_I_std.svg",
+                    f"{result.log.path.name} - Ecart-type courant par point",
+                    "Point",
+                    "I std (A)",
+                    [
+                        {"name": "I_std", "color": "#dc2626", "points": [(row["order"], row["I_std_a"]) for row in result.multisample_rows if row.get("I_std_a") is not None]},
+                    ],
+                )
+                write_line_chart_svg(
+                    target_dir / "multisample_I_range.svg",
+                    f"{result.log.path.name} - Etendue courant par point",
+                    "Point",
+                    "I range (A)",
+                    [
+                        {"name": "I_range", "color": "#e67e22", "points": [(row["order"], row["I_range_a"]) for row in result.multisample_rows if row.get("I_range_a") is not None]},
+                    ],
+                )
+                i_cv_points = [(row["order"], row["I_cv_pct"]) for row in result.multisample_rows if row.get("I_cv_pct") is not None]
+                if i_cv_points:
+                    write_line_chart_svg(
+                        target_dir / "multisample_I_cv.svg",
+                        f"{result.log.path.name} - Coefficient de variation courant",
+                        "Point",
+                        "CV (%)",
+                        [
+                            {"name": "I_CV", "color": "#8e44ad", "points": i_cv_points},
+                        ],
+                    )
+                write_line_chart_svg(
+                    target_dir / "multisample_Ewe_std.svg",
+                    f"{result.log.path.name} - Ecart-type tension par point",
+                    "Point",
+                    "Ewe std (V)",
+                    [
+                        {"name": "Ewe_std", "color": "#2563eb", "points": [(row["order"], row["Ewe_std_v"]) for row in result.multisample_rows if row.get("Ewe_std_v") is not None]},
+                    ],
+                )
+
         aggregate_rows.append(
             {
                 "file": result.log.path.name,
@@ -1362,6 +1587,10 @@ def export_analysis_results(results: list[AnalysisResult], export_dir: Path, wri
                 "same_sweep_motor_step_mean_mm": ((result.summary.get("spacing") or {}).get("same_sweep_motor_step_mm") or {}).get("mean"),
                 "same_sweep_dt_abs_mean_s": ((result.summary.get("spacing") or {}).get("same_sweep_dt_abs_s") or {}).get("mean"),
                 "same_sweep_dt_pot_mean_s": ((result.summary.get("spacing") or {}).get("same_sweep_dt_pot_s") or {}).get("mean"),
+                "dwell_samples": result.log.config.dwell_samples,
+                "I_std_mean_a": ((result.summary.get("multisample") or {}).get("I_std_a") or {}).get("mean"),
+                "I_std_max_a": ((result.summary.get("multisample") or {}).get("I_std_a") or {}).get("max"),
+                "I_cv_mean_pct": ((result.summary.get("multisample") or {}).get("I_cv_pct") or {}).get("mean"),
                 "warning_list": "; ".join(result.warnings),
             }
         )
@@ -1392,6 +1621,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print the text report only and do not create export files.",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-analyze all files, even those already exported.",
+    )
     return parser
 
 
@@ -1403,12 +1637,44 @@ def main(argv: list[str] | None = None) -> int:
         print("No measurement log found.", file=sys.stderr)
         return 1
 
-    results = [analyze_file(parse_measurement_log(path)) for path in files]
-    print("\n\n".join(result.report for result in results))
     if not args.report_only:
         export_dir = args.export_dir or Path("tools/measurement_analysis_output_matplotlib")
+        export_dir.mkdir(parents=True, exist_ok=True)
+
+        # Registry of already-analyzed file stems (persists even after output folders are deleted)
+        registry_path = export_dir / "analysis_done.json"
+        if registry_path.exists():
+            try:
+                done_stems: set[str] = set(json.loads(registry_path.read_text(encoding="utf-8")))
+            except Exception:
+                done_stems = set()
+        else:
+            done_stems = set()
+
+        if args.force:
+            pending = files
+        else:
+            pending = [p for p in files if p.stem not in done_stems]
+            skipped = len(files) - len(pending)
+            if skipped:
+                print(f"Skipping {skipped} already-analyzed file(s) (use --force to redo all).")
+
+        if not pending:
+            print("Nothing new to analyze.")
+            return 0
+
+        results = [analyze_file(parse_measurement_log(path)) for path in pending]
+        print("\n\n".join(result.report for result in results))
         export_analysis_results(results, export_dir, write_svg=not args.no_svg)
+
+        # Update registry
+        done_stems.update(p.stem for p in pending)
+        registry_path.write_text(json.dumps(sorted(done_stems), indent=2, ensure_ascii=False), encoding="utf-8")
+
         print(f"\nExport written to: {export_dir.resolve()}")
+    else:
+        results = [analyze_file(parse_measurement_log(path)) for path in files]
+        print("\n\n".join(result.report for result in results))
     return 0
 
 

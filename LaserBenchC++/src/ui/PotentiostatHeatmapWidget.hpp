@@ -12,6 +12,8 @@ namespace laserbench::ui {
 
 class PotentiostatHeatmapWidget final : public QWidget
 {
+    Q_OBJECT
+
 public:
     explicit PotentiostatHeatmapWidget(QWidget* parent = nullptr);
 
@@ -23,9 +25,13 @@ public:
     );
     void clear();
 
+signals:
+    void cellClicked(int row, int col);
+
 protected:
     void paintEvent(QPaintEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
     void leaveEvent(QEvent* event) override;
 
 private:

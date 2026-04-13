@@ -242,4 +242,23 @@ void PotentiostatHeatmapWidget::leaveEvent(QEvent* event)
     QWidget::leaveEvent(event);
 }
 
+void PotentiostatHeatmapWidget::mousePressEvent(QMouseEvent* event)
+{
+    if (event->button() == Qt::LeftButton && rows_ > 0 && cols_ > 0 && !values_.empty()) {
+        const QRectF gr = gridRect();
+        const QPointF pos = event->position();
+        if (gr.contains(pos)) {
+            const int col = static_cast<int>((pos.x() - gr.left()) / (gr.width()  / cols_));
+            const int row = static_cast<int>((pos.y() - gr.top())  / (gr.height() / rows_));
+            if (row >= 0 && row < rows_ && col >= 0 && col < cols_) {
+                const auto idx = static_cast<std::size_t>(row * cols_ + col);
+                if (idx < values_.size() && values_[idx].has_value()) {
+                    emit cellClicked(row, col);
+                }
+            }
+        }
+    }
+    QWidget::mousePressEvent(event);
+}
+
 }  // namespace laserbench::ui
