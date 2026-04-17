@@ -44,6 +44,7 @@
 #include <QStackedWidget>
 #include <QStandardPaths>
 #include <QStatusBar>
+#include <QStyle>
 #include <QTabWidget>
 #include <QTimer>
 #include <QThread>
@@ -1173,6 +1174,12 @@ MainWindow::MainWindow(QWidget* parent)
     cameraPollTimer_->setInterval(33);
     connect(cameraPollTimer_, &QTimer::timeout, this, &MainWindow::refreshCameraUi);
 
+    potentiostatBarTimer_ = new QTimer(this);
+    potentiostatBarTimer_->setTimerType(Qt::CoarseTimer);
+    potentiostatBarTimer_->setInterval(500);
+    connect(potentiostatBarTimer_, &QTimer::timeout, this, &MainWindow::pollPotentiostatCurrentValues);
+    potentiostatBarTimer_->start();
+
     appendLog("Interface moteurs Qt6 initialisee.");
     appendLog("La DLL Newport est chargee automatiquement depuis MotorController/lib via le pont .NET.");
     appendLog("Camera Thorlabs: menu Camera pour recherche, connexion et live.");
@@ -1195,6 +1202,9 @@ MainWindow::~MainWindow()
     }
     if (cameraPollTimer_ != nullptr) {
         cameraPollTimer_->stop();
+    }
+    if (potentiostatBarTimer_ != nullptr) {
+        potentiostatBarTimer_->stop();
     }
     stopCameraPolling();
     stopContinuousJog(hardware::AxisId::X);
@@ -1387,6 +1397,8 @@ void MainWindow::buildUi()
     tabWidget_->addTab(buildImportTab(), "Import");
     mainLayout->addWidget(tabWidget_, 1);
 
+    buildPotentiostatStatusBar(mainLayout);
+
     setCentralWidget(central);
 
     stageSummaryLabel_ = new QLabel;
@@ -1403,6 +1415,220 @@ void MainWindow::buildUi()
     statusBar()->addPermanentWidget(potentiostatSummaryLabel_, 1);
     statusBar()->addPermanentWidget(mouseCoordsLabel_);
     statusBar()->showMessage("Pret");
+}
+
+// ── Potentiostat status bar (EC-Lab style) ───────────────────────────────────
+
+void MainWindow::buildPotentiostatStatusBar(QVBoxLayout* parentLayout)
+{
+    potentiostatBar_ = new QFrame;
+    potentiostatBar_->setObjectName("potentiostatBar");
+    potentiostatBar_->setStyleSheet(
+        "QFrame#potentiostatBar {"
+        "  background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #e8f0fe, stop:1 #d4e4fc);"
+        "  border: 1px solid #b0c4de;"
+        "  border-radius: 4px;"
+        "  padding: 0px;"
+        "}"
+        "QLabel.potBarHeader {"
+        "  font-family: 'Segoe UI'; font-size: 8pt; font-weight: 600;"
+        "  color: #3a5573; padding: 0 6px;"
+        "}"
+        "QLabel.potBarValue {"
+        "  font-family: 'Consolas'; font-size: 9pt;"
+        "  color: #18212b; padding: 0 6px;"
+        "}"
+        "QLabel.potBarInfo {"
+        "  font-family: 'Segoe UI'; font-size: 8pt;"
+        "  color: #3a5573; padding: 0 8px;"
+        "}"
+        "QLabel.potBarOffline {"
+        "  font-family: 'Segoe UI'; font-size: 8pt; font-weight: 600;"
+        "  color: #c0392b; padding: 0 4px;"
+        "  background: #f8d7da; border-radius: 3px;"
+        "}"
+        "QLabel.potBarOnline {"
+        "  font-family: 'Segoe UI'; font-size: 8pt; font-weight: 600;"
+        "  color: #1a7f37; padding: 0 4px;"
+        "  background: #d4edda; border-radius: 3px;"
+        "}"
+    );
+
+    auto* barLayout = new QVBoxLayout(potentiostatBar_);
+    barLayout->setContentsMargins(8, 3, 8, 3);
+    barLayout->setSpacing(2);
+
+    // ── Row 1: live data fields ──────────────────────────────────────
+    auto* dataRow = new QHBoxLayout;
+    dataRow->setSpacing(0);
+
+    auto makeFieldColumn = [](const QString& header, QLabel*& outLabel) -> QVBoxLayout* {
+        auto* col = new QVBoxLayout;
+        col->setSpacing(0);
+        auto* hdr = new QLabel(header);
+        hdr->setProperty("class", "potBarHeader");
+        hdr->setAlignment(Qt::AlignCenter);
+        outLabel = new QLabel("---");
+        outLabel->setProperty("class", "potBarValue");
+        outLabel->setAlignment(Qt::AlignCenter);
+        outLabel->setMinimumWidth(90);
+        col->addWidget(hdr);
+        col->addWidget(outLabel);
+        return col;
+    };
+
+    auto addSeparator = [](QHBoxLayout* row) {
+        auto* sep = new QFrame;
+        sep->setFrameShape(QFrame::VLine);
+        sep->setStyleSheet("color: #b0c4de;");
+        row->addWidget(sep);
+    };
+
+    dataRow->addLayout(makeFieldColumn("Status",  potBarStatusField_));
+    addSeparator(dataRow);
+    dataRow->addLayout(makeFieldColumn("Time",    potBarTimeField_));
+    addSeparator(dataRow);
+    dataRow->addLayout(makeFieldColumn("Ewe",     potBarEweField_));
+    addSeparator(dataRow);
+    dataRow->addLayout(makeFieldColumn("I",       potBarIField_));
+    addSeparator(dataRow);
+    dataRow->addLayout(makeFieldColumn("Eoc",     potBarEocField_));
+    addSeparator(dataRow);
+    dataRow->addLayout(makeFieldColumn("I Range", potBarIRangeField_));
+
+    dataRow->addStretch(1);
+    barLayout->addLayout(dataRow);
+
+    // ── Row 2: device info ───────────────────────────────────────────
+    auto* infoRow = new QHBoxLayout;
+    infoRow->setSpacing(4);
+
+    potBarModelLabel_ = new QLabel("---");
+    potBarModelLabel_->setProperty("class", "potBarInfo");
+
+    potBarStateLabel_ = new QLabel("off line");
+    potBarStateLabel_->setProperty("class", "potBarOffline");
+
+    potBarChannelLabel_ = new QLabel("Channel 1");
+    potBarChannelLabel_->setProperty("class", "potBarInfo");
+
+    auto* infoSep1 = new QFrame; infoSep1->setFrameShape(QFrame::VLine); infoSep1->setStyleSheet("color:#b0c4de;");
+    auto* infoSep2 = new QFrame; infoSep2->setFrameShape(QFrame::VLine); infoSep2->setStyleSheet("color:#b0c4de;");
+
+    infoRow->addWidget(potBarModelLabel_);
+    infoRow->addWidget(infoSep1);
+    infoRow->addWidget(potBarStateLabel_);
+    infoRow->addWidget(infoSep2);
+    infoRow->addWidget(potBarChannelLabel_);
+    infoRow->addStretch(1);
+    barLayout->addLayout(infoRow);
+
+    potentiostatBar_->setFixedHeight(60);
+    potentiostatBar_->setVisible(false);   // hidden until connected
+    parentLayout->addWidget(potentiostatBar_);
+}
+
+QString MainWindow::channelStateLabel(int state)
+{
+    switch (state) {
+    case 0:  return "STOP";
+    case 1:  return "RUN";
+    case 2:  return "PAUSE";
+    default: return "---";
+    }
+}
+
+QString MainWindow::iRangeLabel(int iRange)
+{
+    static const char* const kLabels[] = {
+        "100 pA", "1 nA", "10 nA", "100 nA",
+        "1 \xC2\xB5""A", "10 \xC2\xB5""A", "100 \xC2\xB5""A",
+        "1 mA", "10 mA", "100 mA", "1 A",
+        "Booster", "Auto", "10 pA", "1 pA"
+    };
+    if (iRange >= 0 && iRange < static_cast<int>(std::size(kLabels)))
+        return QString::fromUtf8(kLabels[iRange]);
+    return "---";
+}
+
+void MainWindow::pollPotentiostatCurrentValues()
+{
+    if (potentiostatController_ == nullptr || !potentiostatController_->isConnected()) {
+        if (potentiostatBar_ != nullptr && potentiostatBar_->isVisible()) {
+            potentiostatBar_->setVisible(false);
+        }
+        return;
+    }
+
+    // Show the bar when connected
+    if (potentiostatBar_ != nullptr && !potentiostatBar_->isVisible()) {
+        potentiostatBar_->setVisible(true);
+        // Update device info row
+        if (potBarModelLabel_ != nullptr)
+            potBarModelLabel_->setText(potentiostatController_->connectedModel());
+        if (potBarStateLabel_ != nullptr) {
+            potBarStateLabel_->setText("on line");
+            potBarStateLabel_->setProperty("class", "potBarOnline");
+            potBarStateLabel_->style()->unpolish(potBarStateLabel_);
+            potBarStateLabel_->style()->polish(potBarStateLabel_);
+        }
+    }
+
+    // Update channel label
+    if (potBarChannelLabel_ != nullptr && potentiostatChannelCombo_ != nullptr) {
+        potBarChannelLabel_->setText(QString("Channel %1").arg(potentiostatChannelCombo_->currentIndex() + 1));
+    }
+
+    // Don't poll live data while a measurement thread is actively using the controller
+    if (potentiostatBusy_.load()) {
+        return;
+    }
+
+    const int channel = potentiostatChannelCombo_ != nullptr ? potentiostatChannelCombo_->currentIndex() + 1 : 1;
+    const auto vals = potentiostatController_->getCurrentValues(channel);
+    if (!vals.ok) return;
+
+    updatePotentiostatStatusBar();
+
+    if (potBarStatusField_ != nullptr)
+        potBarStatusField_->setText(channelStateLabel(vals.state));
+    if (potBarTimeField_ != nullptr)
+        potBarTimeField_->setText(QString("%1 s").arg(vals.elapsedTime, 0, 'f', 2));
+    if (potBarEweField_ != nullptr)
+        potBarEweField_->setText(QString("%1 V").arg(vals.ewe, 0, 'f', 4));
+    if (potBarIField_ != nullptr) {
+        const double absI = std::abs(vals.I);
+        if (absI < 1e-9)
+            potBarIField_->setText(QString::fromUtf8(u8"%1 pA").arg(vals.I * 1e12, 0, 'f', 2));
+        else if (absI < 1e-6)
+            potBarIField_->setText(QString::fromUtf8(u8"%1 nA").arg(vals.I * 1e9, 0, 'f', 2));
+        else if (absI < 1e-3)
+            potBarIField_->setText(QString::fromUtf8(u8"%1 \u00B5A").arg(vals.I * 1e6, 0, 'f', 2));
+        else if (absI < 1.0)
+            potBarIField_->setText(QString("%1 mA").arg(vals.I * 1e3, 0, 'f', 3));
+        else
+            potBarIField_->setText(QString("%1 A").arg(vals.I, 0, 'f', 4));
+    }
+    if (potBarEocField_ != nullptr)
+        potBarEocField_->setText(QString("%1 V").arg(vals.ece, 0, 'f', 4));
+    if (potBarIRangeField_ != nullptr)
+        potBarIRangeField_->setText(iRangeLabel(vals.iRange));
+}
+
+void MainWindow::updatePotentiostatStatusBar()
+{
+    // Called after disconnect to hide the bar
+    if (potentiostatController_ == nullptr || !potentiostatController_->isConnected()) {
+        if (potentiostatBar_ != nullptr) {
+            potentiostatBar_->setVisible(false);
+            if (potBarStateLabel_ != nullptr) {
+                potBarStateLabel_->setText("off line");
+                potBarStateLabel_->setProperty("class", "potBarOffline");
+                potBarStateLabel_->style()->unpolish(potBarStateLabel_);
+                potBarStateLabel_->style()->polish(potBarStateLabel_);
+            }
+        }
+    }
 }
 
 void MainWindow::initializeSessionLog()
@@ -5635,6 +5861,7 @@ void MainWindow::onDisconnectPotentiostat()
             if (potentiostatConnectButton_     != nullptr) potentiostatConnectButton_->setEnabled(true);
             if (potentiostatFirmwareButton_    != nullptr) potentiostatFirmwareButton_->setEnabled(false);
             if (potentiostatDisconnectButton_  != nullptr) potentiostatDisconnectButton_->setEnabled(false);
+            updatePotentiostatStatusBar();
         }, Qt::QueuedConnection);
     });
 }
@@ -7255,10 +7482,12 @@ void MainWindow::onExportPotentiostat()
     auto* fmtBox = new QGroupBox("Formats à exporter");
     auto* fmtLayout = new QVBoxLayout(fmtBox);
     auto* cbCsv  = new QCheckBox("Tableau CSV  (.csv)  —  données tabulaires pour Excel / Python");
+    auto* cbMpt  = new QCheckBox("EC-Lab ASCII  (.mpt)  —  format texte BioLogic, visualisation dans EC-Lab");
     auto* cbGsf  = new QCheckBox("Gwyddion Simple Field  (.gsf)  —  données brutes float32");
     auto* cbHeat = new QCheckBox("Carte 2D  (.tiff)  —  image de la heatmap");
     auto* cb3D   = new QCheckBox("Surface 3D  (.tiff)  —  image de la vue 3D");
     cbCsv->setChecked(true);
+    cbMpt->setChecked(hasTimeSeries);
     cbGsf->setChecked(hasGrid);
     cbHeat->setChecked(hasGrid);
     cb3D->setChecked(hasGrid);
@@ -7267,6 +7496,7 @@ void MainWindow::onExportPotentiostat()
     cbHeat->setVisible(hasGrid);
     cb3D->setVisible(hasGrid);
     fmtLayout->addWidget(cbCsv);
+    fmtLayout->addWidget(cbMpt);
     fmtLayout->addWidget(cbGsf);
     fmtLayout->addWidget(cbHeat);
     fmtLayout->addWidget(cb3D);
@@ -7315,7 +7545,7 @@ void MainWindow::onExportPotentiostat()
     QString name = nameEdit->text().trimmed();
     if (name.isEmpty()) name = baseName;
     // Strip any extension the user may have typed
-    for (const auto& ext : {".csv", ".gsf", ".tiff"}) {
+    for (const auto& ext : {".csv", ".mpt", ".gsf", ".tiff"}) {
         if (name.endsWith(ext, Qt::CaseInsensitive))
             name.chop(static_cast<int>(strlen(ext)));
     }
@@ -7457,6 +7687,102 @@ void MainWindow::onExportPotentiostat()
             ts.flush();
             csvFile.close();
             appendLog(QString("Export CSV : %1").arg(csvPath));
+            ++exportCount;
+        }
+    }
+
+    // ── Export MPT (BioLogic EC-Lab ASCII) ────────────────────────────────────
+    if (cbMpt->isChecked() && hasTimeSeries) {
+        const QString mptPath = outDir.absoluteFilePath(name + ".mpt");
+        QFile mptFile(mptPath);
+        if (!mptFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QMessageBox::critical(this, "Export",
+                QString("Impossible d'ouvrir :\n%1").arg(mptFile.errorString()));
+        } else {
+            // Helper: format a double in EC-Lab scientific notation
+            // e.g.  1,289685542360530E-006  (comma decimal, 3-digit exponent, 15 places)
+            auto fmtF = [](double v, int prec = 15) -> QString {
+                char buf[64];
+                snprintf(buf, sizeof(buf), "%.*E", prec, v);
+                QString s = QString::fromLatin1(buf);
+                // Replace '.' with ','
+                s.replace('.', ',');
+                // Ensure 3-digit exponent  (MSVC may emit 2-digit since VS2015)
+                int ei = s.indexOf('E');
+                if (ei >= 0) {
+                    char sign = s[ei + 1].toLatin1();
+                    QString exp = s.mid(ei + 2);
+                    while (exp.length() < 3) exp.prepend('0');
+                    s = s.left(ei + 2) + exp;
+                }
+                return s;
+            };
+
+            const std::vector<double>& mptTimes    = potentiostatPlotTimes_;
+            const std::vector<double>& mptCurrents = potentiostatPlotCurrents_;
+            const std::vector<double>& mptEwes     = potentiostatPlotEwe_;
+            const int mptN = static_cast<int>(mptTimes.size());
+
+            // ── Header (5 lines, CRLF) ──────────────────────────────────────
+            // galvani: "magic(1) + Nb header lines(2) + (N-3) comments + col headers(N)"
+            // With N=5: 2 comment lines then column header
+            const QString mptDate =
+                QDateTime::currentDateTime().toString("MM/dd/yyyy HH:mm:ss.zzz");
+            QTextStream ts(&mptFile);
+            ts.setEncoding(QStringConverter::Latin1);
+            ts << "EC-Lab ASCII FILE\r\n";
+            ts << "Nb header lines : 5\r\n";
+            ts << "Chronoamperometry\r\n";
+            ts << "Acquisition started on : " << mptDate << "\r\n";
+            // Column headers (tab-separated)
+            ts << "mode\t"
+               << "ox/red\t"
+               << "error\t"
+               << "control changes\t"
+               << "Ns changes\t"
+               << "counter inc.\t"
+               << "time/s\t"
+               << "control/V\t"
+               << "Ewe/V\t"
+               << "I/mA\t"
+               << "dQ/mA.h\t"
+               << "Q charge/discharge/mA.h\t"
+               << "half cycle\r\n";
+
+            // ── Data rows ───────────────────────────────────────────────────
+            double cumCharge_mAh = 0.0;
+            for (int pi = 0; pi < mptN; ++pi) {
+                const double t   = mptTimes[pi];
+                const double iA  = (pi < static_cast<int>(mptCurrents.size())) ? mptCurrents[pi] : 0.0;
+                const double ewe = (pi < static_cast<int>(mptEwes.size()))     ? mptEwes[pi]     : 0.0;
+                const double imA = iA * 1000.0;
+                const double dt  = (pi > 0) ? (mptTimes[pi] - mptTimes[pi - 1]) : 0.0;
+                const double dq  = imA * dt / 3600.0;
+                cumCharge_mAh += dq;
+
+                const int mode   = 2;              // potentiostatic
+                const int oxred  = (imA > 0) ? 1 : 0;
+                const int ctrlChg = (pi == 0) ? 1 : 0;
+                const int nsChg   = (pi == 0) ? 1 : 0;
+
+                ts << mode   << "\t"
+                   << oxred  << "\t"
+                   << 0      << "\t"   // error
+                   << ctrlChg << "\t"
+                   << nsChg  << "\t"
+                   << 0      << "\t"   // counter inc.
+                   << fmtF(t)   << "\t"
+                   << fmtF(ewe, 7) << "\t"   // control/V (float32 precision)
+                   << fmtF(ewe, 7) << "\t"   // Ewe/V
+                   << fmtF(imA, 7) << "\t"   // I/mA
+                   << fmtF(dq)     << "\t"   // dQ/mA.h
+                   << fmtF(cumCharge_mAh) << "\t"  // Q charge/discharge/mA.h
+                   << 0            << "\r\n"; // half cycle
+            }
+
+            ts.flush();
+            mptFile.close();
+            appendLog(QString("Export MPT : %1 (%2 points)").arg(mptPath).arg(mptN));
             ++exportCount;
         }
     }

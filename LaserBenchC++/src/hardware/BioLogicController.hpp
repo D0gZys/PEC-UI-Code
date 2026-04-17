@@ -86,9 +86,14 @@ struct PotCurrentValues
 {
     bool    ok          {false};
     bool    stopped     {false};
+    int     state       {-1};   // TChannelState_e: 0=STOP, 1=RUN, 2=PAUSE
     double  elapsedTime {0.0};
     double  ewe         {0.0};
     double  I           {0.0};
+    double  ece         {0.0};
+    int     iRange      {-1};   // TIntensityRange_e
+    int     eOverflow   {0};
+    int     iOverflow   {0};
     QString error;
 };
 

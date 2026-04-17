@@ -846,9 +846,14 @@ PotCurrentValues BioLogicController::getCurrentValues(int channel)
 
         result.ok          = true;
         result.stopped     = (curr.State == KBIO_STATE_STOP);
+        result.state       = curr.State;
         result.elapsedTime = static_cast<double>(curr.ElapsedTime);
         result.ewe         = static_cast<double>(curr.Ewe);
         result.I           = static_cast<double>(curr.I);
+        result.ece         = static_cast<double>(curr.Ece);
+        result.iRange      = curr.IRange;
+        result.eOverflow   = curr.Eoverflow;
+        result.iOverflow   = curr.Ioverflow;
     } catch (const std::exception& ex) {
         result.ok    = false;
         result.error = QString::fromUtf8(ex.what());
