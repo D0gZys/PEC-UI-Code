@@ -576,7 +576,7 @@ internal static class Program
                 lastState = state;
                 if (BusyStates.Contains(state))
                 {
-                    Thread.Sleep(100);
+                    Thread.Sleep(10);
                     continue;
                 }
                 if (DisabledStates.Contains(state))
