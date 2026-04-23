@@ -69,7 +69,7 @@ if (NOT _qt_deployed)
         copy_runtime_file("${QT_PLUGINS_DIR}/styles/${_style_plugin}" "${TARGET_DIR}/styles")
     endforeach()
 
-    foreach(_image_plugin IN ITEMS qgif.dll qico.dll qjpeg.dll qsvg.dll)
+    foreach(_image_plugin IN ITEMS qgif.dll qico.dll qjpeg.dll qsvg.dll qtiff.dll)
         copy_runtime_file("${QT_PLUGINS_DIR}/imageformats/${_image_plugin}" "${TARGET_DIR}/imageformats")
     endforeach()
 

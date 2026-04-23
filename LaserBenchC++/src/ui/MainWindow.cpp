@@ -1,5 +1,6 @@
 ﻿#include "ui/MainWindow.hpp"
 
+#include <QAbstractItemView>
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
@@ -44,7 +45,6 @@
 #include <QStackedWidget>
 #include <QStandardPaths>
 #include <QStatusBar>
-#include <QStyle>
 #include <QTabWidget>
 #include <QTimer>
 #include <QThread>
@@ -1174,12 +1174,6 @@ MainWindow::MainWindow(QWidget* parent)
     cameraPollTimer_->setInterval(33);
     connect(cameraPollTimer_, &QTimer::timeout, this, &MainWindow::refreshCameraUi);
 
-    potentiostatBarTimer_ = new QTimer(this);
-    potentiostatBarTimer_->setTimerType(Qt::CoarseTimer);
-    potentiostatBarTimer_->setInterval(500);
-    connect(potentiostatBarTimer_, &QTimer::timeout, this, &MainWindow::pollPotentiostatCurrentValues);
-    potentiostatBarTimer_->start();
-
     appendLog("Interface moteurs Qt6 initialisee.");
     appendLog("La DLL Newport est chargee automatiquement depuis MotorController/lib via le pont .NET.");
     appendLog("Camera Thorlabs: menu Camera pour recherche, connexion et live.");
@@ -1202,9 +1196,6 @@ MainWindow::~MainWindow()
     }
     if (cameraPollTimer_ != nullptr) {
         cameraPollTimer_->stop();
-    }
-    if (potentiostatBarTimer_ != nullptr) {
-        potentiostatBarTimer_->stop();
     }
     stopCameraPolling();
     stopContinuousJog(hardware::AxisId::X);
@@ -1262,6 +1253,28 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
     }
 
     const int key = keyEvent->key();
+
+    // Escape: exit all armed modes
+    if (key == Qt::Key_Escape && event->type() == QEvent::KeyPress && !keyEvent->isAutoRepeat()) {
+        const bool anyArmed = rulerArmed_ || circleArmed_ || rectArmed_ || eraserArmed_
+                              || gotoArmed_ || sequenceSelectArmed_;
+        if (anyArmed) {
+            rulerArmed_ = false;
+            if (rulerButton_ != nullptr) rulerButton_->setChecked(false);
+            circleArmed_ = false;
+            if (circleButton_ != nullptr) circleButton_->setChecked(false);
+            rectArmed_ = false;
+            if (rectButton_ != nullptr) rectButton_->setChecked(false);
+            eraserArmed_ = false;
+            if (eraserButton_ != nullptr) eraserButton_->setChecked(false);
+            if (gotoArmed_) setGotoArmed(false);
+            if (sequenceSelectArmed_) { setSequenceSelectArmed(false); clearSequencePreviewSelection(); }
+            updatePreviewCursor();
+            event->accept();
+            return true;
+        }
+    }
+
     if (key != Qt::Key_Left && key != Qt::Key_Right && key != Qt::Key_Up && key != Qt::Key_Down) {
         return QMainWindow::eventFilter(watched, event);
     }
@@ -1392,18 +1405,18 @@ void MainWindow::buildUi()
 
     tabWidget_ = new QTabWidget;
     tabWidget_->addTab(buildSetupTab(), "Camera");
-    tabWidget_->addTab(buildPotentiostatTab(), "Potentiostat");
     tabWidget_->addTab(buildMeasureTab(), "Resultat");
     tabWidget_->addTab(buildImportTab(), "Import");
     mainLayout->addWidget(tabWidget_, 1);
 
-    buildPotentiostatStatusBar(mainLayout);
-
     setCentralWidget(central);
 
     stageSummaryLabel_ = new QLabel;
+    stageSummaryLabel_->setTextFormat(Qt::RichText);
     cameraSummaryLabel_ = new QLabel;
+    cameraSummaryLabel_->setTextFormat(Qt::RichText);
     potentiostatSummaryLabel_ = new QLabel;
+    potentiostatSummaryLabel_->setTextFormat(Qt::RichText);
 
     mouseCoordsLabel_ = new QLabel;
     mouseCoordsLabel_->setStyleSheet("color:#c8d0db; font-family:monospace; padding-right:6px;");
@@ -1415,220 +1428,6 @@ void MainWindow::buildUi()
     statusBar()->addPermanentWidget(potentiostatSummaryLabel_, 1);
     statusBar()->addPermanentWidget(mouseCoordsLabel_);
     statusBar()->showMessage("Pret");
-}
-
-// ── Potentiostat status bar (EC-Lab style) ───────────────────────────────────
-
-void MainWindow::buildPotentiostatStatusBar(QVBoxLayout* parentLayout)
-{
-    potentiostatBar_ = new QFrame;
-    potentiostatBar_->setObjectName("potentiostatBar");
-    potentiostatBar_->setStyleSheet(
-        "QFrame#potentiostatBar {"
-        "  background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #e8f0fe, stop:1 #d4e4fc);"
-        "  border: 1px solid #b0c4de;"
-        "  border-radius: 4px;"
-        "  padding: 0px;"
-        "}"
-        "QLabel.potBarHeader {"
-        "  font-family: 'Segoe UI'; font-size: 8pt; font-weight: 600;"
-        "  color: #3a5573; padding: 0 6px;"
-        "}"
-        "QLabel.potBarValue {"
-        "  font-family: 'Consolas'; font-size: 9pt;"
-        "  color: #18212b; padding: 0 6px;"
-        "}"
-        "QLabel.potBarInfo {"
-        "  font-family: 'Segoe UI'; font-size: 8pt;"
-        "  color: #3a5573; padding: 0 8px;"
-        "}"
-        "QLabel.potBarOffline {"
-        "  font-family: 'Segoe UI'; font-size: 8pt; font-weight: 600;"
-        "  color: #c0392b; padding: 0 4px;"
-        "  background: #f8d7da; border-radius: 3px;"
-        "}"
-        "QLabel.potBarOnline {"
-        "  font-family: 'Segoe UI'; font-size: 8pt; font-weight: 600;"
-        "  color: #1a7f37; padding: 0 4px;"
-        "  background: #d4edda; border-radius: 3px;"
-        "}"
-    );
-
-    auto* barLayout = new QVBoxLayout(potentiostatBar_);
-    barLayout->setContentsMargins(8, 3, 8, 3);
-    barLayout->setSpacing(2);
-
-    // ── Row 1: live data fields ──────────────────────────────────────
-    auto* dataRow = new QHBoxLayout;
-    dataRow->setSpacing(0);
-
-    auto makeFieldColumn = [](const QString& header, QLabel*& outLabel) -> QVBoxLayout* {
-        auto* col = new QVBoxLayout;
-        col->setSpacing(0);
-        auto* hdr = new QLabel(header);
-        hdr->setProperty("class", "potBarHeader");
-        hdr->setAlignment(Qt::AlignCenter);
-        outLabel = new QLabel("---");
-        outLabel->setProperty("class", "potBarValue");
-        outLabel->setAlignment(Qt::AlignCenter);
-        outLabel->setMinimumWidth(90);
-        col->addWidget(hdr);
-        col->addWidget(outLabel);
-        return col;
-    };
-
-    auto addSeparator = [](QHBoxLayout* row) {
-        auto* sep = new QFrame;
-        sep->setFrameShape(QFrame::VLine);
-        sep->setStyleSheet("color: #b0c4de;");
-        row->addWidget(sep);
-    };
-
-    dataRow->addLayout(makeFieldColumn("Status",  potBarStatusField_));
-    addSeparator(dataRow);
-    dataRow->addLayout(makeFieldColumn("Time",    potBarTimeField_));
-    addSeparator(dataRow);
-    dataRow->addLayout(makeFieldColumn("Ewe",     potBarEweField_));
-    addSeparator(dataRow);
-    dataRow->addLayout(makeFieldColumn("I",       potBarIField_));
-    addSeparator(dataRow);
-    dataRow->addLayout(makeFieldColumn("Eoc",     potBarEocField_));
-    addSeparator(dataRow);
-    dataRow->addLayout(makeFieldColumn("I Range", potBarIRangeField_));
-
-    dataRow->addStretch(1);
-    barLayout->addLayout(dataRow);
-
-    // ── Row 2: device info ───────────────────────────────────────────
-    auto* infoRow = new QHBoxLayout;
-    infoRow->setSpacing(4);
-
-    potBarModelLabel_ = new QLabel("---");
-    potBarModelLabel_->setProperty("class", "potBarInfo");
-
-    potBarStateLabel_ = new QLabel("off line");
-    potBarStateLabel_->setProperty("class", "potBarOffline");
-
-    potBarChannelLabel_ = new QLabel("Channel 1");
-    potBarChannelLabel_->setProperty("class", "potBarInfo");
-
-    auto* infoSep1 = new QFrame; infoSep1->setFrameShape(QFrame::VLine); infoSep1->setStyleSheet("color:#b0c4de;");
-    auto* infoSep2 = new QFrame; infoSep2->setFrameShape(QFrame::VLine); infoSep2->setStyleSheet("color:#b0c4de;");
-
-    infoRow->addWidget(potBarModelLabel_);
-    infoRow->addWidget(infoSep1);
-    infoRow->addWidget(potBarStateLabel_);
-    infoRow->addWidget(infoSep2);
-    infoRow->addWidget(potBarChannelLabel_);
-    infoRow->addStretch(1);
-    barLayout->addLayout(infoRow);
-
-    potentiostatBar_->setFixedHeight(60);
-    potentiostatBar_->setVisible(false);   // hidden until connected
-    parentLayout->addWidget(potentiostatBar_);
-}
-
-QString MainWindow::channelStateLabel(int state)
-{
-    switch (state) {
-    case 0:  return "STOP";
-    case 1:  return "RUN";
-    case 2:  return "PAUSE";
-    default: return "---";
-    }
-}
-
-QString MainWindow::iRangeLabel(int iRange)
-{
-    static const char* const kLabels[] = {
-        "100 pA", "1 nA", "10 nA", "100 nA",
-        "1 \xC2\xB5""A", "10 \xC2\xB5""A", "100 \xC2\xB5""A",
-        "1 mA", "10 mA", "100 mA", "1 A",
-        "Booster", "Auto", "10 pA", "1 pA"
-    };
-    if (iRange >= 0 && iRange < static_cast<int>(std::size(kLabels)))
-        return QString::fromUtf8(kLabels[iRange]);
-    return "---";
-}
-
-void MainWindow::pollPotentiostatCurrentValues()
-{
-    if (potentiostatController_ == nullptr || !potentiostatController_->isConnected()) {
-        if (potentiostatBar_ != nullptr && potentiostatBar_->isVisible()) {
-            potentiostatBar_->setVisible(false);
-        }
-        return;
-    }
-
-    // Show the bar when connected
-    if (potentiostatBar_ != nullptr && !potentiostatBar_->isVisible()) {
-        potentiostatBar_->setVisible(true);
-        // Update device info row
-        if (potBarModelLabel_ != nullptr)
-            potBarModelLabel_->setText(potentiostatController_->connectedModel());
-        if (potBarStateLabel_ != nullptr) {
-            potBarStateLabel_->setText("on line");
-            potBarStateLabel_->setProperty("class", "potBarOnline");
-            potBarStateLabel_->style()->unpolish(potBarStateLabel_);
-            potBarStateLabel_->style()->polish(potBarStateLabel_);
-        }
-    }
-
-    // Update channel label
-    if (potBarChannelLabel_ != nullptr && potentiostatChannelCombo_ != nullptr) {
-        potBarChannelLabel_->setText(QString("Channel %1").arg(potentiostatChannelCombo_->currentIndex() + 1));
-    }
-
-    // Don't poll live data while a measurement thread is actively using the controller
-    if (potentiostatBusy_.load()) {
-        return;
-    }
-
-    const int channel = potentiostatChannelCombo_ != nullptr ? potentiostatChannelCombo_->currentIndex() + 1 : 1;
-    const auto vals = potentiostatController_->getCurrentValues(channel);
-    if (!vals.ok) return;
-
-    updatePotentiostatStatusBar();
-
-    if (potBarStatusField_ != nullptr)
-        potBarStatusField_->setText(channelStateLabel(vals.state));
-    if (potBarTimeField_ != nullptr)
-        potBarTimeField_->setText(QString("%1 s").arg(vals.elapsedTime, 0, 'f', 2));
-    if (potBarEweField_ != nullptr)
-        potBarEweField_->setText(QString("%1 V").arg(vals.ewe, 0, 'f', 4));
-    if (potBarIField_ != nullptr) {
-        const double absI = std::abs(vals.I);
-        if (absI < 1e-9)
-            potBarIField_->setText(QString::fromUtf8(u8"%1 pA").arg(vals.I * 1e12, 0, 'f', 2));
-        else if (absI < 1e-6)
-            potBarIField_->setText(QString::fromUtf8(u8"%1 nA").arg(vals.I * 1e9, 0, 'f', 2));
-        else if (absI < 1e-3)
-            potBarIField_->setText(QString::fromUtf8(u8"%1 \u00B5A").arg(vals.I * 1e6, 0, 'f', 2));
-        else if (absI < 1.0)
-            potBarIField_->setText(QString("%1 mA").arg(vals.I * 1e3, 0, 'f', 3));
-        else
-            potBarIField_->setText(QString("%1 A").arg(vals.I, 0, 'f', 4));
-    }
-    if (potBarEocField_ != nullptr)
-        potBarEocField_->setText(QString("%1 V").arg(vals.ece, 0, 'f', 4));
-    if (potBarIRangeField_ != nullptr)
-        potBarIRangeField_->setText(iRangeLabel(vals.iRange));
-}
-
-void MainWindow::updatePotentiostatStatusBar()
-{
-    // Called after disconnect to hide the bar
-    if (potentiostatController_ == nullptr || !potentiostatController_->isConnected()) {
-        if (potentiostatBar_ != nullptr) {
-            potentiostatBar_->setVisible(false);
-            if (potBarStateLabel_ != nullptr) {
-                potBarStateLabel_->setText("off line");
-                potBarStateLabel_->setProperty("class", "potBarOffline");
-                potBarStateLabel_->style()->unpolish(potBarStateLabel_);
-                potBarStateLabel_->style()->polish(potBarStateLabel_);
-            }
-        }
-    }
 }
 
 void MainWindow::initializeSessionLog()
@@ -1719,125 +1518,217 @@ QWidget* MainWindow::buildSetupTab()
     auto* splitter = new QSplitter(Qt::Horizontal);
     layout->addWidget(splitter, 1);
 
-    // ── Left panel ────────────────────────────────────────────────
-    auto* leftPanel = new QWidget;
-    leftPanel->setMinimumWidth(300);
-    auto* leftLayout = new QVBoxLayout(leftPanel);
-    leftLayout->setContentsMargins(0, 0, 0, 0);
-    leftLayout->setSpacing(4);
+    // ══════════════════════════════════════════════════════════
+    //  LEFT PANEL
+    // ══════════════════════════════════════════════════════════
+    auto* leftScroll = new QScrollArea;
+    leftScroll->setWidgetResizable(true);
+    leftScroll->setFrameShape(QFrame::NoFrame);
+    leftScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    leftScroll->setMinimumWidth(270);
+    leftScroll->setMaximumWidth(340);
+    leftScroll->setStyleSheet("QScrollArea { background:transparent; border:none; }"
+                              "QScrollArea > QWidget > QWidget { background:transparent; }");
 
-    auto* cameraBox = createGroupBox("Camera");
+    auto* leftPanel = new QWidget;
+    leftPanel->setAutoFillBackground(false);
+    leftPanel->setStyleSheet("background:transparent;");
+    auto* leftLayout = new QVBoxLayout(leftPanel);
+    leftLayout->setContentsMargins(2, 2, 2, 2);
+    leftLayout->setSpacing(6);
+
+    // ── 1. Camera Control ──────────────────────────────────────
+    auto* cameraBox = createGroupBox("Camera Control");
     auto* cameraLayout = new QGridLayout(cameraBox);
-    cameraLayout->setSpacing(3);
-    cameraLayout->setContentsMargins(6, 4, 6, 4);
+    cameraLayout->setSpacing(5);
+    cameraLayout->setContentsMargins(8, 8, 8, 8);
+
+    // Row 0: Live toggle + status
+    cameraPageLiveButton_ = new QPushButton("Live");
+    cameraPageLiveButton_->setCheckable(true);
+    cameraPageLiveButton_->setEnabled(false);
+    cameraPageLiveButton_->setToolTip("Activer / arreter le flux video");
+    cameraPageLiveButton_->setStyleSheet(
+        "QPushButton { min-width:52px; max-width:64px; min-height:26px;"
+        "              border-radius:5px; border:1px solid #c0c0c0; background:#f0f0f0;"
+        "              font-size:8pt; font-weight:600; padding:0 6px; }"
+        "QPushButton:hover            { background:#dde8f8; border-color:#1f6feb; }"
+        "QPushButton:checked          { background:#1f6feb; border-color:#1558c0; color:#ffffff; }"
+        "QPushButton:checked:hover    { background:#1558c0; }"
+        "QPushButton:disabled         { background:#f0f2f5; color:#aaa; }");
+
+    // hidden stop button kept alive for updateCameraStatus compatibility
+    cameraPageStopButton_ = new QPushButton;
+    cameraPageStopButton_->hide();
+    // hidden apply button kept alive for any code that references it
+    applyCameraSettingsButton_ = new QPushButton;
+    applyCameraSettingsButton_->hide();
 
     cameraPageStatusLabel_ = new QLabel("Deconnectee");
-    cameraPageStatusLabel_->setStyleSheet("color:#5c6570; font-size:9pt;");
-    auto* openCameraConnBtn = createActionButton("Connexion...");
-    openCameraConnBtn->setMaximumWidth(110);
-    cameraLayout->addWidget(new QLabel("Etat :"), 0, 0);
-    cameraLayout->addWidget(cameraPageStatusLabel_, 0, 1, 1, 2);
-    cameraLayout->addWidget(openCameraConnBtn, 0, 3);
+    cameraPageStatusLabel_->setStyleSheet("color:#5c6570; font-size:8pt;");
 
-    cameraLayout->addWidget(new QLabel("Exposure (us)"), 1, 0);
-    cameraExposureEdit_ = new QLineEdit(QString::number(cameraController_->exposureTimeUs(), 'f', 0));
-    cameraLayout->addWidget(cameraExposureEdit_, 1, 1, 1, 3);
+    cameraLayout->addWidget(cameraPageLiveButton_,  0, 0);
+    cameraLayout->addWidget(cameraPageStatusLabel_, 0, 1, 1, 3);
 
-    cameraLayout->addWidget(new QLabel("Gain"), 2, 0);
+    // Row 1: Exposure (ms) + Gain
+    auto* expLbl = new QLabel("Exp (ms)");
+    expLbl->setStyleSheet("font-size:8pt;");
+    cameraExposureEdit_ = new QLineEdit(QString::number(cameraController_->exposureTimeUs() / 1000.0, 'f', 3));
+    cameraExposureEdit_->setMaximumWidth(70);
+    cameraExposureEdit_->setStyleSheet("font-size:8pt;");
+    auto* gainLbl = new QLabel("Gain");
+    gainLbl->setStyleSheet("font-size:8pt;");
     cameraGainEdit_ = new QLineEdit(QString::number(cameraController_->gain(), 'f', 1));
-    cameraLayout->addWidget(cameraGainEdit_, 2, 1, 1, 3);
+    cameraGainEdit_->setMaximumWidth(50);
+    cameraGainEdit_->setStyleSheet("font-size:8pt;");
+    cameraLayout->addWidget(expLbl,              1, 0);
+    cameraLayout->addWidget(cameraExposureEdit_, 1, 1);
+    cameraLayout->addWidget(gainLbl,             1, 2);
+    cameraLayout->addWidget(cameraGainEdit_,     1, 3);
 
-    applyCameraSettingsButton_ = createActionButton("Appliquer");
-    applyCameraSettingsButton_->setProperty("accent", true);
-    cameraPageLiveButton_ = createActionButton("Live");
-    cameraPageStopButton_ = createActionButton("Stop");
-    cameraPageLiveButton_->setProperty("accent", true);
-    cameraPageLiveButton_->setEnabled(false);
-    cameraPageStopButton_->setEnabled(false);
-    cameraLayout->addWidget(applyCameraSettingsButton_, 3, 0, 1, 2);
-    cameraLayout->addWidget(cameraPageLiveButton_, 3, 2);
-    cameraLayout->addWidget(cameraPageStopButton_, 3, 3);
-
-    connect(openCameraConnBtn, &QPushButton::clicked, this, &MainWindow::openStartupConnectionDialog);
-    connect(applyCameraSettingsButton_, &QPushButton::clicked, this, &MainWindow::applyCameraSettings);
-    connect(cameraExposureEdit_, &QLineEdit::returnPressed, this, &MainWindow::applyCameraSettings);
-    connect(cameraGainEdit_, &QLineEdit::returnPressed, this, &MainWindow::applyCameraSettings);
-    connect(cameraPageLiveButton_, &QPushButton::clicked, this, &MainWindow::startCameraLive);
-    connect(cameraPageStopButton_, &QPushButton::clicked, this, &MainWindow::stopCameraLive);
-
-    leftLayout->addWidget(cameraBox);
-
-    // Objectif / GoTo
-    auto* laserBox = createGroupBox("Objectif / GoTo");
-    auto* laserLayout = new QGridLayout(laserBox);
-    laserLayout->setSpacing(3);
-    laserLayout->setContentsMargins(6, 4, 6, 4);
-    laserLayout->addWidget(new QLabel("Objectif"), 0, 0);
+    // Row 2: Objectif
+    auto* objLbl = new QLabel("Objectif :");
+    objLbl->setStyleSheet("font-size:8pt;");
     objectiveCombo_ = new QComboBox;
     for (const ObjectivePreset& preset : kObjectivePresets) {
         objectiveCombo_->addItem(QLatin1String(preset.name));
     }
     objectiveCombo_->setCurrentText("4x");
-    auto* applyObjectiveButton = createActionButton("Appliquer");
-    laserLayout->addWidget(objectiveCombo_, 0, 1);
-    laserLayout->addWidget(applyObjectiveButton, 0, 2, 1, 2);
+    objectiveCombo_->setStyleSheet("font-size:8pt;");
+    if (QAbstractItemView* v = objectiveCombo_->view()) {
+        v->setStyleSheet("background:#ffffff; color:#18212b;"
+                         "selection-background-color:#eef4ff; selection-color:#111927;");
+    }
+    cameraLayout->addWidget(objLbl,          2, 0);
+    cameraLayout->addWidget(objectiveCombo_, 2, 1, 1, 3);
 
-    laserLayout->addWidget(new QLabel("Vit. GoTo (mm/s)"), 1, 0);
-    gotoVelocityEdit_ = new QLineEdit("0.1");
-    laserLayout->addWidget(gotoVelocityEdit_, 1, 1);
-    gotoButton_ = createActionButton("GoTo");
-    gotoButton_->setProperty("accent", true);
-    laserLayout->addWidget(gotoButton_, 1, 2, 1, 2);
-
-    gotoStatusLabel_ = new QLabel("GoTo : inactif");
-    gotoStatusLabel_->setStyleSheet("color:#1f6feb; font-size:9pt;");
-    laserLayout->addWidget(gotoStatusLabel_, 2, 0, 1, 4);
-
-    // ── Measurement tools ─────────────────────────────────────────────────────
-    auto* measBox = createGroupBox("Mesure (clic image)");
-    auto* measLayout = new QGridLayout(measBox);
-    measLayout->setSpacing(3);
-    measLayout->setContentsMargins(6, 4, 6, 4);
-
-    rulerButton_ = createActionButton("Regle");
-    rulerDistanceLabel_ = new QLabel("---");
-    rulerDistanceLabel_->setStyleSheet("font-size:9pt; font-weight:600; color:#f0c040;");
-    measLayout->addWidget(rulerButton_,         0, 0);
-    measLayout->addWidget(rulerDistanceLabel_,  0, 1, 1, 3);
-
-    circleButton_ = createActionButton("Cercle");
-    circleDiameterLabel_ = new QLabel("---");
-    circleDiameterLabel_->setStyleSheet("font-size:9pt; font-weight:600; color:#50c8ff;");
-    measLayout->addWidget(circleButton_,        1, 0);
-    measLayout->addWidget(circleDiameterLabel_, 1, 1, 1, 3);
-
-    rectButton_ = createActionButton("Rect.");
-    rectSizeLabel_ = new QLabel("---");
-    rectSizeLabel_->setStyleSheet("font-size:9pt; font-weight:600; color:#ff8c00;");
-    measLayout->addWidget(rectButton_,   2, 0);
-    measLayout->addWidget(rectSizeLabel_, 2, 1, 1, 3);
-
-    leftLayout->addWidget(laserBox);
-    leftLayout->addWidget(measBox);
-
+    // Connections
+    connect(cameraPageLiveButton_, &QPushButton::toggled, this, [this](bool checked) {
+        if (checked) startCameraLive();
+        else         stopCameraLive();
+    });
+    connect(cameraExposureEdit_, &QLineEdit::editingFinished, this, &MainWindow::applyCameraSettings);
+    connect(cameraGainEdit_,     &QLineEdit::editingFinished, this, &MainWindow::applyCameraSettings);
     connect(objectiveCombo_, &QComboBox::currentTextChanged, this, [this](const QString&) {
         applyObjectivePreset();
         updateRulerOverlay();
         updateCircleOverlay();
         updateRectOverlay();
     });
-    connect(applyObjectiveButton, &QPushButton::clicked, this, [this]() {
-        applyObjectivePreset();
-        updateRulerOverlay();
-        updateCircleOverlay();
-        updateRectOverlay();
-    });
-    connect(gotoButton_, &QPushButton::clicked, this, &MainWindow::onArmGoto);
-    connect(rulerButton_,  &QPushButton::clicked, this, &MainWindow::onToggleRuler);
-    connect(circleButton_, &QPushButton::clicked, this, &MainWindow::onToggleCircle);
-    connect(rectButton_,   &QPushButton::clicked, this, &MainWindow::onToggleRect);
 
-    // Sequence
+    // GoTo widgets — added to motorLayout below
+    gotoButton_ = new QPushButton("GoTo");
+    gotoButton_->setCheckable(true);
+    gotoButton_->setStyleSheet(
+        "QPushButton { min-height:26px; border-radius:5px; font-size:8pt;"
+        "              border:1px solid #cfd8e3; background:#f5f7fa; padding:0 6px; }"
+        "QPushButton:checked { background:#1f6feb; border-color:#1558c0; color:#ffffff; }"
+        "QPushButton:hover   { background:#dde8f8; border-color:#1f6feb; }");
+    gotoVelocityEdit_ = new QLineEdit("0.1");
+    gotoVelocityEdit_->hide();
+    gotoStatusLabel_ = new QLabel("GoTo : inactif");
+    gotoStatusLabel_->setStyleSheet("font-size:8pt; color:#5c6570;");
+    connect(gotoButton_, &QPushButton::clicked, this, &MainWindow::onArmGoto);
+
+    leftLayout->addWidget(cameraBox);
+
+    // ── 3. Moteurs ────────────────────────────────────────────
+    auto* motorBox = createGroupBox("Motor Control");
+    auto* motorLayout = new QGridLayout(motorBox);
+    motorLayout->setSpacing(4);
+    motorLayout->setContentsMargins(8, 6, 8, 6);
+
+    // Position display
+    auto* posXLbl = new QLabel("X :");
+    posXLbl->setStyleSheet("font-size:8pt;");
+    xPositionValueLabel_ = new QLabel("-");
+    xPositionValueLabel_->setStyleSheet("font-size:12px; font-weight:600; color:#111927; min-width:54px;");
+    auto* posXUnit = new QLabel("mm");
+    posXUnit->setStyleSheet("font-size:8pt;");
+    auto* posYLbl = new QLabel("Y :");
+    posYLbl->setStyleSheet("font-size:8pt;");
+    yPositionValueLabel_ = new QLabel("-");
+    yPositionValueLabel_->setStyleSheet("font-size:12px; font-weight:600; color:#111927; min-width:54px;");
+    auto* posYUnit = new QLabel("mm");
+    posYUnit->setStyleSheet("font-size:8pt;");
+    motorLayout->addWidget(posXLbl,            0, 0);
+    motorLayout->addWidget(xPositionValueLabel_, 0, 1);
+    motorLayout->addWidget(posXUnit,           0, 2);
+    motorLayout->addWidget(posYLbl,            0, 3);
+    motorLayout->addWidget(yPositionValueLabel_, 0, 4);
+    motorLayout->addWidget(posYUnit,           0, 5);
+
+    // Absolute move row
+    auto* absXLbl = new QLabel("X abs :");
+    absXLbl->setStyleSheet("font-size:8pt;");
+    absXEdit_ = new QLineEdit("0.000");
+    absXEdit_->setMaximumWidth(60);
+    absXEdit_->setStyleSheet("font-size:8pt;");
+    auto* absYLbl = new QLabel("Y :");
+    absYLbl->setStyleSheet("font-size:8pt;");
+    absYEdit_ = new QLineEdit("0.000");
+    absYEdit_->setMaximumWidth(60);
+    absYEdit_->setStyleSheet("font-size:8pt;");
+    moveAbsXYButton_ = createActionButton("Go");
+    moveAbsXYButton_->setProperty("accent", true);
+    moveAbsXYButton_->setMaximumWidth(46);
+    motorLayout->addWidget(absXLbl,          1, 0);
+    motorLayout->addWidget(absXEdit_,        1, 1);
+    motorLayout->addWidget(absYLbl,          1, 2);
+    motorLayout->addWidget(absYEdit_,        1, 3);
+    motorLayout->addWidget(moveAbsXYButton_, 1, 4, 1, 2);
+
+    // Speed row
+    auto* speedLbl = new QLabel("Vit. (mm/s) :");
+    speedLbl->setStyleSheet("font-size:8pt;");
+    jogStepEdit_ = new QLineEdit("0.500");
+    jogStepEdit_->setMaximumWidth(60);
+    jogStepEdit_->setStyleSheet("font-size:8pt;");
+    motorLayout->addWidget(speedLbl,     2, 0, 1, 3);
+    motorLayout->addWidget(jogStepEdit_, 2, 3);
+
+    // Arrow buttons (jog)
+    const QString arrowBtnStyle =
+        "QPushButton { min-width:32px; max-width:32px; min-height:32px; max-height:32px;"
+        "              border-radius:6px; border:1px solid #cfd8e3; background:#ffffff;"
+        "              font-size:14px; padding:0px; }"
+        "QPushButton:hover   { background:#dde8f8; border-color:#1f6feb; }"
+        "QPushButton:pressed { background:#c8d8f0; }"
+        "QPushButton:disabled{ background:#f0f2f5; color:#aaa; }";
+
+    auto* upBtn    = new QPushButton(QString::fromUtf8("\u2191"));    // ↑
+    auto* downBtn  = new QPushButton(QString::fromUtf8("\u2193"));    // ↓
+    auto* leftBtn  = new QPushButton(QString::fromUtf8("\u2190"));    // ←
+    auto* rightBtn = new QPushButton(QString::fromUtf8("\u2192"));    // →
+    upBtn->setStyleSheet(arrowBtnStyle);
+    downBtn->setStyleSheet(arrowBtnStyle);
+    leftBtn->setStyleSheet(arrowBtnStyle);
+    rightBtn->setStyleSheet(arrowBtnStyle);
+    upBtn->setToolTip("Y+ (touche ↑)");
+    downBtn->setToolTip("Y- (touche ↓)");
+    leftBtn->setToolTip("X- (touche ←)");
+    rightBtn->setToolTip("X+ (touche →)");
+
+    // 3x3 grid: row3=up, row4=left+center+right, row5=down
+    // Centred in cols 1-3
+    motorLayout->addWidget(upBtn,    3, 2, Qt::AlignCenter);
+    motorLayout->addWidget(leftBtn,  4, 1, Qt::AlignCenter);
+    motorLayout->addWidget(rightBtn, 4, 3, Qt::AlignCenter);
+    motorLayout->addWidget(downBtn,  5, 2, Qt::AlignCenter);
+
+    connect(leftBtn,         &QPushButton::clicked, this, [this]() { onJogAxis(hardware::AxisId::X, -1); });
+    connect(rightBtn,        &QPushButton::clicked, this, [this]() { onJogAxis(hardware::AxisId::X, +1); });
+    connect(upBtn,           &QPushButton::clicked, this, [this]() { onJogAxis(hardware::AxisId::Y, +1); });
+    connect(downBtn,         &QPushButton::clicked, this, [this]() { onJogAxis(hardware::AxisId::Y, -1); });
+    connect(moveAbsXYButton_,&QPushButton::clicked, this, &MainWindow::onMoveAbsoluteBoth);
+
+    // GoTo row (in Motor Control box)
+    motorLayout->addWidget(gotoButton_,      6, 0, 1, 3);
+    motorLayout->addWidget(gotoStatusLabel_, 6, 3, 1, 3);
+
+    leftLayout->addWidget(motorBox);
+
+    // ── Sequence (hidden, kept for acquisition logic) ─────────
     auto* sequenceBox = createGroupBox("Sequence balayage");
     auto* sequenceLayout = new QGridLayout(sequenceBox);
     sequenceLayout->setSpacing(3);
@@ -1880,17 +1771,41 @@ QWidget* MainWindow::buildSetupTab()
     sequenceLayout->addWidget(sequenceStatusLabel_, 6, 0, 1, 4);
 
     connect(sequenceSetStartButton_, &QPushButton::clicked, this, &MainWindow::onSetSequenceStart);
-    connect(sequenceSetEndButton_, &QPushButton::clicked, this, &MainWindow::onSetSequenceEnd);
-    connect(sequenceRunButton_, &QPushButton::clicked, this, &MainWindow::onRunSequence);
-    connect(sequenceStopButton_, &QPushButton::clicked, this, &MainWindow::onStopSequence);
-
-    // The scan sequence controls are kept alive for the acquisition workflow
-    // but hidden from the setup panel because they are not used in normal operation.
+    connect(sequenceSetEndButton_,   &QPushButton::clicked, this, &MainWindow::onSetSequenceEnd);
+    connect(sequenceRunButton_,      &QPushButton::clicked, this, &MainWindow::onRunSequence);
+    connect(sequenceStopButton_,     &QPushButton::clicked, this, &MainWindow::onStopSequence);
     sequenceBox->hide();
     leftLayout->addWidget(sequenceBox);
-    leftLayout->addStretch();
 
-    // ── Right area ────────────────────────────────────────────────
+    // ── Zone image ────────────────────────────────────────────
+    auto* zoneBox = createGroupBox("Zone image");
+    auto* zoneLayout = new QVBoxLayout(zoneBox);
+    zoneLayout->setSpacing(4);
+    zoneLayout->setContentsMargins(8, 6, 8, 6);
+    sequencePickButton_ = createActionButton("Definir zone");
+    sequencePickButton_->setStyleSheet(
+        "QPushButton { background:#1f6feb; border:1px solid #1558c0; color:#ffffff;"
+        "              min-height:28px; border-radius:5px; font-size:8pt; padding:0 6px; }"
+        "QPushButton:hover   { background:#1b63d3; }"
+        "QPushButton:pressed { background:#195cc4; }"
+        "QPushButton:checked { background:#0f4faf; }");
+    zoneLayout->addWidget(sequencePickButton_);
+    showZoneCheck_ = new QCheckBox("Zone visible");
+    showZoneCheck_->setChecked(true);
+    showZoneCheck_->setStyleSheet("font-size:9pt;");
+    hideWaypointsCheck_ = new QCheckBox("Masquer points");
+    hideWaypointsCheck_->setStyleSheet("font-size:9pt;");
+    zoneLayout->addWidget(showZoneCheck_);
+    zoneLayout->addWidget(hideWaypointsCheck_);
+    connect(sequencePickButton_, &QPushButton::clicked, this, &MainWindow::onArmSequenceRectangle);
+    leftLayout->addWidget(zoneBox);
+
+    leftLayout->addStretch();
+    leftScroll->setWidget(leftPanel);
+
+    // ══════════════════════════════════════════════════════════
+    //  RIGHT PANEL — camera preview + bottom strip
+    // ══════════════════════════════════════════════════════════
     auto* rightPanel = new QWidget;
     auto* rightLayout = new QVBoxLayout(rightPanel);
     rightLayout->setContentsMargins(0, 0, 0, 0);
@@ -1899,14 +1814,140 @@ QWidget* MainWindow::buildSetupTab()
     cameraPreviewWidget_ = new CameraPreviewWidget;
     cameraPreviewWidget_->setStyleSheet("background:#0b1120; border:1px solid #d8e0e8; border-radius:16px;");
     cameraPreviewWidget_->setFrame(cameraController_->previewFrame());
-    rightLayout->addWidget(cameraPreviewWidget_, 1);
-    connect(cameraPreviewWidget_, &CameraPreviewWidget::zoomFactorChanged, this, [this](double zoomFactor) {
-        if (cameraZoomLabel_ != nullptr) {
-            cameraZoomLabel_->setText(QString("Zoom: %1x").arg(zoomFactor, 0, 'f', 2));
+
+    // Helper: draw tool icons with QPainter
+    auto makeToolPixmap = [](const QString& type, int sz) -> QPixmap {
+        QPixmap pm(sz, sz);
+        pm.fill(Qt::transparent);
+        QPainter p(&pm);
+        p.setRenderHint(QPainter::Antialiasing);
+        const QColor col(0x3a, 0x47, 0x5c);
+        if (type == "ruler") {
+            // ↔ double arrow
+            const int cy = sz / 2;
+            const int x0 = qRound(sz * 0.10), x1 = qRound(sz * 0.90);
+            const int aW = qRound(sz * 0.22), aH = qRound(sz * 0.28);
+            p.setPen(QPen(col, qMax(1.5, sz / 9.0), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            p.setBrush(Qt::NoBrush);
+            p.drawLine(x0, cy, x1, cy);
+            p.drawLine(x0, cy, x0 + aW, cy - aH);
+            p.drawLine(x0, cy, x0 + aW, cy + aH);
+            p.drawLine(x1, cy, x1 - aW, cy - aH);
+            p.drawLine(x1, cy, x1 - aW, cy + aH);
+        } else if (type == "circle") {
+            p.setPen(QPen(col, qMax(2, sz/10)));
+            p.setBrush(Qt::NoBrush);
+            int m = qMax(2, sz/7);
+            p.drawEllipse(m, m, sz - 2*m, sz - 2*m);
+        } else if (type == "rect") {
+            p.setPen(QPen(col, qMax(2, sz/10)));
+            p.setBrush(Qt::NoBrush);
+            int m = qMax(2, sz/6);
+            p.drawRect(m, m + sz/8, sz - 2*m, sz - 2*m - sz/4);
+        } else if (type == "eraser") {
+            // Simple black × cross
+            const int m = qRound(sz * 0.18);
+            QPen xPen(col, qMax(2.0, sz / 7.0));
+            xPen.setCapStyle(Qt::RoundCap);
+            p.setPen(xPen);
+            p.drawLine(m, m, sz - m, sz - m);
+            p.drawLine(sz - m, m, m, sz - m);
         }
+        return pm;
+    };
+
+    // ── Tool strip (right of preview, ThorImageCAM-style) ────
+    const QString toolBtnStyle =
+        "QPushButton { min-width:36px; max-width:36px; min-height:36px; max-height:36px;"
+        "              border-radius:6px; border:1px solid #cfd8e3; background:#f5f7fa;"
+        "              font-size:16px; padding:0px; }"
+        "QPushButton:hover   { background:#dde8f8; border-color:#1f6feb; }"
+        "QPushButton:checked { background:#1f6feb; border-color:#1558c0; }"
+        "QPushButton:pressed { background:#c8d8f0; }";
+
+    const int iconSz = 22;
+    rulerButton_ = new QPushButton;
+    rulerButton_->setIcon(QIcon(makeToolPixmap("ruler", iconSz)));
+    rulerButton_->setIconSize(QSize(iconSz, iconSz));
+    rulerButton_->setCheckable(true);
+    rulerButton_->setToolTip("Règle");
+    rulerButton_->setStyleSheet(toolBtnStyle);
+    rulerDistanceLabel_ = new QLabel("---");
+    rulerDistanceLabel_->hide();
+
+    circleButton_ = new QPushButton;
+    circleButton_->setIcon(QIcon(makeToolPixmap("circle", iconSz)));
+    circleButton_->setIconSize(QSize(iconSz, iconSz));
+    circleButton_->setCheckable(true);
+    circleButton_->setToolTip("Cercle");
+    circleButton_->setStyleSheet(toolBtnStyle);
+    circleDiameterLabel_ = new QLabel("---");
+    circleDiameterLabel_->hide();
+
+    rectButton_ = new QPushButton;
+    rectButton_->setIcon(QIcon(makeToolPixmap("rect", iconSz)));
+    rectButton_->setIconSize(QSize(iconSz, iconSz));
+    rectButton_->setCheckable(true);
+    rectButton_->setToolTip("Rectangle");
+    rectButton_->setStyleSheet(toolBtnStyle);
+    rectSizeLabel_ = new QLabel("---");
+    rectSizeLabel_->hide();
+
+    eraserButton_ = new QPushButton;
+    eraserButton_->setIcon(QIcon(makeToolPixmap("eraser", iconSz)));
+    eraserButton_->setIconSize(QSize(iconSz, iconSz));
+    eraserButton_->setCheckable(true);
+    eraserButton_->setToolTip("Gomme (cliquer sur un dessin pour l'effacer, Echap pour quitter)");
+    eraserButton_->setStyleSheet(toolBtnStyle);
+
+    auto* toolStrip = new QWidget;
+    toolStrip->setFixedWidth(42);
+    auto* toolStripLayout = new QVBoxLayout(toolStrip);
+    toolStripLayout->setContentsMargins(3, 4, 3, 4);
+    toolStripLayout->setSpacing(4);
+    toolStripLayout->setAlignment(Qt::AlignTop);
+    toolStripLayout->addWidget(rulerButton_);
+    toolStripLayout->addWidget(circleButton_);
+    toolStripLayout->addWidget(rectButton_);
+    toolStripLayout->addSpacing(8);
+    toolStripLayout->addWidget(eraserButton_);
+    toolStripLayout->addStretch();
+
+    connect(rulerButton_,  &QPushButton::clicked, this, &MainWindow::onToggleRuler);
+    connect(circleButton_, &QPushButton::clicked, this, &MainWindow::onToggleCircle);
+    connect(rectButton_,   &QPushButton::clicked, this, &MainWindow::onToggleRect);
+    connect(eraserButton_, &QPushButton::clicked, this, [this]() {
+        eraserArmed_ = !eraserArmed_;
+        if (eraserArmed_) {
+            // Disarm other modes
+            rulerArmed_ = false;
+            if (rulerButton_ != nullptr) rulerButton_->setChecked(false);
+            circleArmed_ = false;
+            if (circleButton_ != nullptr) circleButton_->setChecked(false);
+            rectArmed_ = false;
+            if (rectButton_ != nullptr) rectButton_->setChecked(false);
+            if (gotoArmed_) setGotoArmed(false);
+            if (sequenceSelectArmed_) { setSequenceSelectArmed(false); clearSequencePreviewSelection(); }
+        }
+        if (eraserButton_ != nullptr) eraserButton_->setChecked(eraserArmed_);
+        updatePreviewCursor();
     });
-    connect(cameraPreviewWidget_, &CameraPreviewWidget::frameClicked, this, &MainWindow::onPreviewFrameClicked);
-    connect(cameraPreviewWidget_, &CameraPreviewWidget::backgroundClicked, this, &MainWindow::onPreviewBackgroundClicked);
+
+    auto* previewRow = new QWidget;
+    auto* previewRowLayout = new QHBoxLayout(previewRow);
+    previewRowLayout->setContentsMargins(0, 0, 0, 0);
+    previewRowLayout->setSpacing(4);
+    previewRowLayout->addWidget(cameraPreviewWidget_, 1);
+    previewRowLayout->addWidget(toolStrip);
+    rightLayout->addWidget(previewRow, 1);
+
+    connect(cameraPreviewWidget_, &CameraPreviewWidget::zoomFactorChanged, this, [this](double zoomFactor) {
+        if (cameraZoomLabel_ != nullptr)
+            cameraZoomLabel_->setText(QString("Zoom: %1x").arg(zoomFactor, 0, 'f', 2));
+    });
+    connect(cameraPreviewWidget_, &CameraPreviewWidget::frameClicked,           this, &MainWindow::onPreviewFrameClicked);
+    connect(cameraPreviewWidget_, &CameraPreviewWidget::backgroundClicked,      this, &MainWindow::onPreviewBackgroundClicked);
+    connect(cameraPreviewWidget_, &CameraPreviewWidget::frameDoubleClicked,     this, &MainWindow::onPreviewFrameDoubleClicked);
     connect(cameraPreviewWidget_, &CameraPreviewWidget::frameCursorMoved, this, [this](const QPoint& fp) {
         if (mouseCoordsLabel_ == nullptr) return;
         const QString obj = (objectiveCombo_ != nullptr)
@@ -1916,112 +1957,28 @@ QWidget* MainWindow::buildSetupTab()
         const double yUm = fp.y() * mmPerPx * 1000.0;
         mouseCoordsLabel_->setText(
             QString("X: %1 px  |  %2 µm      Y: %3 px  |  %4 µm")
-                .arg(fp.x(), 4)
-                .arg(xUm,    0, 'f', 1)
-                .arg(fp.y(), 4)
-                .arg(yUm,    0, 'f', 1));
+                .arg(fp.x(), 4).arg(xUm, 0, 'f', 1)
+                .arg(fp.y(), 4).arg(yUm, 0, 'f', 1));
     });
     connect(cameraPreviewWidget_, &CameraPreviewWidget::frameCursorLeft, this, [this]() {
         if (mouseCoordsLabel_ != nullptr) mouseCoordsLabel_->clear();
     });
-    connect(cameraPreviewWidget_, &CameraPreviewWidget::frameDoubleClicked,
-            this, &MainWindow::onPreviewFrameDoubleClicked);
+
     loadCalibrationPresets();
     applyObjectivePreset();
 
-    // Bottom strip: motor controls + zone selection
-    auto* bottomStrip = new QWidget;
-    auto* bottomLayout = new QHBoxLayout(bottomStrip);
-    bottomLayout->setContentsMargins(0, 0, 0, 0);
-    bottomLayout->setSpacing(8);
-
-    // Motor controls
-    auto* motorBox = createGroupBox("Moteurs");
-    auto* motorLayout = new QGridLayout(motorBox);
-
-    motorLayout->addWidget(new QLabel("X :"), 0, 0);
-    xPositionValueLabel_ = new QLabel("-");
-    xPositionValueLabel_->setStyleSheet("font-size:16px; font-weight:600; color:#111927; min-width:64px;");
-    motorLayout->addWidget(xPositionValueLabel_, 0, 1);
-    motorLayout->addWidget(new QLabel("mm"), 0, 2);
-    motorLayout->addWidget(new QLabel("Y :"), 0, 3);
-    yPositionValueLabel_ = new QLabel("-");
-    yPositionValueLabel_->setStyleSheet("font-size:16px; font-weight:600; color:#111927; min-width:64px;");
-    motorLayout->addWidget(yPositionValueLabel_, 0, 4);
-    motorLayout->addWidget(new QLabel("mm"), 0, 5);
-
-    motorLayout->addWidget(new QLabel("Vit. (mm/s)"), 1, 0);
-    jogStepEdit_ = new QLineEdit("0.500");
-    jogStepEdit_->setMaximumWidth(66);
-    motorLayout->addWidget(jogStepEdit_, 1, 1, 1, 2);
-    auto* xMinBtn = createActionButton("X-");
-    auto* xPlusBtn = createActionButton("X+");
-    auto* yMinBtn = createActionButton("Y-");
-    auto* yPlusBtn = createActionButton("Y+");
-    motorLayout->addWidget(xMinBtn, 1, 3);
-    motorLayout->addWidget(xPlusBtn, 1, 4);
-    motorLayout->addWidget(yMinBtn, 1, 5);
-    motorLayout->addWidget(yPlusBtn, 1, 6);
-
-    motorLayout->addWidget(new QLabel("Abs X"), 2, 0);
-    absXEdit_ = new QLineEdit("0.000");
-    absXEdit_->setMaximumWidth(66);
-    motorLayout->addWidget(absXEdit_, 2, 1, 1, 2);
-    motorLayout->addWidget(new QLabel("Y"), 2, 3);
-    absYEdit_ = new QLineEdit("0.000");
-    absYEdit_->setMaximumWidth(66);
-    motorLayout->addWidget(absYEdit_, 2, 4, 1, 2);
-    moveAbsXYButton_ = createActionButton("Aller XY");
-    motorLayout->addWidget(moveAbsXYButton_, 2, 6);
-
-    connect(xMinBtn, &QPushButton::clicked, this, [this]() { onJogAxis(hardware::AxisId::X, -1); });
-    connect(xPlusBtn, &QPushButton::clicked, this, [this]() { onJogAxis(hardware::AxisId::X, +1); });
-    connect(yMinBtn, &QPushButton::clicked, this, [this]() { onJogAxis(hardware::AxisId::Y, -1); });
-    connect(yPlusBtn, &QPushButton::clicked, this, [this]() { onJogAxis(hardware::AxisId::Y, +1); });
-    connect(moveAbsXYButton_, &QPushButton::clicked, this, &MainWindow::onMoveAbsoluteBoth);
-
-    bottomLayout->addWidget(motorBox, 1);
-
-    // Capture position tool
-    auto* captureBox = createGroupBox("Capture");
-    auto* captureLayout = new QVBoxLayout(captureBox);
-    captureLayout->setSpacing(4);
+    // Capture widgets — kept alive for existing logic (hidden, feature removed from UI)
     captureButton_ = createActionButton("Capturer ref.");
-    captureButton_->setProperty("accent", true);
-    captureLayout->addWidget(captureButton_);
+    captureButton_->hide();
     captureDeltaLabel_ = new QLabel("---");
-    captureDeltaLabel_->setAlignment(Qt::AlignCenter);
-    captureDeltaLabel_->setWordWrap(true);
-    captureDeltaLabel_->setStyleSheet("font-size:9pt; color:#374151;");
-    captureLayout->addWidget(captureDeltaLabel_);
+    captureDeltaLabel_->hide();
     connect(captureButton_, &QPushButton::clicked, this, &MainWindow::onCapturePosition);
-    bottomLayout->addWidget(captureBox);
 
-    // Zone selection
-    auto* zoneBox = createGroupBox("Zone image");
-    auto* zoneLayout = new QVBoxLayout(zoneBox);
-    sequencePickButton_ = createActionButton("Definir zone");
-    sequencePickButton_->setProperty("accent", true);
-    zoneLayout->addWidget(sequencePickButton_);
-    showZoneCheck_ = new QCheckBox("Zone visible");
-    showZoneCheck_->setChecked(true);
-    showZoneCheck_->setStyleSheet("font-size:9pt;");
-    hideWaypointsCheck_ = new QCheckBox("Masquer points");
-    hideWaypointsCheck_->setStyleSheet("font-size:9pt;");
-    zoneLayout->addWidget(showZoneCheck_);
-    zoneLayout->addWidget(hideWaypointsCheck_);
-
-    connect(sequencePickButton_, &QPushButton::clicked, this, &MainWindow::onArmSequenceRectangle);
-
-    bottomLayout->addWidget(zoneBox);
-
-    rightLayout->addWidget(bottomStrip);
-
-    splitter->addWidget(leftPanel);
+    splitter->addWidget(leftScroll);
     splitter->addWidget(rightPanel);
     splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
-    splitter->setSizes({340, 1020});
+    splitter->setSizes({310, 1050});
 
     return page;
 }
@@ -2760,8 +2717,10 @@ void MainWindow::updatePreviewCursor()
     }
 
     cameraPreviewWidget_->setCursor(
-        (gotoArmed_ || sequenceSelectArmed_ || rulerArmed_ || circleArmed_ || rectArmed_)
-        ? Qt::CrossCursor : Qt::ArrowCursor);
+        eraserArmed_
+        ? Qt::CrossCursor
+        : (gotoArmed_ || sequenceSelectArmed_ || rulerArmed_ || circleArmed_ || rectArmed_)
+            ? Qt::CrossCursor : Qt::ArrowCursor);
 }
 
 void MainWindow::setGotoArmed(bool armed)
@@ -2770,6 +2729,8 @@ void MainWindow::setGotoArmed(bool armed)
     if (gotoStatusLabel_ != nullptr) {
         gotoStatusLabel_->setText(gotoArmed_ ? "GoTo : clique dans l'image" : "GoTo : inactif");
     }
+    if (gotoButton_ != nullptr && gotoButton_->isChecked() != armed)
+        gotoButton_->setChecked(armed);
     updatePreviewCursor();
 }
 
@@ -3365,9 +3326,9 @@ void MainWindow::onToggleRuler()
         rulerHasP2_ = false;
         if (cameraPreviewWidget_ != nullptr) cameraPreviewWidget_->clearRulerOverlay();
         if (rulerDistanceLabel_ != nullptr)  rulerDistanceLabel_->setText("Cliquez P1");
-        if (rulerButton_ != nullptr)         rulerButton_->setText("Regle ON");
+        if (rulerButton_ != nullptr)         rulerButton_->setChecked(true);
     } else {
-        if (rulerButton_ != nullptr) rulerButton_->setText("Regle");
+        if (rulerButton_ != nullptr) rulerButton_->setChecked(false);
         if (rulerDistanceLabel_ != nullptr && !rulerHasP2_)
             rulerDistanceLabel_->setText("---");
     }
@@ -3436,16 +3397,16 @@ void MainWindow::onToggleCircle()
         if (gotoArmed_)            setGotoArmed(false);
         if (sequenceSelectArmed_) { setSequenceSelectArmed(false); clearSequencePreviewSelection(); }
         rulerArmed_ = false;
-        if (rulerButton_ != nullptr) rulerButton_->setText("Regle");
+        if (rulerButton_ != nullptr) rulerButton_->setChecked(false);
         rectArmed_ = false;
-        if (rectButton_ != nullptr) rectButton_->setText("Rect.");
+        if (rectButton_ != nullptr) rectButton_->setChecked(false);
         circleHasCenter_ = false;
         circleHasEdge_   = false;
         if (cameraPreviewWidget_ != nullptr) cameraPreviewWidget_->clearCircleOverlay();
         if (circleDiameterLabel_ != nullptr) circleDiameterLabel_->setText("Cliquez centre");
-        if (circleButton_ != nullptr)        circleButton_->setText("Cercle ON");
+        if (circleButton_ != nullptr)        circleButton_->setChecked(true);
     } else {
-        if (circleButton_ != nullptr) circleButton_->setText("Cercle");
+        if (circleButton_ != nullptr) circleButton_->setChecked(false);
         if (circleDiameterLabel_ != nullptr && !circleHasEdge_)
             circleDiameterLabel_->setText("---");
     }
@@ -3486,16 +3447,16 @@ void MainWindow::onToggleRect()
         if (gotoArmed_)            setGotoArmed(false);
         if (sequenceSelectArmed_) { setSequenceSelectArmed(false); clearSequencePreviewSelection(); }
         rulerArmed_ = false;
-        if (rulerButton_ != nullptr) rulerButton_->setText("Regle");
+        if (rulerButton_ != nullptr) rulerButton_->setChecked(false);
         circleArmed_ = false;
-        if (circleButton_ != nullptr) circleButton_->setText("Cercle");
+        if (circleButton_ != nullptr) circleButton_->setChecked(false);
         rectHasP1_ = false;
         rectHasP2_ = false;
         if (cameraPreviewWidget_ != nullptr) cameraPreviewWidget_->clearRectOverlay();
         if (rectSizeLabel_ != nullptr) rectSizeLabel_->setText("Cliquez coin 1");
-        if (rectButton_ != nullptr)    rectButton_->setText("Rect. ON");
+        if (rectButton_ != nullptr)    rectButton_->setChecked(true);
     } else {
-        if (rectButton_ != nullptr) rectButton_->setText("Rect.");
+        if (rectButton_ != nullptr) rectButton_->setChecked(false);
         if (rectSizeLabel_ != nullptr && !rectHasP2_)
             rectSizeLabel_->setText("---");
     }
@@ -4013,7 +3974,71 @@ void MainWindow::onStopSequence()
 
 void MainWindow::onPreviewFrameClicked(const QPoint& framePointPx)
 {
-    // ── Ruler mode ────────────────────────────────────────────────────────────
+    // Eraser mode: hit-test overlays and remove the one clicked
+    if (eraserArmed_) {
+        const QPointF fp(framePointPx);
+        constexpr double kHitPx = 14.0;
+        // Ruler
+        if (rulerHasP1_ && rulerHasP2_) {
+            const QPointF d = rulerP2Px_ - rulerP1Px_;
+            const double len2 = d.x()*d.x() + d.y()*d.y();
+            if (len2 > 0) {
+                const double t = std::clamp(((fp.x()-rulerP1Px_.x())*d.x() + (fp.y()-rulerP1Px_.y())*d.y()) / len2, 0.0, 1.0);
+                const QPointF closest = rulerP1Px_ + t * d;
+                if (std::hypot(fp.x()-closest.x(), fp.y()-closest.y()) < kHitPx) {
+                    rulerHasP1_ = false; rulerHasP2_ = false;
+                    if (cameraPreviewWidget_ != nullptr) cameraPreviewWidget_->clearRulerOverlay();
+                    return;
+                }
+            }
+        } else if (rulerHasP1_) {
+            if (std::hypot(fp.x()-rulerP1Px_.x(), fp.y()-rulerP1Px_.y()) < kHitPx) {
+                rulerHasP1_ = false;
+                if (cameraPreviewWidget_ != nullptr) cameraPreviewWidget_->clearRulerOverlay();
+                return;
+            }
+        }
+        // Circle
+        if (circleHasCenter_) {
+            if (circleHasEdge_) {
+                const double r = std::hypot(circleEdgePx_.x()-circleCenterPx_.x(), circleEdgePx_.y()-circleCenterPx_.y());
+                const double dist = std::hypot(fp.x()-circleCenterPx_.x(), fp.y()-circleCenterPx_.y());
+                if (std::abs(dist - r) < kHitPx || dist < kHitPx) {
+                    circleHasCenter_ = false; circleHasEdge_ = false;
+                    if (cameraPreviewWidget_ != nullptr) cameraPreviewWidget_->clearCircleOverlay();
+                    return;
+                }
+            } else if (std::hypot(fp.x()-circleCenterPx_.x(), fp.y()-circleCenterPx_.y()) < kHitPx) {
+                circleHasCenter_ = false;
+                if (cameraPreviewWidget_ != nullptr) cameraPreviewWidget_->clearCircleOverlay();
+                return;
+            }
+        }
+        // Rect
+        if (rectHasP1_ && rectHasP2_) {
+            const double xMin = std::min(rectP1Px_.x(), rectP2Px_.x());
+            const double xMax = std::max(rectP1Px_.x(), rectP2Px_.x());
+            const double yMin = std::min(rectP1Px_.y(), rectP2Px_.y());
+            const double yMax = std::max(rectP1Px_.y(), rectP2Px_.y());
+            const bool inside = fp.x() >= xMin && fp.x() <= xMax && fp.y() >= yMin && fp.y() <= yMax;
+            const bool nearEdge =
+                (fp.y() >= yMin-kHitPx && fp.y() <= yMax+kHitPx && (std::abs(fp.x()-xMin) < kHitPx || std::abs(fp.x()-xMax) < kHitPx)) ||
+                (fp.x() >= xMin-kHitPx && fp.x() <= xMax+kHitPx && (std::abs(fp.y()-yMin) < kHitPx || std::abs(fp.y()-yMax) < kHitPx));
+            if (inside || nearEdge) {
+                rectHasP1_ = false; rectHasP2_ = false;
+                if (cameraPreviewWidget_ != nullptr) cameraPreviewWidget_->clearRectOverlay();
+                return;
+            }
+        } else if (rectHasP1_) {
+            if (std::hypot(fp.x()-rectP1Px_.x(), fp.y()-rectP1Px_.y()) < kHitPx) {
+                rectHasP1_ = false;
+                if (cameraPreviewWidget_ != nullptr) cameraPreviewWidget_->clearRectOverlay();
+                return;
+            }
+        }
+        return; // consume click even if nothing hit
+    }
+
     if (rulerArmed_) {
         if (!rulerHasP1_ || rulerHasP2_) {
             rulerP1Px_ = QPointF(framePointPx);
@@ -4296,108 +4321,403 @@ void MainWindow::syncPotentiostatTechniqueUi()
         }
     }
     if (potentiostatRunButton_ != nullptr) {
-        potentiostatRunButton_->setText(QString("Lancer %1").arg(selectedPotentiostatTechniqueLabel()));
+        // icon is set in buildMeasureTab — do not override with text here
     }
 }
 
 QWidget* MainWindow::buildMeasureTab()
 {
     auto* page = new QWidget;
-    auto* outerLayout = new QHBoxLayout(page);
-    outerLayout->setContentsMargins(10, 10, 10, 10);
-    outerLayout->setSpacing(10);
+    auto* pageLayout = new QVBoxLayout(page);
+    pageLayout->setContentsMargins(8, 8, 8, 8);
+    pageLayout->setSpacing(6);
 
-    auto* splitter = new QSplitter(Qt::Horizontal);
-    outerLayout->addWidget(splitter, 1);
+    // ── Small-text helpers (used in both top bar and left column) ─────────────
+    const auto S = [](const QString& text) -> QLabel* {
+        auto* lbl = new QLabel(text);
+        lbl->setStyleSheet("font-size:8pt;");
+        return lbl;
+    };
+    const auto smallEdit = [](const QString& text, int w = 64) -> QLineEdit* {
+        auto* e = new QLineEdit(text);
+        e->setMaximumWidth(w);
+        e->setAlignment(Qt::AlignRight);
+        e->setStyleSheet("font-size:8pt;");
+        return e;
+    };
+    const auto smallCombo = [](const QStringList& items, const QString& cur = {}) -> QComboBox* {
+        auto* c = new QComboBox;
+        c->addItems(items);
+        if (!cur.isEmpty()) c->setCurrentText(cur);
+        c->setStyleSheet("font-size:8pt;");
+        return c;
+    };
+    const auto makeSmallTimeEditor = [&](const QString& hDef, const QString& mDef, const QString& sDef,
+                                         QLineEdit*& hEdit, QLineEdit*& mEdit, QLineEdit*& sEdit) -> QWidget* {
+        auto* w = new QWidget;
+        auto* hl = new QHBoxLayout(w);
+        hl->setContentsMargins(0, 0, 0, 0);
+        hl->setSpacing(2);
+        hEdit = smallEdit(hDef, 34); mEdit = smallEdit(mDef, 34); sEdit = smallEdit(sDef, 52);
+        hl->addWidget(hEdit); hl->addWidget(S("h"));
+        hl->addWidget(mEdit); hl->addWidget(S("mn"));
+        hl->addWidget(sEdit); hl->addWidget(S("s"));
+        hl->addStretch(1);
+        return w;
+    };
+    const auto makeSep = []() -> QFrame* {
+        auto* sep = new QFrame;
+        sep->setFrameShape(QFrame::VLine);
+        sep->setFrameShadow(QFrame::Sunken);
+        sep->setFixedWidth(2);
+        return sep;
+    };
 
-    // ── Left: acquisition controls ────────────────────────────────
-    auto* leftPanel = new QWidget;
-    leftPanel->setMinimumWidth(280);
-    auto* leftLayout = new QVBoxLayout(leftPanel);
-    leftLayout->setContentsMargins(0, 0, 0, 0);
-    leftLayout->setSpacing(8);
+    const QStringList eRangeOpts = {"-2.5 V; 2.5 V", "-5 V; 5 V", "-10 V; 10 V", "Auto"};
+    const QStringList iRangeOpts = {
+        "100 pA", "1 nA", "10 nA", "100 nA",
+        "1 uA", "10 uA", "100 uA",
+        "1 mA", "10 mA", "100 mA", "1 A",
+        "Booster", "Auto"
+    };
 
-    // Potentiostat status
-    auto* potStatusBox = createGroupBox("Potentiostat – Acquisition");
-    auto* potStatusLayout = new QGridLayout(potStatusBox);
+    // ╔══════════════════════════════════════════════════════════════════════╗
+    // ║  TOP BAR — acquisition + display controls                          ║
+    // ╚══════════════════════════════════════════════════════════════════════╝
+    auto* topBar = new QWidget;
+    topBar->setMinimumHeight(52);
+    topBar->setMaximumHeight(52);
+    auto* topLayout = new QHBoxLayout(topBar);
+    topLayout->setContentsMargins(6, 6, 6, 6);
+    topLayout->setSpacing(6);
 
-    potentiostatRunButton_ = createActionButton("Lancer acquisition");
-    potentiostatRunButton_->setProperty("accent", true);
-    potentiostatStopButton_ = createActionButton("Arreter");
-    potStatusLayout->addWidget(potentiostatRunButton_, 0, 0, 1, 2);
-    potStatusLayout->addWidget(potentiostatStopButton_, 0, 2, 1, 2);
+    // ── Play / Stop icon buttons ──────────────────────────────────────────
+    const QString iconBtnStyle =
+        "QPushButton { min-width:28px; max-width:28px;"
+        "              min-height:28px; max-height:28px; border-radius:14px;"
+        "              border:1px solid #c0c0c0; background:#f0f0f0; padding:0px; }"
+        "QPushButton:hover  { background:#dde8f8; border-color:#1f6feb; }"
+        "QPushButton:pressed{ background:#c8d8f0; }"
+        "QPushButton:disabled{ background:#f0f2f5; }";
 
-    potStatusLayout->addWidget(new QLabel("Courant mesure :"), 1, 0, 1, 2);
+    potentiostatRunButton_ = new QPushButton;
+    potentiostatRunButton_->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
+    potentiostatRunButton_->setIconSize(QSize(16, 16));
+    potentiostatRunButton_->setStyleSheet(iconBtnStyle);
+    potentiostatRunButton_->setToolTip("Lancer l'acquisition");
+    potentiostatRunButton_->setEnabled(false);
+
+    potentiostatStopButton_ = new QPushButton;
+    potentiostatStopButton_->setIcon(style()->standardIcon(QStyle::SP_MediaStop));
+    potentiostatStopButton_->setIconSize(QSize(16, 16));
+    potentiostatStopButton_->setStyleSheet(iconBtnStyle);
+    potentiostatStopButton_->setToolTip("Arreter l'acquisition");
+    potentiostatStopButton_->setEnabled(false);
+
+    connect(potentiostatRunButton_,  &QPushButton::clicked, this, &MainWindow::onStartCaPotentiostat);
+    connect(potentiostatStopButton_, &QPushButton::clicked, this, &MainWindow::onStopCaPotentiostat);
+
+    topLayout->addWidget(potentiostatRunButton_);
+    topLayout->addWidget(potentiostatStopButton_);
+    topLayout->addWidget(makeSep());
+
+    // ── Status / current ─────────────────────────────────────────────────
+    potentiostatMeasureStateLabel_ = new QLabel("Non connecte");
+    potentiostatMeasureStateLabel_->setStyleSheet("color:#5c6570; font-size:8pt;");
+    topLayout->addWidget(potentiostatMeasureStateLabel_);
+    topLayout->addWidget(makeSep());
+
+    auto* curLbl = S("Courant :");
+    topLayout->addWidget(curLbl);
     potentiostatCurrentLabel_ = new QLabel("---  A");
-    potentiostatCurrentLabel_->setStyleSheet("font-size:20px; font-weight:700; color:#1f6feb;");
-    potStatusLayout->addWidget(potentiostatCurrentLabel_, 1, 2, 1, 2);
+    potentiostatCurrentLabel_->setStyleSheet("font-size:13px; font-weight:700; color:#1f6feb;");
+    topLayout->addWidget(potentiostatCurrentLabel_);
+    topLayout->addWidget(makeSep());
 
-    potentiostatMeasureStateLabel_ = new QLabel("Etat : non connecte");
-    potentiostatMeasureStateLabel_->setStyleSheet("color:#5c6570; font-size:9pt;");
-    potStatusLayout->addWidget(potentiostatMeasureStateLabel_, 2, 0, 1, 4);
-
-    potStatusLayout->addWidget(new QLabel("Points acquis :"), 3, 0, 1, 2);
+    topLayout->addWidget(S("Points :"));
     potentiostatPointCountLabel_ = new QLabel("0");
-    potentiostatPointCountLabel_->setStyleSheet("font-weight:600; color:#111927;");
-    potStatusLayout->addWidget(potentiostatPointCountLabel_, 3, 2, 1, 2);
+    potentiostatPointCountLabel_->setStyleSheet("font-size:8pt; font-weight:600;");
+    topLayout->addWidget(potentiostatPointCountLabel_);
+    topLayout->addWidget(makeSep());
 
-    potStatusLayout->addWidget(new QLabel("Progression :"), 4, 0, 1, 2);
+    topLayout->addWidget(S("Progression :"));
     potentiostatProgressLabel_ = new QLabel("En attente");
-    potentiostatProgressLabel_->setStyleSheet("font-weight:600; color:#111927;");
-    potStatusLayout->addWidget(potentiostatProgressLabel_, 4, 2, 1, 2);
+    potentiostatProgressLabel_->setStyleSheet("font-size:8pt; font-weight:600;");
+    topLayout->addWidget(potentiostatProgressLabel_);
+    topLayout->addWidget(makeSep());
 
     potentiostatExportButton_ = createActionButton("Exporter...");
-    potStatusLayout->addWidget(potentiostatExportButton_, 5, 0, 1, 4);
-
-    connect(potentiostatRunButton_,    &QPushButton::clicked, this, &MainWindow::onStartCaPotentiostat);
-    connect(potentiostatStopButton_,   &QPushButton::clicked, this, &MainWindow::onStopCaPotentiostat);
-    connect(potentiostatExportButton_, &QPushButton::clicked, this, &MainWindow::onExportPotentiostat);
-    potentiostatRunButton_->setEnabled(false);
-    potentiostatStopButton_->setEnabled(false);
     potentiostatExportButton_->setEnabled(false);
-    syncPotentiostatTechniqueUi();
+    connect(potentiostatExportButton_, &QPushButton::clicked, this, &MainWindow::onExportPotentiostat);
+    topLayout->addWidget(potentiostatExportButton_);
 
-    leftLayout->addWidget(potStatusBox);
+    topLayout->addStretch(1);
+    topLayout->addWidget(makeSep());
 
-    auto* graphModeBox = createGroupBox("Graphe");
-    auto* graphModeLayout = new QGridLayout(graphModeBox);
-    graphModeLayout->addWidget(new QLabel("Type"), 0, 0);
+    // ── Graph type + Vue 3D ───────────────────────────────────────────────
+    topLayout->addWidget(S("Graphe :"));
     potentiostatGraphTypeCombo_ = new QComboBox;
+    potentiostatGraphTypeCombo_->setStyleSheet("font-size:8pt;");
     potentiostatGraphTypeCombo_->addItems({"I = f(t)", "Ewe = f(t)", "I = f(Ewe)", "Ewe = f(I)"});
-    graphModeLayout->addWidget(potentiostatGraphTypeCombo_, 0, 1);
     connect(potentiostatGraphTypeCombo_, &QComboBox::currentIndexChanged, this, [this](int) {
         refreshPotentiostatVisualization();
     });
-
-    colorGraphButton_ = createActionButton("ColorGraph");
-    colorGraphButton_->setCheckable(true);
-    colorGraphButton_->setChecked(false);
-    colorGraphButton_->setToolTip("Afficher les zones de deplacement moteur (vert) et d'arret (rouge) sur le graphe");
-    graphModeLayout->addWidget(colorGraphButton_, 1, 0, 1, 2);
-    connect(colorGraphButton_, &QPushButton::toggled, this, [this](bool checked) {
-        if (potentiostatGraphWidget_ != nullptr)
-            potentiostatGraphWidget_->setShowPhases(checked);
-    });
+    topLayout->addWidget(potentiostatGraphTypeCombo_);
 
     view3DButton_ = createActionButton("Vue 3D");
     view3DButton_->setCheckable(true);
     view3DButton_->setChecked(false);
-    view3DButton_->setToolTip("Basculer entre la vue 2D (graphe + carte) et la surface 3D I(x,y)");
-    graphModeLayout->addWidget(view3DButton_, 2, 0, 1, 2);
+    view3DButton_->setToolTip("Basculer entre vue 2D et surface 3D I(x,y)");
     connect(view3DButton_, &QPushButton::toggled, this, [this](bool is3D) {
         if (measureRightStack_ != nullptr)
             measureRightStack_->setCurrentIndex(is3D ? 1 : 0);
         view3DButton_->setText(is3D ? "Vue 2D" : "Vue 3D");
     });
-    leftLayout->addWidget(graphModeBox);
+    topLayout->addWidget(view3DButton_);
 
+    pageLayout->addWidget(topBar);
+
+    // ── Thin separator line below top bar ────────────────────────────────
+    auto* hSep = new QFrame;
+    hSep->setFrameShape(QFrame::HLine);
+    hSep->setFrameShadow(QFrame::Sunken);
+    pageLayout->addWidget(hSep);
+
+    // ╔══════════════════════════════════════════════════════════════════════╗
+    // ║  MAIN AREA — left column (params) + right (graphs)                 ║
+    // ╚══════════════════════════════════════════════════════════════════════╝
+    auto* splitter = new QSplitter(Qt::Horizontal);
+    pageLayout->addWidget(splitter, 1);
+
+    // ── Left: scrollable params panel ────────────────────────────────────
+    auto* leftScroll = new QScrollArea;
+    leftScroll->setWidgetResizable(true);
+    leftScroll->setFrameShape(QFrame::NoFrame);
+    leftScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    leftScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    leftScroll->setMinimumWidth(260);
+    leftScroll->setMaximumWidth(340);
+    leftScroll->setStyleSheet("QScrollArea { background: transparent; border: none; }"
+                              "QScrollArea > QWidget > QWidget { background: transparent; }");
+
+    auto* leftPanel = new QWidget;
+    leftPanel->setAutoFillBackground(false);
+    leftPanel->setStyleSheet("background:transparent;");
+    auto* leftLayout = new QVBoxLayout(leftPanel);
+    leftLayout->setContentsMargins(2, 2, 2, 2);
+    leftLayout->setSpacing(5);
+
+    // ── Connexion & Technique ─────────────────────────────────────────────
+    auto* connBox = createGroupBox("Potentiostat");
+    auto* connLayout = new QGridLayout(connBox);
+    connLayout->setSpacing(3);
+    connLayout->setContentsMargins(6, 4, 6, 4);
+
+    potentiostatStatusLabel_ = new QLabel("Deconnecte");
+    potentiostatStatusLabel_->setStyleSheet("color:#5c6570; font-size:8pt;");
+    auto* openConnBtn = createActionButton("Connexion...");
+    openConnBtn->setMaximumWidth(95);
+    connect(openConnBtn, &QPushButton::clicked, this, &MainWindow::openStartupConnectionDialog);
+    connLayout->addWidget(potentiostatStatusLabel_, 0, 0);
+    connLayout->addWidget(openConnBtn, 0, 1);
+
+    connLayout->addWidget(S("Technique"), 1, 0);
+    potentiostatTechniqueCombo_ = new QComboBox;
+    potentiostatTechniqueCombo_->addItems({"CA", "OCV", "CVA"});
+    potentiostatTechniqueCombo_->setStyleSheet("font-size:8pt;");
+    if (QAbstractItemView* v = potentiostatTechniqueCombo_->view()) {
+        v->setStyleSheet("background:#ffffff; color:#18212b;"
+                         "selection-background-color:#eef4ff; selection-color:#111927;");
+    }
+    connLayout->addWidget(potentiostatTechniqueCombo_, 1, 1);
+    connLayout->setColumnStretch(0, 1);
+    leftLayout->addWidget(connBox);
+
+    // ── Technique parameters (stacked) ───────────────────────────────────
+    potentiostatTechniqueStack_ = new QStackedWidget;
+    potentiostatTechniqueStack_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+
+    // CA page
+    auto* caPage = new QWidget;
+    auto* caLayout = new QGridLayout(caPage);
+    caLayout->setContentsMargins(6, 4, 6, 4);
+    caLayout->setHorizontalSpacing(6);
+    caLayout->setVerticalSpacing(3);
+    caLayout->addWidget(S("Ewe (V)"), 0, 0);
+    potentiostatVoltageEdit_ = smallEdit("0.500");
+    caLayout->addWidget(potentiostatVoltageEdit_, 0, 1);
+    caLayout->addWidget(S("vs"), 0, 2);
+    potentiostatVsCombo_ = smallCombo({"Ref", "Pref"});
+    caLayout->addWidget(potentiostatVsCombo_, 0, 3);
+    caLayout->addWidget(S("E Range"), 1, 0);
+    potentiostatErangeCombo_ = smallCombo(eRangeOpts, "-2.5 V; 2.5 V");
+    caLayout->addWidget(potentiostatErangeCombo_, 1, 1, 1, 3);
+    caLayout->addWidget(S("I Range"), 2, 0);
+    potentiostatCurrentRangeCombo_ = smallCombo(iRangeOpts, "Auto");
+    caLayout->addWidget(potentiostatCurrentRangeCombo_, 2, 1, 1, 3);
+    caLayout->addWidget(S("Bandwidth"), 3, 0);
+    potentiostatBandwidthCombo_ = new QComboBox;
+    potentiostatBandwidthCombo_->setStyleSheet("font-size:8pt;");
+    for (int i = 1; i <= 9; ++i) potentiostatBandwidthCombo_->addItem(QString::number(i));
+    potentiostatBandwidthCombo_->setCurrentText("8");
+    caLayout->addWidget(potentiostatBandwidthCombo_, 3, 1);
+    caLayout->addWidget(S("Cycles"), 4, 0);
+    potentiostatNbCyclesEdit_ = smallEdit("0", 50);
+    caLayout->addWidget(potentiostatNbCyclesEdit_, 4, 1);
+    caLayout->setColumnStretch(1, 1); caLayout->setColumnStretch(3, 1);
+
+    // OCV page
+    auto* ocvPage = new QWidget;
+    auto* ocvLayout = new QGridLayout(ocvPage);
+    ocvLayout->setContentsMargins(6, 4, 6, 4);
+    ocvLayout->setHorizontalSpacing(6);
+    ocvLayout->setVerticalSpacing(3);
+    ocvLayout->addWidget(S("Repos tR"), 0, 0);
+    ocvLayout->addWidget(makeSmallTimeEditor("0", "1", "0.000",
+        potentiostatOcvRestHoursEdit_, potentiostatOcvRestMinutesEdit_, potentiostatOcvRestSecondsEdit_), 0, 1);
+    ocvLayout->addWidget(S("dE (mV)"), 1, 0);
+    potentiostatOcvRecordDEEdit_ = smallEdit("10.0");
+    ocvLayout->addWidget(potentiostatOcvRecordDEEdit_, 1, 1);
+    ocvLayout->addWidget(S("dT (s)"), 2, 0);
+    potentiostatOcvRecordDtEdit_ = smallEdit("0.500");
+    ocvLayout->addWidget(potentiostatOcvRecordDtEdit_, 2, 1);
+    ocvLayout->addWidget(S("E Range"), 3, 0);
+    potentiostatOcvErangeCombo_ = smallCombo(eRangeOpts, "-10 V; 10 V");
+    ocvLayout->addWidget(potentiostatOcvErangeCombo_, 3, 1);
+    ocvLayout->setColumnStretch(1, 1);
+
+    // CVA page
+    auto* cvaPage = new QWidget;
+    auto* cvaPageLayout = new QVBoxLayout(cvaPage);
+    cvaPageLayout->setContentsMargins(0, 0, 0, 0);
+    cvaPageLayout->setSpacing(4);
+
+    auto* cvaInitBox = createGroupBox("Initialisation");
+    auto* cvaInitLayout = new QGridLayout(cvaInitBox);
+    cvaInitLayout->setSpacing(3); cvaInitLayout->setContentsMargins(6, 4, 6, 4);
+    cvaInitLayout->addWidget(S("Ei (V)"), 0, 0);
+    potentiostatCvaEiEdit_ = smallEdit("0.000");
+    cvaInitLayout->addWidget(potentiostatCvaEiEdit_, 0, 1);
+    cvaInitLayout->addWidget(S("vs"), 0, 2);
+    potentiostatCvaEiVsCombo_ = smallCombo({"Ref", "Eoc"});
+    cvaInitLayout->addWidget(potentiostatCvaEiVsCombo_, 0, 3);
+    cvaInitLayout->addWidget(S("Hold Ei"), 1, 0);
+    cvaInitLayout->addWidget(makeSmallTimeEditor("0", "0", "5.000",
+        potentiostatCvaTiHoursEdit_, potentiostatCvaTiMinutesEdit_, potentiostatCvaTiSecondsEdit_), 1, 1, 1, 3);
+    cvaInitLayout->addWidget(S("dti (s)"), 2, 0);
+    potentiostatCvaDtiEdit_ = smallEdit("1.000");
+    cvaInitLayout->addWidget(potentiostatCvaDtiEdit_, 2, 1);
+
+    auto* cvaScanBox = createGroupBox("Balayage");
+    auto* cvaScanLayout = new QGridLayout(cvaScanBox);
+    cvaScanLayout->setSpacing(3); cvaScanLayout->setContentsMargins(6, 4, 6, 4);
+    cvaScanLayout->addWidget(S("dE/dt"), 0, 0);
+    potentiostatCvaScanRateEdit_ = smallEdit("80.000");
+    cvaScanLayout->addWidget(potentiostatCvaScanRateEdit_, 0, 1);
+    potentiostatCvaScanRateUnitCombo_ = smallCombo({"mV/s", "V/s"});
+    cvaScanLayout->addWidget(potentiostatCvaScanRateUnitCombo_, 0, 2);
+    cvaScanLayout->addWidget(S("E1 (V)"), 1, 0);
+    potentiostatCvaE1Edit_ = smallEdit("2.500");
+    cvaScanLayout->addWidget(potentiostatCvaE1Edit_, 1, 1);
+    cvaScanLayout->addWidget(S("vs"), 1, 2);
+    potentiostatCvaE1VsCombo_ = smallCombo({"Ref", "Ei"});
+    cvaScanLayout->addWidget(potentiostatCvaE1VsCombo_, 1, 3);
+    cvaScanLayout->addWidget(S("Hold E1"), 2, 0);
+    cvaScanLayout->addWidget(makeSmallTimeEditor("0", "0", "0.000",
+        potentiostatCvaT1HoursEdit_, potentiostatCvaT1MinutesEdit_, potentiostatCvaT1SecondsEdit_), 2, 1, 1, 3);
+    cvaScanLayout->addWidget(S("dt1 (s)"), 3, 0);
+    potentiostatCvaDt1Edit_ = smallEdit("0.100");
+    cvaScanLayout->addWidget(potentiostatCvaDt1Edit_, 3, 1);
+    cvaScanLayout->addWidget(S("E2 (V)"), 4, 0);
+    potentiostatCvaE2Edit_ = smallEdit("-0.200");
+    cvaScanLayout->addWidget(potentiostatCvaE2Edit_, 4, 1);
+    cvaScanLayout->addWidget(S("vs"), 4, 2);
+    potentiostatCvaE2VsCombo_ = smallCombo({"Ref", "Ei"});
+    cvaScanLayout->addWidget(potentiostatCvaE2VsCombo_, 4, 3);
+    cvaScanLayout->addWidget(S("Hold E2"), 5, 0);
+    cvaScanLayout->addWidget(makeSmallTimeEditor("0", "0", "0.000",
+        potentiostatCvaT2HoursEdit_, potentiostatCvaT2MinutesEdit_, potentiostatCvaT2SecondsEdit_), 5, 1, 1, 3);
+    cvaScanLayout->addWidget(S("dt2 (s)"), 6, 0);
+    potentiostatCvaDt2Edit_ = smallEdit("0.100");
+    cvaScanLayout->addWidget(potentiostatCvaDt2Edit_, 6, 1);
+    cvaScanLayout->addWidget(S("Mesure I (%)"), 7, 0);
+    potentiostatCvaMeasurePercentEdit_ = smallEdit("50", 50);
+    cvaScanLayout->addWidget(potentiostatCvaMeasurePercentEdit_, 7, 1);
+    cvaScanLayout->addWidget(S("Moy. N pas"), 8, 0);
+    potentiostatCvaAverageNStepsEdit_ = smallEdit("20", 50);
+    cvaScanLayout->addWidget(potentiostatCvaAverageNStepsEdit_, 8, 1);
+    cvaScanLayout->addWidget(S("Cycles nC"), 9, 0);
+    potentiostatCvaRepeatCyclesEdit_ = smallEdit("1", 50);
+    cvaScanLayout->addWidget(potentiostatCvaRepeatCyclesEdit_, 9, 1);
+
+    auto* cvaRangeBox = createGroupBox("Plages");
+    auto* cvaRangeLayout = new QGridLayout(cvaRangeBox);
+    cvaRangeLayout->setSpacing(3); cvaRangeLayout->setContentsMargins(6, 4, 6, 4);
+    cvaRangeLayout->addWidget(S("E Range"), 0, 0);
+    potentiostatCvaErangeCombo_ = smallCombo(eRangeOpts, "-2.5 V; 2.5 V");
+    cvaRangeLayout->addWidget(potentiostatCvaErangeCombo_, 0, 1, 1, 2);
+    cvaRangeLayout->addWidget(S("I Range"), 1, 0);
+    potentiostatCvaCurrentRangeCombo_ = smallCombo(iRangeOpts, "Auto");
+    cvaRangeLayout->addWidget(potentiostatCvaCurrentRangeCombo_, 1, 1, 1, 2);
+    cvaRangeLayout->addWidget(S("Bandwidth"), 2, 0);
+    potentiostatCvaBandwidthCombo_ = new QComboBox;
+    potentiostatCvaBandwidthCombo_->setStyleSheet("font-size:8pt;");
+    for (int i = 1; i <= 9; ++i) potentiostatCvaBandwidthCombo_->addItem(QString::number(i));
+    potentiostatCvaBandwidthCombo_->setCurrentText("5");
+    cvaRangeLayout->addWidget(potentiostatCvaBandwidthCombo_, 2, 1);
+
+    auto* cvaFinalBox = createGroupBox("Fin de balayage");
+    auto* cvaFinalLayout = new QGridLayout(cvaFinalBox);
+    cvaFinalLayout->setSpacing(3); cvaFinalLayout->setContentsMargins(6, 4, 6, 4);
+    potentiostatCvaEndScanCheck_ = new QCheckBox("Vers Ef");
+    potentiostatCvaEndScanCheck_->setChecked(true);
+    potentiostatCvaEndScanCheck_->setStyleSheet("font-size:8pt;");
+    potentiostatCvaEfEdit_ = smallEdit("0.000");
+    potentiostatCvaEfVsCombo_ = smallCombo({"Ref", "Eoc", "Ei"}, "Eoc");
+    cvaFinalLayout->addWidget(potentiostatCvaEndScanCheck_, 0, 0);
+    cvaFinalLayout->addWidget(potentiostatCvaEfEdit_, 0, 1);
+    cvaFinalLayout->addWidget(S("vs"), 0, 2);
+    cvaFinalLayout->addWidget(potentiostatCvaEfVsCombo_, 0, 3);
+    cvaFinalLayout->addWidget(S("Hold Ef"), 1, 0);
+    cvaFinalLayout->addWidget(makeSmallTimeEditor("0", "0", "5.000",
+        potentiostatCvaTfHoursEdit_, potentiostatCvaTfMinutesEdit_, potentiostatCvaTfSecondsEdit_), 1, 1, 1, 3);
+    cvaFinalLayout->addWidget(S("dtf (s)"), 2, 0);
+    potentiostatCvaDtfEdit_ = smallEdit("0.100");
+    cvaFinalLayout->addWidget(potentiostatCvaDtfEdit_, 2, 1);
+
+    const auto updateCvaFinalEnabled = [this](bool enabled) {
+        if (potentiostatCvaEfEdit_ != nullptr)        potentiostatCvaEfEdit_->setEnabled(enabled);
+        if (potentiostatCvaEfVsCombo_ != nullptr)     potentiostatCvaEfVsCombo_->setEnabled(enabled);
+        if (potentiostatCvaTfHoursEdit_ != nullptr)   potentiostatCvaTfHoursEdit_->setEnabled(enabled);
+        if (potentiostatCvaTfMinutesEdit_ != nullptr) potentiostatCvaTfMinutesEdit_->setEnabled(enabled);
+        if (potentiostatCvaTfSecondsEdit_ != nullptr) potentiostatCvaTfSecondsEdit_->setEnabled(enabled);
+        if (potentiostatCvaDtfEdit_ != nullptr)       potentiostatCvaDtfEdit_->setEnabled(enabled);
+    };
+    connect(potentiostatCvaEndScanCheck_, &QCheckBox::toggled, this, updateCvaFinalEnabled);
+    updateCvaFinalEnabled(potentiostatCvaEndScanCheck_->isChecked());
+
+    cvaPageLayout->addWidget(cvaInitBox);
+    cvaPageLayout->addWidget(cvaScanBox);
+    cvaPageLayout->addWidget(cvaRangeBox);
+    cvaPageLayout->addWidget(cvaFinalBox);
+
+    potentiostatTechniqueStack_->addWidget(caPage);
+    potentiostatTechniqueStack_->addWidget(ocvPage);
+    potentiostatTechniqueStack_->addWidget(cvaPage);
+
+    connect(potentiostatTechniqueCombo_, &QComboBox::currentIndexChanged, this, [this](int) {
+        syncPotentiostatTechniqueUi();
+    });
+
+    leftLayout->addWidget(potentiostatTechniqueStack_);
     leftLayout->addStretch();
 
-    // ── Right: graphs / map placeholders ─────────────────────────
-    // ── Right: stacked widget (2D view / 3D view) ─────────────────────────────
+    leftScroll->setWidget(leftPanel);
+    syncPotentiostatTechniqueUi();
+
+    // ── Right: stacked 2D / 3D view ──────────────────────────────────────
     measureRightStack_ = new QStackedWidget;
 
-    // Index 0 — classic 2D (graph + heatmap)
     auto* rightPanel2D = new QWidget;
     auto* rightLayout2D = new QVBoxLayout(rightPanel2D);
     rightLayout2D->setContentsMargins(0, 0, 0, 0);
@@ -4418,21 +4738,19 @@ QWidget* MainWindow::buildMeasureTab()
     connect(potentiostatHeatmapWidget_, &PotentiostatHeatmapWidget::cellClicked,
             this, &MainWindow::showCellDetailDialog);
     rightLayout2D->addWidget(potentiostatMapBox_, 1);
-
     measureRightStack_->addWidget(rightPanel2D);  // index 0
 
-    // Index 1 — 3D surface
     auto* map3DBox = createGroupBox("Surface 3D I(x, y)");
     auto* map3DLayout = new QVBoxLayout(map3DBox);
     potentiostat3DWidget_ = new Potentiostat3DWidget;
     map3DLayout->addWidget(potentiostat3DWidget_, 1);
     measureRightStack_->addWidget(map3DBox);  // index 1
 
-    splitter->addWidget(leftPanel);
+    splitter->addWidget(leftScroll);
     splitter->addWidget(measureRightStack_);
     splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
-    splitter->setSizes({300, 900});
+    splitter->setSizes({280, 900});
 
     return page;
 }
@@ -4843,21 +5161,37 @@ void MainWindow::refreshSummaries()
     }
 
     if (refreshStatusBar) {
-        const QString cameraSummary = QString("Camera: %1 | %2 | Exp %3 us | Gain %4")
-            .arg(core::deviceStateLabel(cameraController_->state()))
-            .arg(cameraController_->cameraIdentifier())
-            .arg(cameraController_->exposureTimeUs(), 0, 'f', 0)
-            .arg(cameraController_->gain(), 0, 'f', 1);
-        const QString potentiostatSummary = QString("Potentiostat: %1 | %2")
-            .arg(core::deviceStateLabel(potentiostatController_->state()))
-            .arg(potentiostatController_->channelSummary());
+        // Camera: green when connected/live, red when disconnected
+        const auto camState = cameraController_->state();
+        const bool camOk = (camState == core::DeviceState::Connected || camState == core::DeviceState::Simulated);
+        const QString camColor = camOk ? QLatin1String("#1a7f37") : QLatin1String("#c82020");
+        // Compute FOV in µm = sensor_px * (pixel_pitch_um / magnification) / zoom
+        const QSize frameRes = cameraController_->previewFrame().size();
+        const QString fovObj = (objectiveCombo_ != nullptr) ? objectiveCombo_->currentText().trimmed() : QString("4x");
+        const double fovMmPerPx = autoMmPerPxForObjective(fovObj);
+        const double fovZoom = (cameraPreviewWidget_ != nullptr) ? cameraPreviewWidget_->zoomFactor() : 1.0;
+        QString fovStr;
+        if (frameRes.isValid() && fovMmPerPx > 0.0 && fovZoom > 0.0) {
+            const double fovW_um = frameRes.width()  * fovMmPerPx * 1000.0 / fovZoom;
+            const double fovH_um = frameRes.height() * fovMmPerPx * 1000.0 / fovZoom;
+            fovStr = QString("%1\u00d7%2 \u00b5m").arg(qRound(fovW_um)).arg(qRound(fovH_um));
+        } else {
+            fovStr = cameraController_->cameraIdentifier();
+        }
+        const QString cameraHtml = QString("<span style='font-weight:600; color:%1;'>Camera</span>").arg(camColor)
+            + QString("&nbsp;&nbsp;") + fovStr;
 
-        if (cameraSummaryLabel_ != nullptr && cameraSummaryLabel_->text() != cameraSummary) {
-            cameraSummaryLabel_->setText(cameraSummary);
-        }
-        if (potentiostatSummaryLabel_ != nullptr && potentiostatSummaryLabel_->text() != potentiostatSummary) {
-            potentiostatSummaryLabel_->setText(potentiostatSummary);
-        }
+        // Potentiostat: green when connected, red when disconnected
+        const auto potState = potentiostatController_->state();
+        const bool potOk = (potState == core::DeviceState::Connected || potState == core::DeviceState::Simulated);
+        const QString potColor = potOk ? QLatin1String("#1a7f37") : QLatin1String("#c82020");
+        const QString potHtml = QString("<span style='font-weight:600; color:%1;'>Potentiostat</span>").arg(potColor)
+            + (potOk ? QString("&nbsp;&nbsp;") + potentiostatController_->channelSummary() : QString());
+
+        if (cameraSummaryLabel_ != nullptr && cameraSummaryLabel_->text() != cameraHtml)
+            cameraSummaryLabel_->setText(cameraHtml);
+        if (potentiostatSummaryLabel_ != nullptr && potentiostatSummaryLabel_->text() != potHtml)
+            potentiostatSummaryLabel_->setText(potHtml);
         lastStatusRefresh_ = now;
     }
 }
@@ -4890,7 +5224,13 @@ void MainWindow::refreshMotorUi()
 
     const QString xText = snapshotPositionText(xSnapshot);
     const QString yText = snapshotPositionText(ySnapshot);
-    const QString stageSummary = axisConnectionSummary(xSnapshot, ySnapshot);
+    // Build colored HTML for status bar
+    const bool motorsAnyConnected = xSnapshot.connected || ySnapshot.connected;
+    const QString motorColor = motorsAnyConnected ? QLatin1String("#1a7f37") : QLatin1String("#c82020");
+    QString stageHtml = QString("<span style='font-weight:600; color:%1;'>Moteurs</span>").arg(motorColor);
+    if (motorsAnyConnected) {
+        stageHtml += QString("&nbsp;&nbsp;X: %1&nbsp;&nbsp;Y: %2").arg(xText, yText);
+    }
     auto setLabelTextIfChanged = [](QLabel* label, const QString& text) {
         if (label != nullptr && label->text() != text) {
             label->setText(text);
@@ -4904,7 +5244,8 @@ void MainWindow::refreshMotorUi()
 
     setLabelTextIfChanged(xPositionValueLabel_, xText);
     setLabelTextIfChanged(yPositionValueLabel_, yText);
-    setLabelTextIfChanged(stageSummaryLabel_, stageSummary);
+    if (stageSummaryLabel_ != nullptr && stageSummaryLabel_->text() != stageHtml)
+        stageSummaryLabel_->setText(stageHtml);
     if (xSnapshot.positionValid && ySnapshot.positionValid) {
         cachedMotorMm_ = QPointF(xSnapshot.positionMm, ySnapshot.positionMm);
         updatePredictedMotorMotion(xSnapshot, ySnapshot);
@@ -5003,7 +5344,9 @@ void MainWindow::refreshCameraUi()
     setWidgetEnabledIfChanged(disconnectCameraButton_, connected);
     setWidgetEnabledIfChanged(startCameraLiveButton_, connected && !live);
     setWidgetEnabledIfChanged(stopCameraLiveButton_, live);
-    setWidgetEnabledIfChanged(cameraPageLiveButton_, connected && !live);
+    setWidgetEnabledIfChanged(cameraPageLiveButton_, connected);
+    if (cameraPageLiveButton_ != nullptr && cameraPageLiveButton_->isChecked() != live)
+        cameraPageLiveButton_->setChecked(live);
     setWidgetEnabledIfChanged(cameraPageStopButton_, live);
 
     // In live mode this method is called at ~60 Hz; avoid line-edit churn there.
@@ -5012,7 +5355,7 @@ void MainWindow::refreshCameraUi()
     }
 
     if (cameraExposureEdit_ != nullptr && !cameraExposureEdit_->hasFocus()) {
-        setLineEditTextIfChanged(cameraExposureEdit_, QString::number(cameraController_->exposureTimeUs(), 'f', 0));
+        setLineEditTextIfChanged(cameraExposureEdit_, QString::number(cameraController_->exposureTimeUs() / 1000.0, 'f', 3));
     }
     if (cameraGainEdit_ != nullptr && !cameraGainEdit_->hasFocus()) {
         setLineEditTextIfChanged(cameraGainEdit_, QString::number(cameraController_->gain(), 'f', 1));
@@ -5062,14 +5405,16 @@ void MainWindow::applyCameraSettings()
     double exposureUs = cameraController_->exposureTimeUs();
     double gain = cameraController_->gain();
     if (cameraExposureEdit_ != nullptr) {
-        exposureUs = cameraExposureEdit_->text().trimmed().toDouble(&exposureOk);
+        // field is in milliseconds — convert to microseconds
+        const double ms = cameraExposureEdit_->text().trimmed().toDouble(&exposureOk);
+        exposureUs = ms * 1000.0;
     }
     if (cameraGainEdit_ != nullptr) {
         gain = cameraGainEdit_->text().trimmed().toDouble(&gainOk);
     }
 
     if (!exposureOk || exposureUs <= 0.0) {
-        QMessageBox::warning(this, "Camera", "Exposure Time doit etre un nombre strictement positif en microsecondes.");
+        QMessageBox::warning(this, "Camera", "Exposure Time doit etre un nombre strictement positif en millisecondes.");
         return;
     }
     if (!gainOk || gain < 0.0) {
@@ -5084,7 +5429,7 @@ void MainWindow::applyCameraSettings()
         QMessageBox::warning(this, "Camera", QString::fromUtf8(ex.what()));
         return;
     }
-    appendLog(QString("Camera: Exposure=%1 us, Gain=%2").arg(exposureUs, 0, 'f', 0).arg(gain, 0, 'f', 1));
+    appendLog(QString("Camera: Exposure=%1 ms, Gain=%2").arg(exposureUs / 1000.0, 0, 'f', 3).arg(gain, 0, 'f', 1));
     statusBar()->showMessage("Parametres camera appliques.", 3000);
     refreshSummaries();
 }
@@ -5861,7 +6206,6 @@ void MainWindow::onDisconnectPotentiostat()
             if (potentiostatConnectButton_     != nullptr) potentiostatConnectButton_->setEnabled(true);
             if (potentiostatFirmwareButton_    != nullptr) potentiostatFirmwareButton_->setEnabled(false);
             if (potentiostatDisconnectButton_  != nullptr) potentiostatDisconnectButton_->setEnabled(false);
-            updatePotentiostatStatusBar();
         }, Qt::QueuedConnection);
     });
 }
@@ -6334,7 +6678,7 @@ void MainWindow::onStartCaPotentiostat()
             : QString("0 / %1 points").arg(nPoints));
     }
     if (tabWidget_ != nullptr) {
-        tabWidget_->setCurrentIndex(2);
+        tabWidget_->setCurrentIndex(1);
     }
 
     auto ctrl      = potentiostatController_;
@@ -8135,7 +8479,7 @@ void MainWindow::onImportCsv()
                 .arg(QFileInfo(path).fileName());
         importInfoLabel_->setText(info);
     }
-    if (tabWidget_ != nullptr) tabWidget_->setCurrentIndex(3);  // Switch to "Import"
+    if (tabWidget_ != nullptr) tabWidget_->setCurrentIndex(2);  // Switch to "Import"
     appendLog(QString("Import CSV : %1  (%2 points)")
         .arg(path).arg(gridData.empty() ? tsData.size() : gridData.size()));
 }

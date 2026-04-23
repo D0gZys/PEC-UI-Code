@@ -343,25 +343,7 @@ void CameraPreviewWidget::paintEvent(QPaintEvent* event)
 
     painter.setRenderHint(QPainter::Antialiasing, true);
 
-    // ── Center crosshair ─────────────────────────────────────────────────────
-    {
-        const double cx = targetRect.left() + (frameSize_.width()  * 0.5) * displayScale;
-        const double cy = targetRect.top()  + (frameSize_.height() * 0.5) * displayScale;
-        QPen crossPen(QColor(255, 255, 255, 160), 1.0);
-        crossPen.setStyle(Qt::SolidLine);
-        painter.setPen(crossPen);
-        // Horizontal line
-        painter.drawLine(QPointF(targetRect.left(),  cy),
-                         QPointF(targetRect.right(), cy));
-        // Vertical line
-        painter.drawLine(QPointF(cx, targetRect.top()),
-                         QPointF(cx, targetRect.bottom()));
-        // Small center dot
-        painter.setPen(QPen(QColor(255, 255, 255, 220), 1.0));
-        painter.setBrush(QColor(255, 255, 255, 220));
-        painter.drawEllipse(QPointF(cx, cy), 2.5, 2.5);
-        painter.setBrush(Qt::NoBrush);
-    }
+
 
     // Draw sequence zone rect
     if (sequenceStartVisible_) {

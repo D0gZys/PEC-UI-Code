@@ -27,7 +27,6 @@ class QCloseEvent;
 class QComboBox;
 class QDialog;
 class QEvent;
-class QFrame;
 class QGroupBox;
 class QLabel;
 class QLineEdit;
@@ -38,7 +37,6 @@ class QSpinBox;
 class QStackedWidget;
 class QTabWidget;
 class QTimer;
-class QVBoxLayout;
 QT_END_NAMESPACE
 
 namespace laserbench::hardware {
@@ -162,11 +160,6 @@ private:
     void onDisconnectPotentiostat();
     void onLoadFirmware();
     void syncPotentiostatTechniqueUi();
-    void buildPotentiostatStatusBar(QVBoxLayout* parentLayout);
-    void updatePotentiostatStatusBar();
-    void pollPotentiostatCurrentValues();
-    static QString iRangeLabel(int iRange);
-    static QString channelStateLabel(int state);
 
     void onScanPorts();
     void onConnectAxes();
@@ -295,6 +288,7 @@ private:
     bool rectHasP2_ {false};
     QPointF rectP1Px_;
     QPointF rectP2Px_;
+    bool eraserArmed_ {false};
     bool leftKeyHeld_ {false};
     bool rightKeyHeld_ {false};
     bool upKeyHeld_ {false};
@@ -405,20 +399,6 @@ private:
     QPushButton*              importView3DButton_       {nullptr};
     QLabel*                   importInfoLabel_          {nullptr};
     QPlainTextEdit* logView_ {nullptr};
-
-    // Potentiostat status bar (EC-Lab style)
-    QFrame*  potentiostatBar_          {nullptr};
-    QLabel*  potBarModelLabel_         {nullptr};
-    QLabel*  potBarStateLabel_         {nullptr};
-    QLabel*  potBarChannelLabel_       {nullptr};
-    QLabel*  potBarStatusField_        {nullptr};
-    QLabel*  potBarTimeField_          {nullptr};
-    QLabel*  potBarEweField_           {nullptr};
-    QLabel*  potBarIField_             {nullptr};
-    QLabel*  potBarEocField_           {nullptr};
-    QLabel*  potBarIRangeField_        {nullptr};
-    QTimer*  potentiostatBarTimer_     {nullptr};
-
     QDialog* startupConnectionDialog_ {nullptr};
     QDialog* motorConnectionDialog_ {nullptr};
     QDialog* cameraConnectionDialog_ {nullptr};
@@ -531,6 +511,7 @@ private:
     QLabel*      circleDiameterLabel_ {nullptr};
     QPushButton* rectButton_ {nullptr};
     QLabel*      rectSizeLabel_ {nullptr};
+    QPushButton* eraserButton_ {nullptr};
     QPushButton* sequenceSetStartButton_ {nullptr};
     QPushButton* sequenceSetEndButton_ {nullptr};
     QPushButton* sequencePickButton_ {nullptr};
