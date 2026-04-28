@@ -1,5 +1,6 @@
 ﻿#include "ui/MainWindow.hpp"
 
+#include <QAbstractButton>
 #include <QAbstractItemView>
 #include <QAction>
 #include <QApplication>
@@ -35,9 +36,13 @@
 #include <QMouseEvent>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QPageLayout>
+#include <QPageSize>
 #include <QPainter>
+#include <QPdfWriter>
 #include <QPlainTextEdit>
 #include <QPointer>
+#include <QPolygonF>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
@@ -49,6 +54,7 @@
 #include <QTimer>
 #include <QThread>
 #include <QTextStream>
+#include <QTextOption>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -475,6 +481,38 @@ double durationSecondsFromEdits(const QLineEdit* hoursEdit, const QLineEdit* min
         *ok = allOk;
     }
     return allOk ? (hours * 3600.0 + minutes * 60.0 + seconds) : 0.0;
+}
+
+QString formatMeasurementDuration(double seconds)
+{
+    if (!std::isfinite(seconds) || seconds < 0.0) {
+        return "---";
+    }
+
+    const int roundedSeconds = static_cast<int>(std::lround(seconds));
+    const int hours = roundedSeconds / 3600;
+    const int minutes = (roundedSeconds % 3600) / 60;
+    const int secs = roundedSeconds % 60;
+
+    return QString("%1:%2:%3")
+        .arg(hours, 2, 10, QChar('0'))
+        .arg(minutes, 2, 10, QChar('0'))
+        .arg(secs, 2, 10, QChar('0'));
+}
+
+QString formatReportCurrent(double amps)
+{
+    const double absValue = std::abs(amps);
+    if (absValue >= 1e-3) {
+        return QString("%1 mA").arg(amps * 1e3, 0, 'f', 3);
+    }
+    if (absValue >= 1e-6) {
+        return QString("%1 uA").arg(amps * 1e6, 0, 'f', 3);
+    }
+    if (absValue >= 1e-9) {
+        return QString("%1 nA").arg(amps * 1e9, 0, 'f', 3);
+    }
+    return QString("%1 A").arg(amps, 0, 'e', 3);
 }
 
 double scanRateToMilliVoltsPerSecond(double value, const QString& unit)
@@ -1037,6 +1075,279 @@ bool saveTiff(const QImage& src, const QString& filePath)
     QFile f(filePath);
     if (!f.open(QIODevice::WriteOnly)) return false;
     return f.write(buf) == static_cast<qint64>(buf.size());
+}
+
+QImage renderWidgetSnapshot(QWidget* widget, const QSize& fallbackSize)
+{
+    if (widget == nullptr) {
+        return {};
+    }
+
+    QSize size = widget->size();
+    const QSize originalSize = size;
+    bool resizedForSnapshot = false;
+    if (size.width() <= 0 || size.height() <= 0) {
+        size = fallbackSize;
+        if (size.width() > 0 && size.height() > 0) {
+            widget->resize(size);
+            resizedForSnapshot = true;
+        }
+    }
+    if (size.width() <= 0 || size.height() <= 0) {
+        return {};
+    }
+
+    QImage image(size, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::white);
+    QPainter painter(&image);
+    widget->render(&painter, {}, {}, QWidget::DrawChildren);
+    painter.end();
+    if (resizedForSnapshot) {
+        widget->resize(originalSize);
+    }
+    return image;
+}
+
+QImage renderReportHeatmapSnapshot(
+    int rows,
+    int cols,
+    const std::vector<std::optional<double>>& values,
+    const std::vector<std::pair<int, int>>& scanOrder)
+{
+    if (rows <= 0 || cols <= 0) {
+        return {};
+    }
+
+    constexpr int kLeftMargin = 52;
+    constexpr int kRightMargin = 115;
+    constexpr int kTopMargin = 28;
+    constexpr int kBottomMargin = 20;
+    constexpr int kMaxGridPx = 980;
+
+    const int longestSide = std::max(rows, cols);
+    const int cellPx = std::clamp(kMaxGridPx / std::max(1, longestSide), 12, 42);
+    const int gridWidth = cols * cellPx;
+    const int gridHeight = rows * cellPx;
+    const QSize imageSize(kLeftMargin + gridWidth + kRightMargin, kTopMargin + gridHeight + kBottomMargin);
+
+    PotentiostatHeatmapWidget heatmap;
+    heatmap.resize(imageSize);
+    heatmap.setGrid(rows, cols, values, std::nullopt);
+    QImage image = renderWidgetSnapshot(&heatmap, imageSize);
+    if (image.isNull()) {
+        return image;
+    }
+
+    auto validCell = [rows, cols](const std::pair<int, int>& cell) {
+        return cell.first >= 0 && cell.first < rows && cell.second >= 0 && cell.second < cols;
+    };
+    auto cellCenter = [cellPx](const std::pair<int, int>& cell) {
+        return QPointF(
+            kLeftMargin + (static_cast<double>(cell.second) + 0.5) * cellPx,
+            kTopMargin + (static_cast<double>(cell.first) + 0.5) * cellPx);
+    };
+
+    std::pair<int, int> startCell {0, 0};
+    if (!scanOrder.empty() && validCell(scanOrder.front())) {
+        startCell = scanOrder.front();
+    }
+
+    std::optional<std::pair<int, int>> nextCell;
+    for (std::size_t i = 1; i < scanOrder.size(); ++i) {
+        if (validCell(scanOrder[i]) && scanOrder[i] != startCell) {
+            nextCell = scanOrder[i];
+            break;
+        }
+    }
+    if (!nextCell.has_value()) {
+        if (startCell.second + 1 < cols) {
+            nextCell = {startCell.first, startCell.second + 1};
+        } else if (startCell.first + 1 < rows) {
+            nextCell = {startCell.first + 1, startCell.second};
+        }
+    }
+
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const QColor arrowColor("#ef4444");
+    const QPointF start = cellCenter(startCell);
+    const double dotRadius = std::clamp(cellPx * 0.18, 4.0, 9.0);
+    painter.setPen(QPen(Qt::white, std::max(2.0, dotRadius * 0.55)));
+    painter.setBrush(arrowColor);
+    painter.drawEllipse(start, dotRadius, dotRadius);
+
+    if (nextCell.has_value()) {
+        const QPointF end = cellCenter(*nextCell);
+        const QPointF delta = end - start;
+        const double len = std::hypot(delta.x(), delta.y());
+        if (len > 1.0) {
+            const QPointF unit(delta.x() / len, delta.y() / len);
+            const QPointF lineStart = start + unit * (dotRadius + 2.0);
+            const QPointF lineEnd = end - unit * std::clamp(cellPx * 0.18, 4.0, 10.0);
+            painter.setPen(QPen(arrowColor, std::clamp(cellPx * 0.10, 3.0, 7.0), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            painter.drawLine(lineStart, lineEnd);
+
+            const QPointF normal(-unit.y(), unit.x());
+            const double head = std::clamp(cellPx * 0.30, 8.0, 16.0);
+            QPolygonF headPoly;
+            headPoly << lineEnd
+                     << (lineEnd - unit * head + normal * head * 0.55)
+                     << (lineEnd - unit * head - normal * head * 0.55);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(arrowColor);
+            painter.drawPolygon(headPoly);
+        }
+    }
+
+    painter.end();
+    return image;
+}
+
+void drawReportBox(QPainter& painter, const QRectF& rect, const QString& title)
+{
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(QColor("#c8d0d8"), 2.0));
+    painter.setBrush(QColor("#ffffff"));
+    painter.drawRoundedRect(rect, 10.0, 10.0);
+
+    QFont titleFont = painter.font();
+    titleFont.setPointSizeF(9.5);
+    titleFont.setBold(true);
+    painter.setFont(titleFont);
+    painter.setPen(QColor("#162033"));
+    painter.drawText(rect.adjusted(16, 10, -16, -10), Qt::AlignLeft | Qt::AlignTop, title);
+    painter.restore();
+}
+
+void drawReportTextBox(QPainter& painter, const QRectF& rect, const QString& title, const QStringList& lines)
+{
+    drawReportBox(painter, rect, title);
+
+    painter.save();
+    QFont font = painter.font();
+    font.setPointSizeF(7.2);
+    painter.setFont(font);
+    painter.setPen(QColor("#263244"));
+
+    QStringList visibleLines = lines;
+    constexpr int kMaxReportLines = 19;
+    if (visibleLines.size() > kMaxReportLines) {
+        const int hidden = visibleLines.size() - kMaxReportLines;
+        visibleLines = visibleLines.mid(0, kMaxReportLines);
+        visibleLines << QString("... %1 ligne(s) supplementaire(s)").arg(hidden);
+    }
+
+    QTextOption option;
+    option.setWrapMode(QTextOption::WordWrap);
+    painter.drawText(rect.adjusted(16, 46, -16, -14), visibleLines.join('\n'), option);
+    painter.restore();
+}
+
+void drawReportImageBox(QPainter& painter, const QRectF& rect, const QString& title, const QImage& image, const QString& emptyText)
+{
+    drawReportBox(painter, rect, title);
+
+    painter.save();
+    const QRectF content = rect.adjusted(14, 44, -14, -14);
+    if (image.isNull() || image.width() <= 0 || image.height() <= 0) {
+        QFont font = painter.font();
+        font.setPointSizeF(8.0);
+        painter.setFont(font);
+        painter.setPen(QColor("#667085"));
+        painter.drawText(content, Qt::AlignCenter | Qt::TextWordWrap, emptyText);
+        painter.restore();
+        return;
+    }
+
+    const double scale = std::min(
+        content.width() / static_cast<double>(image.width()),
+        content.height() / static_cast<double>(image.height()));
+    const QSizeF targetSize(image.width() * scale, image.height() * scale);
+    const QRectF target(
+        content.left() + (content.width() - targetSize.width()) * 0.5,
+        content.top() + (content.height() - targetSize.height()) * 0.5,
+        targetSize.width(),
+        targetSize.height());
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    painter.drawImage(target, image);
+    painter.restore();
+}
+
+bool writeLaserBenchReportPdf(
+    const QString& filePath,
+    const QString& reportTitle,
+    const QStringList& parameterLines,
+    const QImage& zoneImage,
+    const QImage& graphImage,
+    const QImage& heatmapImage,
+    const QImage& surface3DImage,
+    QString* errorMessage)
+{
+    QPdfWriter writer(filePath);
+    writer.setResolution(300);
+    writer.setPageLayout(QPageLayout(
+        QPageSize(QPageSize::A4),
+        QPageLayout::Landscape,
+        QMarginsF(8.0, 8.0, 8.0, 8.0),
+        QPageLayout::Millimeter));
+
+    QPainter painter(&writer);
+    if (!painter.isActive()) {
+        if (errorMessage != nullptr) {
+            *errorMessage = "Impossible d'initialiser l'ecriture PDF.";
+        }
+        return false;
+    }
+
+    const QRectF page(0, 0, writer.width(), writer.height());
+    painter.fillRect(page, QColor("#f5f7fb"));
+
+    const double margin = 48.0;
+    const double gap = 28.0;
+    const QRectF frame = page.adjusted(margin, margin, -margin, -margin);
+
+    QFont titleFont = painter.font();
+    titleFont.setPointSizeF(14.0);
+    titleFont.setBold(true);
+    painter.setFont(titleFont);
+    painter.setPen(QColor("#111827"));
+    painter.drawText(QRectF(frame.left(), frame.top(), frame.width(), 58.0),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     reportTitle);
+
+    QFont metaFont = painter.font();
+    metaFont.setPointSizeF(7.5);
+    metaFont.setBold(false);
+    painter.setFont(metaFont);
+    painter.setPen(QColor("#596273"));
+    painter.drawText(QRectF(frame.left(), frame.top() + 58.0, frame.width(), 36.0),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     QString("Genere le %1").arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss")));
+
+    const double contentTop = frame.top() + 104.0;
+    const double contentHeight = frame.bottom() - contentTop;
+    const double leftWidth = frame.width() * 0.34;
+    const double rightLeft = frame.left() + leftWidth + gap;
+    const double rightWidth = frame.right() - rightLeft;
+
+    const QRectF paramsRect(frame.left(), contentTop, leftWidth, contentHeight * 0.49);
+    const QRectF zoneRect(frame.left(), paramsRect.bottom() + gap, leftWidth, frame.bottom() - paramsRect.bottom() - gap);
+    const QRectF graphRect(rightLeft, contentTop, rightWidth, contentHeight * 0.42);
+    const double bottomTop = graphRect.bottom() + gap;
+    const double bottomHeight = frame.bottom() - bottomTop;
+    const double bottomWidth = (rightWidth - gap) * 0.5;
+    const QRectF twoDRect(rightLeft, bottomTop, bottomWidth, bottomHeight);
+    const QRectF threeDRect(twoDRect.right() + gap, bottomTop, bottomWidth, bottomHeight);
+
+    drawReportTextBox(painter, paramsRect, "Parametres de mesure", parameterLines);
+    drawReportImageBox(painter, zoneRect, "Zone selectionnee", zoneImage, "Image camera indisponible");
+    drawReportImageBox(painter, graphRect, "Evolution du courant", graphImage, "Graphe indisponible");
+    drawReportImageBox(painter, twoDRect, "Matrice 2D LaserBench", heatmapImage, "Vue 2D indisponible");
+    drawReportImageBox(painter, threeDRect, "Surface 3D LaserBench", surface3DImage, "Vue 3D indisponible");
+
+    painter.end();
+    return true;
 }
 
 }  // namespace
@@ -2782,6 +3093,7 @@ void MainWindow::updateSequenceLabels(const QPointF& startMm, const QPointF& end
 {
     sequenceStartMotorMm_ = startMm;
     sequenceEndMotorMm_ = endMm;
+    lastValidatedZoneImage_ = {};
     if (sequenceStartLabel_ != nullptr) {
         sequenceStartLabel_->setText(QString("Depart  : X=%1  Y=%2 mm").arg(startMm.x(), 0, 'f', 4).arg(startMm.y(), 0, 'f', 4));
     }
@@ -4446,6 +4758,12 @@ QWidget* MainWindow::buildMeasureTab()
     topLayout->addWidget(potentiostatProgressLabel_);
     topLayout->addWidget(makeSep());
 
+    topLayout->addWidget(S("Duree :"));
+    potentiostatDurationLabel_ = new QLabel("---");
+    potentiostatDurationLabel_->setStyleSheet("font-size:8pt; font-weight:600;");
+    topLayout->addWidget(potentiostatDurationLabel_);
+    topLayout->addWidget(makeSep());
+
     potentiostatExportButton_ = createActionButton("Exporter...");
     potentiostatExportButton_->setEnabled(false);
     connect(potentiostatExportButton_, &QPushButton::clicked, this, &MainWindow::onExportPotentiostat);
@@ -4865,6 +5183,8 @@ void MainWindow::clearPotentiostatVisualization()
     potentiostatRows_ = 0;
     potentiostatCols_ = 0;
     potentiostatSampleCount_ = 0;
+    potentiostatMeasurementDurationS_ = 0.0;
+    potentiostatMeasurementStartTime_.reset();
     potentiostatLastSampledCell_ = {0, 0};
     potentiostatXMin_ = potentiostatXMax_ = potentiostatYMin_ = potentiostatYMax_ = 0.0;
     if (potentiostatExportButton_ != nullptr) potentiostatExportButton_->setEnabled(false);
@@ -4874,6 +5194,9 @@ void MainWindow::clearPotentiostatVisualization()
     }
     if (potentiostatProgressLabel_ != nullptr) {
         potentiostatProgressLabel_->setText("En attente");
+    }
+    if (potentiostatDurationLabel_ != nullptr) {
+        potentiostatDurationLabel_->setText("---");
     }
     if (potentiostatGraphWidget_ != nullptr) {
         potentiostatGraphWidget_->clear();
@@ -4950,6 +5273,15 @@ void MainWindow::appendPotentiostatVisualizationSample(
             potentiostatProgressLabel_->setText(QString("%1 / %2").arg(index + 1).arg(total));
         } else {
             potentiostatProgressLabel_->setText(QString("%1 pt(s)").arg(index + 1));
+        }
+    }
+    if (potentiostatMeasurementStartTime_.has_value()) {
+        potentiostatMeasurementDurationS_ = std::max(
+            0.0,
+            std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - *potentiostatMeasurementStartTime_).count());
+        if (potentiostatDurationLabel_ != nullptr) {
+            potentiostatDurationLabel_->setText(formatMeasurementDuration(potentiostatMeasurementDurationS_));
         }
     }
     if (sequenceStatusLabel_ != nullptr) {
@@ -6277,6 +6609,44 @@ void MainWindow::onStartCaPotentiostat()
         }
     }
 
+    if (hasScanZone) {
+        const QPointF currentStartMm = *sequenceStartMotorMm_;
+        const QPointF currentEndMm = *sequenceEndMotorMm_;
+        const double zoneWidthMm = std::abs(currentEndMm.x() - currentStartMm.x());
+        const double zoneHeightMm = std::abs(currentEndMm.y() - currentStartMm.y());
+
+        QMessageBox launchPrompt(this);
+        launchPrompt.setWindowTitle("Parametres de deplacement");
+        launchPrompt.setIcon(QMessageBox::Question);
+        launchPrompt.setText("Modifier les parametres de deplacement avant de lancer la mesure ?");
+        launchPrompt.setInformativeText(
+            QString("La zone actuelle est conservee, sans redessin.\n\n"
+                    "Depart : X=%1  Y=%2 mm\n"
+                    "Arrivee : X=%3  Y=%4 mm\n"
+                    "Taille : %5 x %6 mm\n\n"
+                    "Modifier ouvre les parametres de balayage.\n"
+                    "Lancer sans modifier reutilise exactement cette zone avec les parametres actuels.")
+                .arg(currentStartMm.x(), 0, 'f', 4)
+                .arg(currentStartMm.y(), 0, 'f', 4)
+                .arg(currentEndMm.x(), 0, 'f', 4)
+                .arg(currentEndMm.y(), 0, 'f', 4)
+                .arg(zoneWidthMm, 0, 'f', 4)
+                .arg(zoneHeightMm, 0, 'f', 4));
+        auto* modifyButton = launchPrompt.addButton("Modifier", QMessageBox::YesRole);
+        auto* launchButton = launchPrompt.addButton("Lancer sans modifier", QMessageBox::NoRole);
+        auto* cancelButton = launchPrompt.addButton(QMessageBox::Cancel);
+        cancelButton->setText("Annuler");
+        launchPrompt.setDefaultButton(launchButton);
+        launchPrompt.exec();
+
+        if (launchPrompt.clickedButton() == cancelButton) {
+            return;
+        }
+        if (launchPrompt.clickedButton() == modifyButton && !editScanConfigDialog()) {
+            return;
+        }
+    }
+
     const QPointF startMm = hasScanZone ? *sequenceStartMotorMm_ : QPointF();
     const QPointF endMm   = hasScanZone ? *sequenceEndMotorMm_ : QPointF();
     const QString mode = sequenceModeCombo_ != nullptr ? sequenceModeCombo_->currentText() : QString("Lineaire");
@@ -6661,6 +7031,8 @@ void MainWindow::onStartCaPotentiostat()
     potentiostatXMax_ = scanXMaxMm;
     potentiostatYMin_ = scanYMinMm;
     potentiostatYMax_ = scanYMaxMm;
+    potentiostatMeasurementDurationS_ = 0.0;
+    potentiostatMeasurementStartTime_ = std::chrono::steady_clock::now();
     if (!simpleMeasurement && cfg.mode == ScanConfig::AcquisitionMode::PointByPoint) {
         potentiostatLastDwellS_ = durationS;
     }
@@ -6671,6 +7043,9 @@ void MainWindow::onStartCaPotentiostat()
     if (potentiostatMeasureStateLabel_ != nullptr) potentiostatMeasureStateLabel_->setText("Lancement...");
     if (potentiostatProgressLabel_ != nullptr) {
         potentiostatProgressLabel_->setText(simpleMeasurement ? "Mesure simple" : "En attente");
+    }
+    if (potentiostatDurationLabel_ != nullptr) {
+        potentiostatDurationLabel_->setText(formatMeasurementDuration(0.0));
     }
     if (sequenceStatusLabel_ != nullptr) {
         sequenceStatusLabel_->setText(simpleMeasurement
@@ -6875,6 +7250,39 @@ void MainWindow::onStartCaPotentiostat()
                 .arg(cvaParams->bandwidth);
     }
 
+    QStringList reportMovementLines;
+    if (!simpleMeasurement) {
+        if (cfg.mode == ScanConfig::AcquisitionMode::PointByPoint) {
+            reportMovementLines
+                << "Mode de deplacement: point par point"
+                << QString("Parametres: pas=%1 um | pause=%2 s | mesures/point=%3 | vitesse=%4 mm/s")
+                    .arg(stepMm * 1000.0, 0, 'f', 1)
+                    .arg(durationS, 0, 'f', 2)
+                    .arg(cfg.dwellSamples)
+                    .arg(stageSpeedMmPerS, 0, 'f', 3);
+        } else {
+            QString acquisitionText;
+            if (cfg.trigger == ScanConfig::ContinuousTrigger::Distance) {
+                acquisitionText = QString("distance=%1 um").arg(cfg.triggerDistanceMm * 1000.0, 0, 'f', 1);
+            } else {
+                acquisitionText = QString("temps=%1 s").arg(cfg.triggerTimeS, 0, 'f', 2);
+            }
+            reportMovementLines
+                << "Mode de deplacement: continu"
+                << QString("Parametres: vitesse=%1 mm/s | acquisition=%2 | saut ligne=%3 um")
+                    .arg(cfg.scanSpeedMmPerS, 0, 'f', 3)
+                    .arg(acquisitionText)
+                    .arg(continuousRowStepMm * 1000.0, 0, 'f', 1);
+        }
+
+        reportMovementLines << (rectangleMode
+            ? QString("Parcours: depart=%1 | axe=%2")
+                .arg(rectangleStartCornerLabel(rectangleStartCorner))
+                .arg(rectanglePrimaryAxisLabel(rectanglePrimaryAxis))
+            : QString("Parcours: ligne"));
+    }
+    lastReportMovementLines_ = reportMovementLines;
+    lastMeasurementHeaderLines_ = measurementHeaderLines;
     initializeMeasurementLog(QString("%1_%2").arg(techniqueLabel, runModeSlug), measurementHeaderLines);
 
     potentiostatThread_ = std::thread([this, ctrl, motorCtrl,
@@ -6886,14 +7294,23 @@ void MainWindow::onStartCaPotentiostat()
                                        rows, cols, simpleMeasurement, simpleMeasurementSamplePeriodS]() mutable
     {
         using namespace std::chrono_literals;
-        const auto finishUi = [this, simpleMeasurement](const QString& stateMsg) {
-            QMetaObject::invokeMethod(this, [this, stateMsg, simpleMeasurement]() {
+        const auto measurementStartedAt = std::chrono::steady_clock::now();
+        const auto finishUi = [this, simpleMeasurement, measurementStartedAt](const QString& stateMsg) {
+            const double measurementDurationS = std::max(
+                0.0,
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - measurementStartedAt).count());
+            QMetaObject::invokeMethod(this, [this, stateMsg, simpleMeasurement, measurementDurationS]() {
                 potentiostatBusy_.store(false);
                 if (potentiostatRunButton_   != nullptr) potentiostatRunButton_->setEnabled(true);
                 if (potentiostatStopButton_  != nullptr) potentiostatStopButton_->setEnabled(false);
                 if (potentiostatExportButton_ != nullptr)
                     potentiostatExportButton_->setEnabled(potentiostatSampleCount_ > 0);
                 if (potentiostatMeasureStateLabel_ != nullptr) potentiostatMeasureStateLabel_->setText(stateMsg);
+                potentiostatMeasurementDurationS_ = measurementDurationS;
+                potentiostatMeasurementStartTime_.reset();
+                if (potentiostatDurationLabel_ != nullptr) {
+                    potentiostatDurationLabel_->setText(formatMeasurementDuration(measurementDurationS));
+                }
             }, Qt::QueuedConnection);
         };
         int acquiredSampleCount = 0;
@@ -7758,14 +8175,20 @@ void MainWindow::onStartCaPotentiostat()
                     .arg(potentiostatStopRequested_.load() ? "oui" : "non"));
             }, Qt::QueuedConnection);
             ctrl->stopChannel(channel);
-            finalizeMeasurementLog(QString("status=%1 | acquisitions=%2 | moteur_final=(%3)")
+            const double measurementDurationS = std::max(
+                0.0,
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - measurementStartedAt).count());
+            finalizeMeasurementLog(QString("status=%1 | acquisitions=%2 | duree=%3 s | moteur_final=(%4)")
                 .arg(measurementOutcome)
                 .arg(acquiredSampleCount)
+                .arg(measurementDurationS, 0, 'f', 3)
                 .arg(currentMotorPositionLogText(motorCtrl)));
 
             const bool stopped = potentiostatStopRequested_.load();
-            QMetaObject::invokeMethod(this, [this, nPoints, stopped, simpleMeasurement]() {
+            QMetaObject::invokeMethod(this, [this, nPoints, stopped, simpleMeasurement, measurementDurationS]() {
                 potentiostatBusy_.store(false);
+                potentiostatMeasurementDurationS_ = measurementDurationS;
+                potentiostatMeasurementStartTime_.reset();
                 currentWaypointIndex_ = simpleMeasurement ? potentiostatSampleCount_ : nPoints;
                 if (potentiostatRunButton_    != nullptr) potentiostatRunButton_->setEnabled(true);
                 if (potentiostatStopButton_   != nullptr) potentiostatStopButton_->setEnabled(false);
@@ -7780,6 +8203,9 @@ void MainWindow::onStartCaPotentiostat()
                     } else {
                         potentiostatProgressLabel_->setText(QString("Termine (%1)").arg(potentiostatSampleCount_));
                     }
+                }
+                if (potentiostatDurationLabel_ != nullptr) {
+                    potentiostatDurationLabel_->setText(formatMeasurementDuration(measurementDurationS));
                 }
                 if (potentiostatMeasureStateLabel_ != nullptr)
                     potentiostatMeasureStateLabel_->setText(stopped ? "Arrete." : "Acquisition terminee.");
@@ -7830,21 +8256,37 @@ void MainWindow::onExportPotentiostat()
     auto* cbGsf  = new QCheckBox("Gwyddion Simple Field  (.gsf)  —  données brutes float32");
     auto* cbHeat = new QCheckBox("Carte 2D  (.tiff)  —  image de la heatmap");
     auto* cb3D   = new QCheckBox("Surface 3D  (.tiff)  —  image de la vue 3D");
+    auto* cbReport = new QCheckBox("Rapport PDF  (.pdf)  —  synthèse avec vues LaserBench 2D/3D");
     cbCsv->setChecked(true);
     cbMpt->setChecked(hasTimeSeries);
     cbGsf->setChecked(hasGrid);
     cbHeat->setChecked(hasGrid);
     cb3D->setChecked(hasGrid);
+    cbReport->setChecked(false);
     // Grid-only formats hidden for simple measurements
     cbGsf->setVisible(hasGrid);
     cbHeat->setVisible(hasGrid);
     cb3D->setVisible(hasGrid);
+    cbReport->setVisible(hasGrid);
     fmtLayout->addWidget(cbCsv);
     fmtLayout->addWidget(cbMpt);
     fmtLayout->addWidget(cbGsf);
     fmtLayout->addWidget(cbHeat);
     fmtLayout->addWidget(cb3D);
+    fmtLayout->addWidget(cbReport);
     vl->addWidget(fmtBox);
+
+    auto* reportCommentBox = new QGroupBox("Commentaire du rapport");
+    auto* reportCommentLayout = new QVBoxLayout(reportCommentBox);
+    auto* reportCommentEdit = new QPlainTextEdit;
+    reportCommentEdit->setPlaceholderText("Commentaire optionnel à ajouter dans les données du PDF...");
+    reportCommentEdit->setMaximumHeight(86);
+    reportCommentLayout->addWidget(reportCommentEdit);
+    reportCommentBox->setVisible(hasGrid && cbReport->isChecked());
+    QObject::connect(cbReport, &QCheckBox::toggled, reportCommentBox, [reportCommentBox, hasGrid](bool checked) {
+        reportCommentBox->setVisible(hasGrid && checked);
+    });
+    vl->addWidget(reportCommentBox);
 
     // Dossier de destination
     auto* dirBox = new QGroupBox("Dossier de destination");
@@ -7884,12 +8326,14 @@ void MainWindow::onExportPotentiostat()
     vl->addWidget(btnBox);
 
     if (dlg.exec() != QDialog::Accepted) return;
+    QString reportComment = reportCommentEdit->toPlainText().trimmed();
+    reportComment.replace(QRegularExpression("[\\r\\n]+"), " ");
 
     // ── Build paths ──────────────────────────────────────────────────────────
     QString name = nameEdit->text().trimmed();
     if (name.isEmpty()) name = baseName;
     // Strip any extension the user may have typed
-    for (const auto& ext : {".csv", ".mpt", ".gsf", ".tiff"}) {
+    for (const auto& ext : {".csv", ".mpt", ".gsf", ".tiff", ".tif", ".pdf"}) {
         if (name.endsWith(ext, Qt::CaseInsensitive))
             name.chop(static_cast<int>(strlen(ext)));
     }
@@ -7902,6 +8346,71 @@ void MainWindow::onExportPotentiostat()
     }
     const QDir outDir(parentDir.absoluteFilePath(name));
     int exportCount = 0;
+    const QString gsfPath = outDir.absoluteFilePath(name + ".gsf");
+
+    const auto writeGsfFile = [&]() -> bool {
+        if (!hasGrid) {
+            return false;
+        }
+
+        QFile file(gsfPath);
+        if (!file.open(QIODevice::WriteOnly)) {
+            QMessageBox::critical(this, "Export",
+                QString("Impossible d'ouvrir :\n%1").arg(file.errorString()));
+            return false;
+        }
+
+        const double xReal = (potentiostatXMax_ - potentiostatXMin_) * 1e-3;
+        const double yReal = (potentiostatYMax_ - potentiostatYMin_) * 1e-3;
+        const double xOff  = potentiostatXMin_ * 1e-3;
+        const double yOff  = potentiostatYMin_ * 1e-3;
+        appendLog(QString("GSF dims: XMin=%1 XMax=%2 YMin=%3 YMax=%4 mm → xReal=%5 yReal=%6 m")
+            .arg(potentiostatXMin_, 0, 'f', 4).arg(potentiostatXMax_, 0, 'f', 4)
+            .arg(potentiostatYMin_, 0, 'f', 4).arg(potentiostatYMax_, 0, 'f', 4)
+            .arg(xReal, 0, 'g', 10).arg(yReal, 0, 'g', 10));
+
+        QByteArray header;
+        header.append("Gwyddion Simple Field 1.0\n");
+        header.append("XRes = ");
+        header.append(QByteArray::number(potentiostatCols_));
+        header.append('\n');
+        header.append("YRes = ");
+        header.append(QByteArray::number(potentiostatRows_));
+        header.append('\n');
+        header.append("XReal = ");
+        header.append(QByteArray::number(xReal, 'g', 15));
+        header.append('\n');
+        header.append("YReal = ");
+        header.append(QByteArray::number(yReal, 'g', 15));
+        header.append('\n');
+        header.append("XOffset = ");
+        header.append(QByteArray::number(xOff, 'g', 15));
+        header.append('\n');
+        header.append("YOffset = ");
+        header.append(QByteArray::number(yOff, 'g', 15));
+        header.append('\n');
+        header.append("XYUnits = m\n");
+        header.append("ZUnits = A\n");
+        header.append("Title = Courant I(x,y)\n");
+        header += '\0';
+        while (header.size() % 4 != 0) header += '\0';
+        file.write(header);
+
+        for (int r = potentiostatRows_ - 1; r >= 0; --r) {
+            for (int c = 0; c < potentiostatCols_; ++c) {
+                const std::size_t matIdx = static_cast<std::size_t>(r * potentiostatCols_ + c);
+                float val = std::numeric_limits<float>::quiet_NaN();
+                if (matIdx < potentiostatMatrix_.size() && potentiostatMatrix_[matIdx].has_value()) {
+                    val = static_cast<float>(*potentiostatMatrix_[matIdx]);
+                }
+                file.write(reinterpret_cast<const char*>(&val), sizeof(float));
+            }
+        }
+
+        file.close();
+        appendLog(QString("Export GSF : %1").arg(gsfPath));
+        return true;
+    };
 
     // ── Export CSV ─────────────────────────────────────────────────────────────
     if (cbCsv->isChecked()) {
@@ -8133,59 +8642,7 @@ void MainWindow::onExportPotentiostat()
 
     // ── Export GSF ─────────────────────────────────────────────────────────────
     if (cbGsf->isChecked() && hasGrid) {
-        const QString gsfPath = outDir.absoluteFilePath(name + ".gsf");
-        QFile file(gsfPath);
-        if (!file.open(QIODevice::WriteOnly)) {
-            QMessageBox::critical(this, "Export",
-                QString("Impossible d'ouvrir :\n%1").arg(file.errorString()));
-        } else {
-            const double xReal = (potentiostatXMax_ - potentiostatXMin_) * 1e-3;
-            const double yReal = (potentiostatYMax_ - potentiostatYMin_) * 1e-3;
-            const double xOff  = potentiostatXMin_ * 1e-3;
-            const double yOff  = potentiostatYMin_ * 1e-3;
-            appendLog(QString("GSF dims: XMin=%1 XMax=%2 YMin=%3 YMax=%4 mm → xReal=%5 yReal=%6 m")
-                .arg(potentiostatXMin_, 0, 'f', 4).arg(potentiostatXMax_, 0, 'f', 4)
-                .arg(potentiostatYMin_, 0, 'f', 4).arg(potentiostatYMax_, 0, 'f', 4)
-                .arg(xReal, 0, 'g', 10).arg(yReal, 0, 'g', 10));
-
-            QByteArray header;
-            header.append("Gwyddion Simple Field 1.0\n");
-            header.append("XRes = ");
-            header.append(QByteArray::number(potentiostatCols_));
-            header.append('\n');
-            header.append("YRes = ");
-            header.append(QByteArray::number(potentiostatRows_));
-            header.append('\n');
-            header.append("XReal = ");
-            header.append(QByteArray::number(xReal, 'g', 15));
-            header.append('\n');
-            header.append("YReal = ");
-            header.append(QByteArray::number(yReal, 'g', 15));
-            header.append('\n');
-            header.append("XOffset = ");
-            header.append(QByteArray::number(xOff, 'g', 15));
-            header.append('\n');
-            header.append("YOffset = ");
-            header.append(QByteArray::number(yOff, 'g', 15));
-            header.append('\n');
-            header.append("XYUnits = m\n");
-            header.append("ZUnits = A\n");
-            header.append("Title = Courant I(x,y)\n");
-            header += '\0';
-            while (header.size() % 4 != 0) header += '\0';
-            file.write(header);
-
-            for (int r = potentiostatRows_ - 1; r >= 0; --r) {
-                for (int c = 0; c < potentiostatCols_; ++c) {
-                    const std::size_t matIdx = static_cast<std::size_t>(r * potentiostatCols_ + c);
-                    float val = std::numeric_limits<float>::quiet_NaN();
-                    if (matIdx < potentiostatMatrix_.size() && potentiostatMatrix_[matIdx].has_value())
-                        val = static_cast<float>(*potentiostatMatrix_[matIdx]);
-                    file.write(reinterpret_cast<const char*>(&val), sizeof(float));
-                }
-            }
-            file.close();
-            appendLog(QString("Export GSF : %1").arg(gsfPath));
+        if (writeGsfFile()) {
             ++exportCount;
         }
     }
@@ -8219,6 +8676,86 @@ void MainWindow::onExportPotentiostat()
                 appendLog(QString("Export TIFF 3D : %1").arg(tdPath));
                 ++exportCount;
             }
+        }
+    }
+
+    // ── Export rapport PDF LaserBench ────────────────────────────────────────
+    if (cbReport->isChecked() && hasGrid) {
+        PotentiostatGraphWidget reportGraph;
+        reportGraph.resize(1400, 760);
+        reportGraph.setGraphMode(PotentiostatGraphWidget::Mode::CurrentVsTime);
+        reportGraph.setSeries(potentiostatPlotTimes_, potentiostatPlotCurrents_, potentiostatPlotEwe_);
+
+        QStringList parameterLines;
+        const double widthUm = std::abs(potentiostatXMax_ - potentiostatXMin_) * 1000.0;
+        const double heightUm = std::abs(potentiostatYMax_ - potentiostatYMin_) * 1000.0;
+        parameterLines << QString("Dimension: %1 x %2 um")
+            .arg(widthUm, 0, 'f', 1)
+            .arg(heightUm, 0, 'f', 1);
+        const QString objectiveName = objectiveCombo_ != nullptr
+            ? objectiveCombo_->currentText().trimmed()
+            : QString("4x");
+        const double laserDiameterPx = static_cast<double>(laserRadiusPx_) * 2.0;
+        const double laserDiameterUm = laserDiameterPx * autoMmPerPxForObjective(objectiveName) * 1000.0;
+        parameterLines << QString("Diametre laser: %1 um").arg(laserDiameterUm, 0, 'f', 1);
+
+        double reportDurationS = potentiostatMeasurementDurationS_;
+        if (reportDurationS <= 0.0 && !potentiostatPlotTimes_.empty() && std::isfinite(potentiostatPlotTimes_.back())) {
+            reportDurationS = std::max(0.0, potentiostatPlotTimes_.back());
+        }
+        parameterLines << QString("Temps de mesure: %1").arg(formatMeasurementDuration(reportDurationS));
+
+        std::vector<double> finiteCurrents;
+        finiteCurrents.reserve(potentiostatMatrix_.size());
+        for (const auto& value : potentiostatMatrix_) {
+            if (value.has_value() && std::isfinite(*value)) {
+                finiteCurrents.push_back(*value);
+            }
+        }
+        if (!finiteCurrents.empty()) {
+            const auto [minIt, maxIt] = std::minmax_element(finiteCurrents.begin(), finiteCurrents.end());
+            const double mean = std::accumulate(finiteCurrents.begin(), finiteCurrents.end(), 0.0)
+                / static_cast<double>(finiteCurrents.size());
+            parameterLines << QString("Courant: min=%1 | max=%2 | moyenne=%3")
+                .arg(formatReportCurrent(*minIt))
+                .arg(formatReportCurrent(*maxIt))
+                .arg(formatReportCurrent(mean));
+        }
+
+        if (!lastReportMovementLines_.isEmpty()) {
+            parameterLines << lastReportMovementLines_;
+        }
+        if (!reportComment.isEmpty()) {
+            parameterLines << QString("Commentaire: %1").arg(reportComment);
+        }
+
+        const QImage zoneImage = !lastValidatedZoneImage_.isNull()
+            ? lastValidatedZoneImage_
+            : renderWidgetSnapshot(cameraPreviewWidget_, QSize(1000, 700));
+        const QImage graphImage = renderWidgetSnapshot(&reportGraph, QSize(1400, 760));
+        const QImage heatmapImage = renderReportHeatmapSnapshot(
+            potentiostatRows_,
+            potentiostatCols_,
+            potentiostatMatrix_,
+            potentiostatScanOrder_);
+        const QImage surface3DImage = renderWidgetSnapshot(potentiostat3DWidget_, QSize(1200, 900));
+        const QString pdfPath = outDir.absoluteFilePath(name + "_rapport.pdf");
+
+        QString pdfError;
+        if (writeLaserBenchReportPdf(
+                pdfPath,
+                QString("Rapport LaserBench - %1").arg(name),
+                parameterLines,
+                zoneImage,
+                graphImage,
+                heatmapImage,
+                surface3DImage,
+                &pdfError)) {
+            appendLog(QString("Rapport PDF : %1").arg(pdfPath));
+            ++exportCount;
+        } else {
+            QMessageBox::critical(this, "Rapport PDF",
+                pdfError.isEmpty() ? QString("Impossible de créer le PDF.") : pdfError);
         }
     }
 
@@ -8548,6 +9085,12 @@ MainWindow::promptRectangleTraversalSelection()
 // ─────────────────────────────────────────────────────────────────────────────
 void MainWindow::showScanConfigDialog()
 {
+    (void)editScanConfigDialog(true);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
+{
     QDialog dlg(this);
     dlg.setWindowTitle("Paramètres de balayage");
     dlg.setMinimumWidth(380);
@@ -8634,7 +9177,7 @@ void MainWindow::showScanConfigDialog()
     connect(btnBox, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
     vl->addWidget(btnBox);
 
-    if (dlg.exec() != QDialog::Accepted) return;
+    if (dlg.exec() != QDialog::Accepted) return false;
 
     const bool rectangleScan = sequenceModeCombo_ != nullptr
         && sequenceModeCombo_->currentText().trimmed() == "Rectangle";
@@ -8642,7 +9185,7 @@ void MainWindow::showScanConfigDialog()
     if (rectangleScan) {
         selectedRectangleTraversal = promptRectangleTraversalSelection();
         if (!selectedRectangleTraversal.has_value()) {
-            return;
+            return false;
         }
     }
 
@@ -8683,6 +9226,15 @@ void MainWindow::showScanConfigDialog()
             .arg(rectangleStartCornerLabel(selectedRectangleTraversal->first))
             .arg(rectanglePrimaryAxisLabel(selectedRectangleTraversal->second)));
     }
+
+    if (captureZoneSnapshotOnAccept) {
+        lastValidatedZoneImage_ = renderWidgetSnapshot(cameraPreviewWidget_, QSize(1000, 700));
+        if (!lastValidatedZoneImage_.isNull()) {
+            appendLog("Capture de la zone enregistree pour le rapport.");
+        }
+    }
+
+    return true;
 }
 
 }  // namespace laserbench::ui

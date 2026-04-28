@@ -330,6 +330,7 @@ private:
     QLabel*      potentiostatCurrentLabel_     {nullptr};
     QLabel*      potentiostatPointCountLabel_  {nullptr};
     QLabel*      potentiostatProgressLabel_    {nullptr};
+    QLabel*      potentiostatDurationLabel_    {nullptr};
     QLineEdit*   potentiostatNbCyclesEdit_     {nullptr};
     QLineEdit*   potentiostatOcvRestHoursEdit_   {nullptr};
     QLineEdit*   potentiostatOcvRestMinutesEdit_ {nullptr};
@@ -442,6 +443,9 @@ private:
     std::vector<double> potentiostatPlotTimes_;
     std::vector<double> potentiostatPlotCurrents_;
     std::vector<double> potentiostatPlotEwe_;
+    QStringList lastMeasurementHeaderLines_;
+    QStringList lastReportMovementLines_;
+    QImage lastValidatedZoneImage_;
     std::vector<std::optional<double>> potentiostatMatrix_;
     std::vector<std::vector<double>> potentiostatCellCurrentSamples_;
     std::vector<std::vector<double>> potentiostatCellEweSamples_;
@@ -449,6 +453,8 @@ private:
     std::vector<QPointF> potentiostatCellPositions_;
     std::vector<double> potentiostatCellTimes_;
     double potentiostatLastDwellS_ {0.0};
+    double potentiostatMeasurementDurationS_ {0.0};
+    std::optional<std::chrono::steady_clock::time_point> potentiostatMeasurementStartTime_;
     std::vector<std::pair<int, int>> potentiostatScanOrder_;
     int potentiostatRows_ {0};
     int potentiostatCols_ {0};
@@ -534,6 +540,7 @@ private:
     void onPreviewFrameDoubleClicked(const QPoint& framePointPx);
     void onCapturePosition();
     void showScanConfigDialog();
+    [[nodiscard]] bool editScanConfigDialog(bool captureZoneSnapshotOnAccept = false);
     [[nodiscard]] std::optional<std::pair<ScanConfig::RectangleStartCorner, ScanConfig::RectanglePrimaryAxis>> promptRectangleTraversalSelection();
     [[nodiscard]] ScanConfig::RectangleStartCorner effectiveRectangleStartCorner() const;
     [[nodiscard]] ScanConfig::RectanglePrimaryAxis effectiveRectanglePrimaryAxis() const;

@@ -24,6 +24,16 @@ constexpr double kBarGap   = 12.0;  // gap between grid and bar
 constexpr double kBarWidth = 18.0;  // bar width in px
 constexpr double kLabelGap =  4.0;  // gap between bar and text
 
+QColor blendColor(const QColor& a, const QColor& b, double t)
+{
+    t = std::clamp(t, 0.0, 1.0);
+    return QColor(
+        static_cast<int>(std::lround(a.red() + (b.red() - a.red()) * t)),
+        static_cast<int>(std::lround(a.green() + (b.green() - a.green()) * t)),
+        static_cast<int>(std::lround(a.blue() + (b.blue() - a.blue()) * t))
+    );
+}
+
 }  // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -63,17 +73,37 @@ void PotentiostatHeatmapWidget::clear()
 
 QColor PotentiostatHeatmapWidget::valueToColor(double value, double minValue, double maxValue)
 {
-    if (maxValue <= minValue) return QColor("#f6d365");
-    const double t   = std::clamp((value - minValue) / (maxValue - minValue), 0.0, 1.0);
-    const double hue = 220.0 - (220.0 * t);            // blue → yellow/red
-    const double sat = 0.75;
-    const double lig = std::clamp(0.60 - 0.12 * t, 0.0, 1.0);
-    return QColor::fromHslF(hue / 360.0, sat, lig);
+    if (maxValue <= minValue) return QColor("#d97800");
+    const double t = std::clamp((value - minValue) / (maxValue - minValue), 0.0, 1.0);
+
+    struct Stop { double t; QColor c; };
+    static const Stop stops[] = {
+        {0.00, QColor("#000018")},
+        {0.14, QColor("#001070")},
+        {0.30, QColor("#003b88")},
+        {0.44, QColor("#00721b")},
+        {0.58, QColor("#49bd00")},
+        {0.70, QColor("#c2d100")},
+        {0.84, QColor("#d88900")},
+        {1.00, QColor("#bf4a00")}
+    };
+
+    for (std::size_t i = 1; i < std::size(stops); ++i) {
+        if (t <= stops[i].t) {
+            const double localT = (t - stops[i - 1].t) / (stops[i].t - stops[i - 1].t);
+            return blendColor(stops[i - 1].c, stops[i].c, localT);
+        }
+    }
+    return stops[std::size(stops) - 1].c;
 }
 
 QString PotentiostatHeatmapWidget::formatCurrent(double value)
 {
-    return QString::number(value, 'e', 4);
+    const double absValue = std::abs(value);
+    if (absValue >= 1e-3) return QString("%1 mA").arg(value * 1e3, 0, 'f', 2);
+    if (absValue >= 1e-6) return QString("%1 uA").arg(value * 1e6, 0, 'f', 1);
+    if (absValue >= 1e-9) return QString("%1 nA").arg(value * 1e9, 0, 'f', 1);
+    return QString::number(value, 'e', 2) + " A";
 }
 
 QRectF PotentiostatHeatmapWidget::gridRect() const
@@ -103,10 +133,7 @@ void PotentiostatHeatmapWidget::paintEvent(QPaintEvent* event)
     painter.setPen(QColor("#111927"));
     painter.drawText(QRectF(0.0, 8.0, width(), 18.0), Qt::AlignCenter, "Carte 2D I(x, y)");
 
-    // Grid background
-    painter.setPen(QPen(QColor("#d8e0e8"), 1.0));
-    painter.setBrush(QColor("#f8fafc"));
-    painter.drawRoundedRect(gr, 6.0, 6.0);
+    painter.fillRect(gr, QColor("#f8fafc"));
 
     if (rows_ <= 0 || cols_ <= 0) {
         painter.setPen(QColor("#5c6570"));
@@ -128,7 +155,7 @@ void PotentiostatHeatmapWidget::paintEvent(QPaintEvent* event)
     const double cw = gr.width()  / std::max(cols_, 1);
     const double ch = gr.height() / std::max(rows_, 1);
 
-    // Draw cells
+    // Draw cells without internal grid lines.
     painter.setRenderHint(QPainter::Antialiasing, false);
     for (int row = 0; row < rows_; ++row) {
         for (int col = 0; col < cols_; ++col) {
@@ -139,26 +166,13 @@ void PotentiostatHeatmapWidget::paintEvent(QPaintEvent* event)
             if (idx < values_.size() && values_[idx].has_value())
                 fill = valueToColor(*values_[idx], minV, maxV);
 
-            painter.setPen(QPen(QColor("#c3ccd6"), 1.0));
-            painter.setBrush(fill);
-            painter.drawRect(cell);
-
-            // Value text (only when cells are large enough)
-            if (idx < values_.size() && values_[idx].has_value() && cw >= 52.0 && ch >= 24.0) {
-                painter.setRenderHint(QPainter::Antialiasing, true);
-                painter.setPen(QColor("#111927"));
-                painter.drawText(cell.adjusted(4, 2, -4, -2), Qt::AlignCenter, formatCurrent(*values_[idx]));
-                painter.setRenderHint(QPainter::Antialiasing, false);
-            }
-
-            // Highlight current point
-            if (highlightedCell_ && highlightedCell_->first == row && highlightedCell_->second == col) {
-                painter.setPen(QPen(QColor("#f59e0b"), 2.0));
-                painter.setBrush(Qt::NoBrush);
-                painter.drawRect(cell.adjusted(1, 1, -1, -1));
-            }
+            painter.fillRect(cell.adjusted(-0.25, -0.25, 0.25, 0.25), fill);
         }
     }
+
+    painter.setPen(QPen(QColor("#9ca3af"), 1.0));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawRect(gr.adjusted(0.0, 0.0, -1.0, -1.0));
 
     // ── Color scale bar ──────────────────────────────────────────────────────
     if (!acquired.empty()) {
@@ -222,7 +236,7 @@ void PotentiostatHeatmapWidget::mouseMoveEvent(QMouseEvent* event)
                 if (idx < values_.size() && values_[idx].has_value()) {
                     QToolTip::showText(
                         event->globalPosition().toPoint(),
-                        QString("Ligne %1, Col %2\n%3 A")
+                        QString("Ligne %1, Col %2\n%3")
                             .arg(row + 1).arg(col + 1)
                             .arg(formatCurrent(*values_[idx]))
                     );
