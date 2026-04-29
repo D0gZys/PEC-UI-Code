@@ -31,6 +31,7 @@
 #include <QInputDialog>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLineF>
 #include <QLineEdit>
 #include <QMenuBar>
 #include <QMouseEvent>
@@ -92,6 +93,7 @@ constexpr double kContinuousPollingPeriodS = 0.002;
 constexpr double kContinuousGuaranteedSamplePeriodS = 0.02;
 constexpr double kContinuousFreshValueTimeoutS = 0.25;
 constexpr double kContinuousRunUpMm = 0.04;
+constexpr double kPointByPointPerPointOverheadS = 0.82;
 
 QGroupBox* createGroupBox(const QString& title)
 {
@@ -1203,6 +1205,120 @@ QImage renderReportHeatmapSnapshot(
     return image;
 }
 
+QImage renderReportPathSketch(
+    int rows,
+    int cols,
+    const std::vector<std::pair<int, int>>& scanOrder)
+{
+    if (rows <= 0 || cols <= 0) {
+        return {};
+    }
+
+    constexpr int kWidth = 520;
+    constexpr int kHeight = 250;
+    QImage image(kWidth, kHeight, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::white);
+
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+
+    const QRectF available(20.0, 18.0, kWidth - 40.0, kHeight - 36.0);
+    const double gridAspect = static_cast<double>(cols) / static_cast<double>(rows);
+    QRectF plot = available;
+    if ((available.width() / available.height()) > gridAspect) {
+        const double w = available.height() * gridAspect;
+        plot.setLeft(available.left() + (available.width() - w) * 0.5);
+        plot.setWidth(w);
+    } else {
+        const double h = available.width() / gridAspect;
+        plot.setTop(available.top() + (available.height() - h) * 0.5);
+        plot.setHeight(h);
+    }
+
+    painter.setPen(QPen(QColor("#cbd5e1"), 2.0));
+    painter.setBrush(QColor("#f8fafc"));
+    painter.drawRoundedRect(plot, 6.0, 6.0);
+
+    if (rows <= 18 && cols <= 18) {
+        painter.setPen(QPen(QColor("#e2e8f0"), 1.0));
+        for (int col = 1; col < cols; ++col) {
+            const double x = plot.left() + plot.width() * static_cast<double>(col) / static_cast<double>(cols);
+            painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()));
+        }
+        for (int row = 1; row < rows; ++row) {
+            const double y = plot.top() + plot.height() * static_cast<double>(row) / static_cast<double>(rows);
+            painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y));
+        }
+    }
+
+    auto validCell = [rows, cols](const std::pair<int, int>& cell) {
+        return cell.first >= 0 && cell.first < rows && cell.second >= 0 && cell.second < cols;
+    };
+    auto cellCenter = [&plot, rows, cols](const std::pair<int, int>& cell) {
+        return QPointF(
+            plot.left() + (static_cast<double>(cell.second) + 0.5) * plot.width() / static_cast<double>(cols),
+            plot.top() + (static_cast<double>(cell.first) + 0.5) * plot.height() / static_cast<double>(rows));
+    };
+
+    std::vector<QPointF> points;
+    points.reserve(scanOrder.size());
+    for (const auto& cell : scanOrder) {
+        if (!validCell(cell)) {
+            continue;
+        }
+        const QPointF point = cellCenter(cell);
+        if (points.empty() || QLineF(points.back(), point).length() > 0.5) {
+            points.push_back(point);
+        }
+    }
+    if (points.empty()) {
+        points.push_back(cellCenter({0, 0}));
+    }
+
+    const QColor pathColor("#2563eb");
+    painter.setPen(QPen(pathColor, 4.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    for (std::size_t i = 1; i < points.size(); ++i) {
+        painter.drawLine(points[i - 1], points[i]);
+    }
+
+    auto drawArrowHead = [&painter, pathColor](const QPointF& from, const QPointF& to) {
+        const QPointF delta = to - from;
+        const double len = std::hypot(delta.x(), delta.y());
+        if (len < 2.0) {
+            return;
+        }
+        const QPointF unit(delta.x() / len, delta.y() / len);
+        const QPointF normal(-unit.y(), unit.x());
+        constexpr double head = 12.0;
+        QPolygonF arrow;
+        arrow << to
+              << (to - unit * head + normal * head * 0.55)
+              << (to - unit * head - normal * head * 0.55);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(pathColor);
+        painter.drawPolygon(arrow);
+    };
+
+    if (points.size() > 1) {
+        const int segmentCount = static_cast<int>(points.size() - 1);
+        const int arrowStride = std::max(1, segmentCount / 6);
+        for (int i = 1; i < static_cast<int>(points.size()); ++i) {
+            if (i == 1 || i == segmentCount || (i % arrowStride) == 0) {
+                drawArrowHead(points[static_cast<std::size_t>(i - 1)], points[static_cast<std::size_t>(i)]);
+            }
+        }
+    }
+
+    painter.setPen(QPen(Qt::white, 2.0));
+    painter.setBrush(QColor("#16a34a"));
+    painter.drawEllipse(points.front(), 7.0, 7.0);
+    painter.setBrush(QColor("#dc2626"));
+    painter.drawEllipse(points.back(), 7.0, 7.0);
+    painter.end();
+
+    return image;
+}
+
 void drawReportBox(QPainter& painter, const QRectF& rect, const QString& title)
 {
     painter.save();
@@ -1244,6 +1360,67 @@ void drawReportTextBox(QPainter& painter, const QRectF& rect, const QString& tit
     painter.restore();
 }
 
+void drawReportParametersBox(
+    QPainter& painter,
+    const QRectF& rect,
+    const QString& title,
+    const QStringList& lines,
+    const QImage& pathSketchImage)
+{
+    if (pathSketchImage.isNull()) {
+        drawReportTextBox(painter, rect, title, lines);
+        return;
+    }
+
+    drawReportBox(painter, rect, title);
+
+    painter.save();
+    const QRectF content = rect.adjusted(16, 46, -16, -14);
+    const double sketchHeight = std::min(310.0, content.height() * 0.36);
+    const QRectF sketchRect(content.left(), content.bottom() - sketchHeight, content.width(), sketchHeight);
+    const QRectF textRect(content.left(), content.top(), content.width(), sketchRect.top() - content.top() - 14.0);
+
+    QFont textFont = painter.font();
+    textFont.setPointSizeF(7.2);
+    painter.setFont(textFont);
+    painter.setPen(QColor("#263244"));
+
+    QStringList visibleLines = lines;
+    constexpr int kMaxReportLinesWithSketch = 14;
+    if (visibleLines.size() > kMaxReportLinesWithSketch) {
+        const int hidden = visibleLines.size() - kMaxReportLinesWithSketch;
+        visibleLines = visibleLines.mid(0, kMaxReportLinesWithSketch);
+        visibleLines << QString("... %1 ligne(s) supplementaire(s)").arg(hidden);
+    }
+
+    QTextOption option;
+    option.setWrapMode(QTextOption::WordWrap);
+    painter.drawText(textRect, visibleLines.join('\n'), option);
+
+    QFont sketchTitleFont = painter.font();
+    sketchTitleFont.setPointSizeF(7.0);
+    sketchTitleFont.setBold(true);
+    painter.setFont(sketchTitleFont);
+    painter.setPen(QColor("#162033"));
+    painter.drawText(QRectF(sketchRect.left(), sketchRect.top(), sketchRect.width(), 22.0),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     "Chemin laser");
+
+    const QRectF imageRect = sketchRect.adjusted(0, 26, 0, 0);
+    const double scale = std::min(
+        imageRect.width() / static_cast<double>(pathSketchImage.width()),
+        imageRect.height() / static_cast<double>(pathSketchImage.height()));
+    const QSizeF targetSize(pathSketchImage.width() * scale, pathSketchImage.height() * scale);
+    const QRectF target(
+        imageRect.left() + (imageRect.width() - targetSize.width()) * 0.5,
+        imageRect.top() + (imageRect.height() - targetSize.height()) * 0.5,
+        targetSize.width(),
+        targetSize.height());
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    painter.drawImage(target, pathSketchImage);
+    painter.restore();
+}
+
 void drawReportImageBox(QPainter& painter, const QRectF& rect, const QString& title, const QImage& image, const QString& emptyText)
 {
     drawReportBox(painter, rect, title);
@@ -1278,6 +1455,7 @@ bool writeLaserBenchReportPdf(
     const QString& filePath,
     const QString& reportTitle,
     const QStringList& parameterLines,
+    const QImage& pathSketchImage,
     const QImage& zoneImage,
     const QImage& graphImage,
     const QImage& heatmapImage,
@@ -1340,7 +1518,7 @@ bool writeLaserBenchReportPdf(
     const QRectF twoDRect(rightLeft, bottomTop, bottomWidth, bottomHeight);
     const QRectF threeDRect(twoDRect.right() + gap, bottomTop, bottomWidth, bottomHeight);
 
-    drawReportTextBox(painter, paramsRect, "Parametres de mesure", parameterLines);
+    drawReportParametersBox(painter, paramsRect, "Parametres de mesure", parameterLines, pathSketchImage);
     drawReportImageBox(painter, zoneRect, "Zone selectionnee", zoneImage, "Image camera indisponible");
     drawReportImageBox(painter, graphRect, "Evolution du courant", graphImage, "Graphe indisponible");
     drawReportImageBox(painter, twoDRect, "Matrice 2D LaserBench", heatmapImage, "Vue 2D indisponible");
@@ -1913,6 +2091,13 @@ QWidget* MainWindow::buildSetupTab()
     cameraLayout->addWidget(objLbl,          2, 0);
     cameraLayout->addWidget(objectiveCombo_, 2, 1, 1, 3);
 
+    auto* laserMetricLbl = new QLabel(QString::fromUtf8("Diam. laser :"));
+    laserMetricLbl->setStyleSheet("font-size:8pt;");
+    laserMetricDiameterLabel_ = new QLabel("---");
+    laserMetricDiameterLabel_->setStyleSheet("font-size:8pt; font-weight:600; color:#1f6feb;");
+    cameraLayout->addWidget(laserMetricLbl,            3, 0);
+    cameraLayout->addWidget(laserMetricDiameterLabel_, 3, 1, 1, 3);
+
     // Connections
     connect(cameraPageLiveButton_, &QPushButton::toggled, this, [this](bool checked) {
         if (checked) startCameraLive();
@@ -1998,6 +2183,15 @@ QWidget* MainWindow::buildSetupTab()
     motorLayout->addWidget(speedLbl,     2, 0, 1, 3);
     motorLayout->addWidget(jogStepEdit_, 2, 3);
 
+    auto* jogStepLbl = new QLabel(QString::fromUtf8("Pas (µm) :"));
+    jogStepLbl->setStyleSheet("font-size:8pt;");
+    jogMoveStepEdit_ = new QLineEdit("50");
+    jogMoveStepEdit_->setMaximumWidth(60);
+    jogMoveStepEdit_->setToolTip(QString::fromUtf8("Pas de déplacement pour les boutons fléchés de l'interface, en µm."));
+    jogMoveStepEdit_->setStyleSheet("font-size:8pt;");
+    motorLayout->addWidget(jogStepLbl,       3, 0, 1, 3);
+    motorLayout->addWidget(jogMoveStepEdit_, 3, 3);
+
     // Arrow buttons (jog)
     const QString arrowBtnStyle =
         "QPushButton { min-width:32px; max-width:32px; min-height:32px; max-height:32px;"
@@ -2020,12 +2214,12 @@ QWidget* MainWindow::buildSetupTab()
     leftBtn->setToolTip("X- (touche ←)");
     rightBtn->setToolTip("X+ (touche →)");
 
-    // 3x3 grid: row3=up, row4=left+center+right, row5=down
+    // 3x3 grid: row4=up, row5=left+center+right, row6=down
     // Centred in cols 1-3
-    motorLayout->addWidget(upBtn,    3, 2, Qt::AlignCenter);
-    motorLayout->addWidget(leftBtn,  4, 1, Qt::AlignCenter);
-    motorLayout->addWidget(rightBtn, 4, 3, Qt::AlignCenter);
-    motorLayout->addWidget(downBtn,  5, 2, Qt::AlignCenter);
+    motorLayout->addWidget(upBtn,    4, 2, Qt::AlignCenter);
+    motorLayout->addWidget(leftBtn,  5, 1, Qt::AlignCenter);
+    motorLayout->addWidget(rightBtn, 5, 3, Qt::AlignCenter);
+    motorLayout->addWidget(downBtn,  6, 2, Qt::AlignCenter);
 
     connect(leftBtn,         &QPushButton::clicked, this, [this]() { onJogAxis(hardware::AxisId::X, -1); });
     connect(rightBtn,        &QPushButton::clicked, this, [this]() { onJogAxis(hardware::AxisId::X, +1); });
@@ -2034,8 +2228,8 @@ QWidget* MainWindow::buildSetupTab()
     connect(moveAbsXYButton_,&QPushButton::clicked, this, &MainWindow::onMoveAbsoluteBoth);
 
     // GoTo row (in Motor Control box)
-    motorLayout->addWidget(gotoButton_,      6, 0, 1, 3);
-    motorLayout->addWidget(gotoStatusLabel_, 6, 3, 1, 3);
+    motorLayout->addWidget(gotoButton_,      7, 0, 1, 3);
+    motorLayout->addWidget(gotoStatusLabel_, 7, 3, 1, 3);
 
     leftLayout->addWidget(motorBox);
 
@@ -2843,17 +3037,17 @@ void MainWindow::openCalibrationDialog()
         gotoLayout->addWidget(gotoInvertXCheck_, 0, 2);
         gotoLayout->addWidget(gotoInvertYCheck_, 0, 3);
 
-        gotoLayout->addWidget(new QLabel("Corr X+"), 1, 0);
+        gotoLayout->addWidget(new QLabel("Corr X+ (mm)"), 1, 0);
         gotoCorrXpEdit_ = new QLineEdit("0");
         gotoLayout->addWidget(gotoCorrXpEdit_, 1, 1);
-        gotoLayout->addWidget(new QLabel("Corr X-"), 1, 2);
+        gotoLayout->addWidget(new QLabel("Corr X- (mm)"), 1, 2);
         gotoCorrXmEdit_ = new QLineEdit("0");
         gotoLayout->addWidget(gotoCorrXmEdit_, 1, 3);
 
-        gotoLayout->addWidget(new QLabel("Corr Y+"), 2, 0);
+        gotoLayout->addWidget(new QLabel("Corr Y+ (mm)"), 2, 0);
         gotoCorrYpEdit_ = new QLineEdit("0");
         gotoLayout->addWidget(gotoCorrYpEdit_, 2, 1);
-        gotoLayout->addWidget(new QLabel("Corr Y-"), 2, 2);
+        gotoLayout->addWidget(new QLabel("Corr Y- (mm)"), 2, 2);
         gotoCorrYmEdit_ = new QLineEdit("0");
         gotoLayout->addWidget(gotoCorrYmEdit_, 2, 3);
 
@@ -2877,8 +3071,8 @@ void MainWindow::openCalibrationDialog()
         auto* moveXPlusButton = createActionButton("X +");
         auto* moveYMinusButton = createActionButton("Y -");
         auto* moveYPlusButton = createActionButton("Y +");
-        auto* sizeMinusButton = createActionButton("Taille -");
-        auto* sizePlusButton = createActionButton("Taille +");
+        auto* sizeMinusButton = createActionButton("Rayon -");
+        auto* sizePlusButton = createActionButton("Rayon +");
         laserLayout->addWidget(moveXMinusButton, 2, 0);
         laserLayout->addWidget(moveXPlusButton,  2, 1);
         laserLayout->addWidget(moveYMinusButton, 2, 2);
@@ -2886,14 +3080,14 @@ void MainWindow::openCalibrationDialog()
         laserLayout->addWidget(sizeMinusButton,  3, 0, 1, 2);
         laserLayout->addWidget(sizePlusButton,   3, 2, 1, 2);
 
-        laserLayout->addWidget(new QLabel("X cible"), 4, 0);
+        laserLayout->addWidget(new QLabel("X cible (px)"), 4, 0);
         laserXEdit_ = new QLineEdit(QString::number(laserPointPx_.x()));
         laserLayout->addWidget(laserXEdit_, 4, 1);
-        laserLayout->addWidget(new QLabel("Y cible"), 4, 2);
+        laserLayout->addWidget(new QLabel("Y cible (px)"), 4, 2);
         laserYEdit_ = new QLineEdit(QString::number(laserPointPx_.y()));
         laserLayout->addWidget(laserYEdit_, 4, 3);
 
-        laserLayout->addWidget(new QLabel("Taille"), 5, 0);
+        laserLayout->addWidget(new QLabel("Rayon (px)"), 5, 0);
         laserSizeEdit_ = new QLineEdit(QString::number(laserRadiusPx_));
         laserLayout->addWidget(laserSizeEdit_, 5, 1);
         auto* applyLaserButton = createActionButton("Appliquer cible");
@@ -2902,6 +3096,14 @@ void MainWindow::openCalibrationDialog()
 
         layout->addWidget(gotoBox);
         layout->addWidget(laserBox);
+
+        auto* helpLabel = new QLabel(QString::fromUtf8(
+            "Aide - Unités : corrections GoTo en millimètres (mm), position de cible laser X/Y en pixels (px), "
+            "pas de déplacement de la cible en pixels (px), rayon de la cible en pixels (px). "
+            "Le diamètre métrique affiché dans la page caméra est calculé en micromètres (µm) avec l'objectif sélectionné."));
+        helpLabel->setWordWrap(true);
+        helpLabel->setStyleSheet("color:#5c6570; font-size:9pt;");
+        layout->addWidget(helpLabel);
 
         connect(moveXMinusButton, &QPushButton::clicked, this, [this]() { nudgeLaserTarget(-1, 0, 0); });
         connect(moveXPlusButton, &QPushButton::clicked, this, [this]() { nudgeLaserTarget(1, 0, 0); });
@@ -3009,16 +3211,23 @@ void MainWindow::syncLaserOverlay(const QSize& frameSize)
 
 void MainWindow::updateLaserLabel()
 {
-    if (laserPointLabel_ == nullptr) {
-        return;
+    if (laserPointLabel_ != nullptr) {
+        laserPointLabel_->setText(
+            QString("X=%1  Y=%2  |  Rayon=%3 px")
+                .arg(laserPointPx_.x())
+                .arg(laserPointPx_.y())
+                .arg(laserRadiusPx_)
+        );
     }
 
-    laserPointLabel_->setText(
-        QString("X=%1  Y=%2  |  Taille=%3 px")
-            .arg(laserPointPx_.x())
-            .arg(laserPointPx_.y())
-            .arg(laserRadiusPx_)
-    );
+    if (laserMetricDiameterLabel_ != nullptr) {
+        const QString objectiveName = objectiveCombo_ != nullptr
+            ? objectiveCombo_->currentText().trimmed()
+            : QString("4x");
+        const double diameterUm =
+            static_cast<double>(laserRadiusPx_) * 2.0 * autoMmPerPxForObjective(objectiveName) * 1000.0;
+        laserMetricDiameterLabel_->setText(QString::fromUtf8("%1 µm").arg(diameterUm, 0, 'f', 1));
+    }
 }
 
 void MainWindow::updatePreviewCursor()
@@ -3347,11 +3556,20 @@ void MainWindow::syncSequenceOverlay()
         if (!startPoint.has_value()) {
             cameraPreviewWidget_->clearSequenceOverlay();
         } else {
+            QString sequenceSizeText;
+            if (endPoint.has_value() && sequenceStartMotorMm_.has_value() && sequenceEndMotorMm_.has_value()) {
+                const double widthUm = std::abs(sequenceEndMotorMm_->x() - sequenceStartMotorMm_->x()) * 1000.0;
+                const double heightUm = std::abs(sequenceEndMotorMm_->y() - sequenceStartMotorMm_->y()) * 1000.0;
+                sequenceSizeText = QString::fromUtf8("X: %1 µm\nY: %2 µm")
+                    .arg(widthUm, 0, 'f', 1)
+                    .arg(heightUm, 0, 'f', 1);
+            }
             cameraPreviewWidget_->setSequenceOverlay(
                 QPointF(*startPoint),
                 true,
                 endPoint.has_value() ? QPointF(*endPoint) : QPointF(*startPoint),
-                endPoint.has_value()
+                endPoint.has_value(),
+                sequenceSizeText
             );
         }
     }
@@ -3391,7 +3609,7 @@ void MainWindow::applyLaserCalibrationEdits()
     const int targetSize = laserSizeEdit_->text().trimmed().toInt(&sizeOk);
 
     if (!xOk || !yOk || !sizeOk || targetSize <= 0) {
-        QMessageBox::warning(this, "Calibrage", "Les valeurs X, Y et Taille doivent etre des entiers valides.");
+        QMessageBox::warning(this, "Calibrage", "Les valeurs X (px), Y (px) et Rayon (px) doivent etre des entiers valides.");
         syncCalibrationUi();
         return;
     }
@@ -3416,7 +3634,7 @@ void MainWindow::applyLaserCalibrationEdits()
         syncLaserOverlay();
     }
     saveCalibrationPresets();
-    appendLog(QString("Cible laser calibree [%1]: X=%2 Y=%3 Taille=%4")
+    appendLog(QString("Cible laser calibree [%1]: X=%2 px Y=%3 px Rayon=%4 px")
         .arg(targetObj).arg(targetX).arg(targetY).arg(std::max(targetSize, 1)));
 }
 
@@ -6379,7 +6597,13 @@ void MainWindow::onDisconnectAxes()
 
 void MainWindow::onJogAxis(hardware::AxisId axis, int direction)
 {
-    const double stepMm = readJogStepMm();
+    double stepMm = 0.0;
+    try {
+        stepMm = readJogStepMm();
+    } catch (const std::exception& ex) {
+        QMessageBox::warning(this, "Jog", QString::fromUtf8(ex.what()));
+        return;
+    }
     const double delta = direction < 0 ? -stepMm : stepMm;
     const QString axisLabel = hardware::axisIdLabel(axis);
     auto controller = motorController_;
@@ -6458,11 +6682,13 @@ double MainWindow::readJogSpeedMmPerS() const
 double MainWindow::readJogStepMm() const
 {
     bool ok = false;
-    const double stepMm = jogStepEdit_->text().trimmed().toDouble(&ok);
-    if (!ok || stepMm <= 0.0) {
-        throw std::runtime_error("Le pas de jog doit etre un nombre strictement positif.");
+    const double stepUm = jogMoveStepEdit_ != nullptr
+        ? jogMoveStepEdit_->text().trimmed().toDouble(&ok)
+        : 50.0;
+    if ((!ok && jogMoveStepEdit_ != nullptr) || stepUm <= 0.0) {
+        throw std::runtime_error("Le pas de jog doit etre un nombre strictement positif en micrometres.");
     }
-    return stepMm;
+    return stepUm * 1e-3;
 }
 
 double MainWindow::readAbsoluteTargetMm(hardware::AxisId axis) const
@@ -6998,6 +7224,22 @@ void MainWindow::onStartCaPotentiostat()
             .arg(repeatCycles);
         techniqueParams = params;
     }
+
+    const QString reportObjectiveName = objectiveCombo_ != nullptr
+        ? objectiveCombo_->currentText().trimmed()
+        : QString("4x");
+    const double reportLaserDiameterUm =
+        static_cast<double>(laserRadiusPx_) * 2.0 * autoMmPerPxForObjective(reportObjectiveName) * 1000.0;
+    QStringList reportSetupLines;
+    reportSetupLines
+        << QString("Objectif utilise: %1").arg(reportObjectiveName)
+        << QString("Diametre laser: %1 um").arg(reportLaserDiameterUm, 0, 'f', 1);
+    if (const auto* caParams = std::get_if<hardware::CaParams>(&techniqueParams)) {
+        reportSetupLines << QString("Ewe CA: %1 V vs %2")
+            .arg(caParams->voltage, 0, 'f', 3)
+            .arg(caParams->vsInit ? QString("Pref") : QString("Ref"));
+    }
+    lastReportSetupLines_ = reportSetupLines;
 
     potentiostatBusy_.store(true);
     potentiostatStopRequested_.store(false);
@@ -8692,12 +8934,32 @@ void MainWindow::onExportPotentiostat()
         parameterLines << QString("Dimension: %1 x %2 um")
             .arg(widthUm, 0, 'f', 1)
             .arg(heightUm, 0, 'f', 1);
-        const QString objectiveName = objectiveCombo_ != nullptr
-            ? objectiveCombo_->currentText().trimmed()
-            : QString("4x");
-        const double laserDiameterPx = static_cast<double>(laserRadiusPx_) * 2.0;
-        const double laserDiameterUm = laserDiameterPx * autoMmPerPxForObjective(objectiveName) * 1000.0;
-        parameterLines << QString("Diametre laser: %1 um").arg(laserDiameterUm, 0, 'f', 1);
+
+        QStringList setupLines = lastReportSetupLines_;
+        if (setupLines.isEmpty()) {
+            const QString objectiveName = objectiveCombo_ != nullptr
+                ? objectiveCombo_->currentText().trimmed()
+                : QString("4x");
+            const double laserDiameterPx = static_cast<double>(laserRadiusPx_) * 2.0;
+            const double laserDiameterUm = laserDiameterPx * autoMmPerPxForObjective(objectiveName) * 1000.0;
+            setupLines
+                << QString("Objectif utilise: %1").arg(objectiveName)
+                << QString("Diametre laser: %1 um").arg(laserDiameterUm, 0, 'f', 1);
+
+            if (selectedPotentiostatTechnique() == PotentiostatTechnique::CA) {
+                bool eweOk = false;
+                const double caEwe = potentiostatVoltageEdit_ != nullptr
+                    ? potentiostatVoltageEdit_->text().trimmed().toDouble(&eweOk)
+                    : 0.5;
+                const QString vsText = potentiostatVsCombo_ != nullptr
+                    ? potentiostatVsCombo_->currentText().trimmed()
+                    : QString("Ref");
+                if (eweOk || potentiostatVoltageEdit_ == nullptr) {
+                    setupLines << QString("Ewe CA: %1 V vs %2").arg(caEwe, 0, 'f', 3).arg(vsText);
+                }
+            }
+        }
+        parameterLines << setupLines;
 
         double reportDurationS = potentiostatMeasurementDurationS_;
         if (reportDurationS <= 0.0 && !potentiostatPlotTimes_.empty() && std::isfinite(potentiostatPlotTimes_.back())) {
@@ -8738,6 +9000,10 @@ void MainWindow::onExportPotentiostat()
             potentiostatCols_,
             potentiostatMatrix_,
             potentiostatScanOrder_);
+        const QImage pathSketchImage = renderReportPathSketch(
+            potentiostatRows_,
+            potentiostatCols_,
+            potentiostatScanOrder_);
         const QImage surface3DImage = renderWidgetSnapshot(potentiostat3DWidget_, QSize(1200, 900));
         const QString pdfPath = outDir.absoluteFilePath(name + "_rapport.pdf");
 
@@ -8746,6 +9012,7 @@ void MainWindow::onExportPotentiostat()
                 pdfPath,
                 QString("Rapport LaserBench - %1").arg(name),
                 parameterLines,
+                pathSketchImage,
                 zoneImage,
                 graphImage,
                 heatmapImage,
@@ -9093,8 +9360,56 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
 {
     QDialog dlg(this);
     dlg.setWindowTitle("Paramètres de balayage");
-    dlg.setMinimumWidth(380);
+    dlg.setMinimumWidth(720);
     auto* vl = new QVBoxLayout(&dlg);
+    auto* mainLayout = new QHBoxLayout;
+    auto* controlsLayout = new QVBoxLayout;
+    controlsLayout->setSpacing(8);
+    mainLayout->addLayout(controlsLayout, 1);
+
+    auto* estimateBox = new QGroupBox("Infos zone / estimation");
+    estimateBox->setMinimumWidth(240);
+    auto* estimateGrid = new QGridLayout(estimateBox);
+    estimateGrid->setHorizontalSpacing(10);
+    estimateGrid->setVerticalSpacing(6);
+
+    auto makeEstimateValueLabel = []() {
+        auto* label = new QLabel("---");
+        label->setStyleSheet("font-size:9pt; font-weight:600; color:#162033;");
+        label->setWordWrap(true);
+        return label;
+    };
+
+    auto* estimateLaserLabel = makeEstimateValueLabel();
+    auto* estimateZoneXLabel = makeEstimateValueLabel();
+    auto* estimateZoneYLabel = makeEstimateValueLabel();
+    auto* estimateGridLabel = makeEstimateValueLabel();
+    auto* estimatePointsLabel = makeEstimateValueLabel();
+    auto* estimateLineDurationLabel = makeEstimateValueLabel();
+    auto* estimateTotalDurationLabel = makeEstimateValueLabel();
+
+    estimateGrid->addWidget(new QLabel(QString::fromUtf8("Diam. laser")), 0, 0);
+    estimateGrid->addWidget(estimateLaserLabel, 0, 1);
+    estimateGrid->addWidget(new QLabel(QString::fromUtf8("Zone X")), 1, 0);
+    estimateGrid->addWidget(estimateZoneXLabel, 1, 1);
+    estimateGrid->addWidget(new QLabel(QString::fromUtf8("Zone Y")), 2, 0);
+    estimateGrid->addWidget(estimateZoneYLabel, 2, 1);
+    estimateGrid->addWidget(new QLabel("Grille"), 3, 0);
+    estimateGrid->addWidget(estimateGridLabel, 3, 1);
+    estimateGrid->addWidget(new QLabel("Points"), 4, 0);
+    estimateGrid->addWidget(estimatePointsLabel, 4, 1);
+    estimateGrid->addWidget(new QLabel("Duree ligne"), 5, 0);
+    estimateGrid->addWidget(estimateLineDurationLabel, 5, 1);
+    estimateGrid->addWidget(new QLabel("Duree totale"), 6, 0);
+    estimateGrid->addWidget(estimateTotalDurationLabel, 6, 1);
+
+    auto* estimateHint = new QLabel("Point par point : déplacement de ligne + (pause + marge commande/lecture) x points/ligne. Continu : longueur ligne + zones d'élan, divisé par vitesse. Total = ligne x nombre de lignes.");
+    estimateHint->setWordWrap(true);
+    estimateHint->setStyleSheet("color:#5c6570; font-size:8pt;");
+    estimateGrid->addWidget(estimateHint, 7, 0, 1, 2);
+
+    mainLayout->addWidget(estimateBox, 0);
+    vl->addLayout(mainLayout);
 
     // ── Mode ─────────────────────────────────────────────────────────────────
     auto* modeGrp = new QGroupBox("Mode d'acquisition");
@@ -9105,7 +9420,7 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
     cntBtn->setChecked(scanConfig_.mode == ScanConfig::AcquisitionMode::Continuous);
     modeHl->addWidget(ppBtn);
     modeHl->addWidget(cntBtn);
-    vl->addWidget(modeGrp);
+    controlsLayout->addWidget(modeGrp);
 
     // ── Stacked panels ───────────────────────────────────────────────────────
     auto* stack = new QStackedWidget;
@@ -9167,9 +9482,157 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
     cntGrid->addWidget(intGrp, 2, 0, 1, 2);
     stack->addWidget(cntWidget);  // index 1
 
-    vl->addWidget(stack);
+    controlsLayout->addWidget(stack);
     stack->setCurrentIndex(ppBtn->isChecked() ? 0 : 1);
     connect(ppBtn, &QRadioButton::toggled, [stack](bool chk) { stack->setCurrentIndex(chk ? 0 : 1); });
+
+    auto updateScanEstimate = [=, this]() {
+        const QString objectiveName = objectiveCombo_ != nullptr
+            ? objectiveCombo_->currentText().trimmed()
+            : QString("4x");
+        const double laserDiameterUm =
+            static_cast<double>(laserRadiusPx_) * 2.0 * autoMmPerPxForObjective(objectiveName) * 1000.0;
+        estimateLaserLabel->setText(QString::fromUtf8("%1 µm").arg(laserDiameterUm, 0, 'f', 1));
+
+        if (!sequenceStartMotorMm_.has_value() || !sequenceEndMotorMm_.has_value()) {
+            estimateZoneXLabel->setText("---");
+            estimateZoneYLabel->setText("---");
+            estimateGridLabel->setText("---");
+            estimatePointsLabel->setText("---");
+            estimateLineDurationLabel->setText("---");
+            estimateTotalDurationLabel->setText("---");
+            return;
+        }
+
+        const QPointF startMm = *sequenceStartMotorMm_;
+        const QPointF endMm = *sequenceEndMotorMm_;
+        const double widthMm = std::abs(endMm.x() - startMm.x());
+        const double heightMm = std::abs(endMm.y() - startMm.y());
+        const double lineDistanceMm = std::hypot(endMm.x() - startMm.x(), endMm.y() - startMm.y());
+        const bool rectangleScan = sequenceModeCombo_ != nullptr
+            && sequenceModeCombo_->currentText().trimmed() == "Rectangle";
+
+        estimateZoneXLabel->setText(QString::fromUtf8("%1 µm").arg(widthMm * 1000.0, 0, 'f', 1));
+        estimateZoneYLabel->setText(QString::fromUtf8("%1 µm").arg(heightMm * 1000.0, 0, 'f', 1));
+
+        bool speedOk = false;
+        const double stageSpeedMmPerS = jogStepEdit_ != nullptr
+            ? jogStepEdit_->text().trimmed().toDouble(&speedOk)
+            : 0.0;
+
+        int rows = 1;
+        int cols = 1;
+        int pointCount = 1;
+        int pointsPerLine = 1;
+        int lineCount = 1;
+        double lineDurationSeconds = 0.0;
+        double totalDurationSeconds = 0.0;
+
+        if (ppBtn->isChecked()) {
+            const double stepMm = stepSpin->value();
+            const double dwellS = dwellSpin->value();
+            if (rectangleScan) {
+                const int xIntervals = intervalCountForSpan(widthMm, stepMm);
+                const int yIntervals = intervalCountForSpan(heightMm, stepMm);
+                cols = xIntervals + 1;
+                rows = yIntervals + 1;
+                pointCount = rows * cols;
+
+                const bool horizontal = effectiveRectanglePrimaryAxis() == ScanConfig::RectanglePrimaryAxis::Horizontal;
+                const double effectiveWidthMm = static_cast<double>(std::max(0, cols - 1)) * stepMm;
+                const double effectiveHeightMm = static_cast<double>(std::max(0, rows - 1)) * stepMm;
+                const double lineLengthMm = horizontal ? effectiveWidthMm : effectiveHeightMm;
+                pointsPerLine = horizontal ? cols : rows;
+                lineCount = horizontal ? rows : cols;
+                lineDurationSeconds = static_cast<double>(pointsPerLine)
+                    * (dwellS + kPointByPointPerPointOverheadS);
+                if (speedOk && stageSpeedMmPerS > 0.0) {
+                    lineDurationSeconds += lineLengthMm / stageSpeedMmPerS;
+                }
+                totalDurationSeconds = lineDurationSeconds * static_cast<double>(lineCount);
+            } else {
+                const int intervals = intervalCountForSpan(lineDistanceMm, stepMm);
+                cols = intervals + 1;
+                rows = 1;
+                pointCount = cols;
+                pointsPerLine = pointCount;
+                lineCount = 1;
+                lineDurationSeconds = static_cast<double>(pointsPerLine)
+                    * (dwellS + kPointByPointPerPointOverheadS);
+                if (speedOk && stageSpeedMmPerS > 0.0) {
+                    lineDurationSeconds += (static_cast<double>(intervals) * stepMm) / stageSpeedMmPerS;
+                }
+                totalDurationSeconds = lineDurationSeconds;
+            }
+        } else {
+            const double speedMmPerS = speedSpin->value();
+            const double samplePitchMm = distBtn->isChecked()
+                ? distSpin->value()
+                : std::max(kScanPlanningEpsilonMm, speedMmPerS * timeSpin->value());
+
+            if (rectangleScan) {
+                try {
+                    const auto scale = currentGotoScale();
+                    const ContinuousRasterPlan plan = buildContinuousRectanglePlan(
+                        startMm,
+                        endMm,
+                        samplePitchMm,
+                        rowStepSpin->value(),
+                        effectiveRectangleStartCorner(),
+                        effectiveRectanglePrimaryAxis(),
+                        scale.first > 0.0,
+                        scale.second > 0.0);
+                    rows = plan.rows;
+                    cols = plan.cols;
+                    pointCount = static_cast<int>(plan.sampleWaypoints.size());
+
+                    const bool horizontal = effectiveRectanglePrimaryAxis() == ScanConfig::RectanglePrimaryAxis::Horizontal;
+                    const double lineLengthMm = horizontal ? plan.effectiveWidthMm : plan.effectiveHeightMm;
+                    pointsPerLine = horizontal ? cols : rows;
+                    lineCount = horizontal ? rows : cols;
+                    lineDurationSeconds = speedMmPerS > 0.0
+                        ? (lineLengthMm + 2.0 * kContinuousRunUpMm) / speedMmPerS
+                        : 0.0;
+                    totalDurationSeconds = lineDurationSeconds * static_cast<double>(lineCount);
+                } catch (...) {
+                    rows = cols = pointCount = pointsPerLine = lineCount = 0;
+                    lineDurationSeconds = 0.0;
+                    totalDurationSeconds = 0.0;
+                }
+            } else {
+                const ContinuousRasterPlan plan = buildContinuousLinearPlan(startMm, endMm, samplePitchMm);
+                rows = plan.rows;
+                cols = plan.cols;
+                pointCount = static_cast<int>(plan.sampleWaypoints.size());
+                pointsPerLine = pointCount;
+                lineCount = 1;
+                lineDurationSeconds = speedMmPerS > 0.0
+                    ? (plan.effectiveWidthMm + 2.0 * kContinuousRunUpMm) / speedMmPerS
+                    : 0.0;
+                totalDurationSeconds = lineDurationSeconds;
+            }
+        }
+
+        estimateGridLabel->setText(QString("%1 x %2").arg(cols).arg(rows));
+        estimatePointsLabel->setText(QString("%1 (%2/ligne)")
+            .arg(std::max(0, pointCount))
+            .arg(std::max(0, pointsPerLine)));
+        estimateLineDurationLabel->setText(formatMeasurementDuration(lineDurationSeconds));
+        estimateTotalDurationLabel->setText(formatMeasurementDuration(totalDurationSeconds));
+    };
+
+    connect(ppBtn, &QRadioButton::toggled, this, [updateScanEstimate](bool) { updateScanEstimate(); });
+    connect(cntBtn, &QRadioButton::toggled, this, [updateScanEstimate](bool) { updateScanEstimate(); });
+    connect(stepSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [updateScanEstimate](double) { updateScanEstimate(); });
+    connect(dwellSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [updateScanEstimate](double) { updateScanEstimate(); });
+    connect(dwellSamplesSpin, qOverload<int>(&QSpinBox::valueChanged), this, [updateScanEstimate](int) { updateScanEstimate(); });
+    connect(speedSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [updateScanEstimate](double) { updateScanEstimate(); });
+    connect(rowStepSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [updateScanEstimate](double) { updateScanEstimate(); });
+    connect(distBtn, &QRadioButton::toggled, this, [updateScanEstimate](bool) { updateScanEstimate(); });
+    connect(timeBtn, &QRadioButton::toggled, this, [updateScanEstimate](bool) { updateScanEstimate(); });
+    connect(distSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [updateScanEstimate](double) { updateScanEstimate(); });
+    connect(timeSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [updateScanEstimate](double) { updateScanEstimate(); });
+    updateScanEstimate();
 
     // ── Buttons ──────────────────────────────────────────────────────────────
     auto* btnBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);

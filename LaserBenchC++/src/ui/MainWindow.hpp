@@ -412,6 +412,7 @@ private:
     QComboBox* cameraSerialCombo_ {nullptr};
     QComboBox* objectiveCombo_ {nullptr};
     QLineEdit* jogStepEdit_ {nullptr};
+    QLineEdit* jogMoveStepEdit_ {nullptr};
     QLineEdit* absXEdit_ {nullptr};
     QLineEdit* absYEdit_ {nullptr};
     QLineEdit* gotoCorrXpEdit_ {nullptr};
@@ -428,6 +429,7 @@ private:
     QLabel* xPositionValueLabel_ {nullptr};
     QLabel* yPositionValueLabel_ {nullptr};
     QLabel* laserPointLabel_ {nullptr};
+    QLabel* laserMetricDiameterLabel_ {nullptr};
     QLabel* gotoStatusLabel_ {nullptr};
     QLabel* cameraZoomLabel_ {nullptr};
     CameraPreviewWidget* cameraPreviewWidget_ {nullptr};
@@ -444,6 +446,7 @@ private:
     std::vector<double> potentiostatPlotCurrents_;
     std::vector<double> potentiostatPlotEwe_;
     QStringList lastMeasurementHeaderLines_;
+    QStringList lastReportSetupLines_;
     QStringList lastReportMovementLines_;
     QImage lastValidatedZoneImage_;
     std::vector<std::optional<double>> potentiostatMatrix_;

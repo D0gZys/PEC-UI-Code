@@ -58,12 +58,18 @@ void CameraPreviewWidget::clearLaserOverlay()
     update();
 }
 
-void CameraPreviewWidget::setSequenceOverlay(const QPointF& startPointPx, bool hasStartPoint, const QPointF& endPointPx, bool hasEndPoint)
+void CameraPreviewWidget::setSequenceOverlay(
+    const QPointF& startPointPx,
+    bool hasStartPoint,
+    const QPointF& endPointPx,
+    bool hasEndPoint,
+    const QString& sizeText)
 {
     if (sequenceStartVisible_ == hasStartPoint
         && sequenceEndVisible_ == hasEndPoint
         && sequenceStartPointPx_ == startPointPx
-        && sequenceEndPointPx_ == endPointPx) {
+        && sequenceEndPointPx_ == endPointPx
+        && sequenceSizeText_ == sizeText) {
         return;
     }
 
@@ -71,6 +77,7 @@ void CameraPreviewWidget::setSequenceOverlay(const QPointF& startPointPx, bool h
     sequenceEndPointPx_ = endPointPx;
     sequenceStartVisible_ = hasStartPoint;
     sequenceEndVisible_ = hasEndPoint;
+    sequenceSizeText_ = sizeText;
     update();
 }
 
@@ -82,6 +89,7 @@ void CameraPreviewWidget::clearSequenceOverlay()
 
     sequenceStartVisible_ = false;
     sequenceEndVisible_ = false;
+    sequenceSizeText_.clear();
     update();
 }
 
@@ -376,6 +384,41 @@ void CameraPreviewWidget::paintEvent(QPaintEvent* event)
             painter.setPen(sequenceFillPen);
             painter.drawEllipse(startPoint, 4.0, 4.0);
             painter.drawEllipse(endPoint, 4.0, 4.0);
+
+            if (!sequenceSizeText_.isEmpty()) {
+                QFont labelFont;
+                labelFont.setPointSize(10);
+                labelFont.setBold(true);
+                painter.setFont(labelFont);
+                const QFontMetricsF fm(labelFont);
+                const QRectF textRect = fm.boundingRect(
+                    QRectF(0, 0, 220, 80),
+                    Qt::AlignLeft | Qt::TextWordWrap,
+                    sequenceSizeText_);
+                const double padH = 8.0;
+                const double padV = 5.0;
+                const double bw = textRect.width() + padH * 2.0;
+                const double bh = textRect.height() + padV * 2.0;
+
+                double left = sequenceRect.right() + 8.0;
+                if (left + bw > width() - 4.0) {
+                    left = sequenceRect.left() - bw - 8.0;
+                }
+                left = std::clamp(left, 4.0, std::max(4.0, static_cast<double>(width()) - bw - 4.0));
+                const double top = std::clamp(
+                    sequenceRect.top(),
+                    4.0,
+                    std::max(4.0, static_cast<double>(height()) - bh - 4.0));
+                const QRectF bg(left, top, bw, bh);
+
+                painter.setBrush(QColor(0, 0, 0, 170));
+                painter.setPen(Qt::NoPen);
+                painter.drawRoundedRect(bg, 4.0, 4.0);
+                painter.setPen(QColor(0, 255, 128));
+                painter.drawText(bg.adjusted(padH, padV, -padH, -padV),
+                                 Qt::AlignLeft | Qt::AlignVCenter,
+                                 sequenceSizeText_);
+            }
         }
     }
 

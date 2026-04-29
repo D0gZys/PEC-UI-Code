@@ -26,7 +26,8 @@ public:
     void setFrame(const QImage& frame);
     void setLaserOverlay(const QPointF& pointPx, int radiusPx, bool visible = true);
     void clearLaserOverlay();
-    void setSequenceOverlay(const QPointF& startPointPx, bool hasStartPoint, const QPointF& endPointPx, bool hasEndPoint);
+    void setSequenceOverlay(const QPointF& startPointPx, bool hasStartPoint, const QPointF& endPointPx, bool hasEndPoint,
+                            const QString& sizeText = {});
     void clearSequenceOverlay();
     void setWaypointOverlay(std::vector<QPointF> donePx, std::vector<QPointF> remainingPx);
     void clearWaypointOverlay();
@@ -86,6 +87,7 @@ private:
     QPointF sequenceEndPointPx_;
     bool sequenceStartVisible_ {false};
     bool sequenceEndVisible_ {false};
+    QString sequenceSizeText_;
     std::vector<QPointF> waypointsDonePx_;
     std::vector<QPointF> waypointsRemainingPx_;
     bool waypointOverlayVisible_ {false};
