@@ -62,6 +62,7 @@ public:
         enum class ContinuousTrigger { Distance, Time };
         enum class RectangleStartCorner { TopLeft, TopRight, BottomLeft, BottomRight };
         enum class RectanglePrimaryAxis { Horizontal, Vertical };
+        enum class RectangleTraversalMode { ZigZag, OneWay };
 
         AcquisitionMode   mode             {AcquisitionMode::PointByPoint};
         // Point par point
@@ -76,7 +77,14 @@ public:
         double            rowStepMm        {0.05};
         RectangleStartCorner rectangleStartCorner {RectangleStartCorner::TopLeft};
         RectanglePrimaryAxis rectanglePrimaryAxis {RectanglePrimaryAxis::Horizontal};
+        RectangleTraversalMode rectangleTraversalMode {RectangleTraversalMode::ZigZag};
         bool              rectangleTraversalExplicit {false};
+    };
+
+    struct RectangleTraversalChoice {
+        ScanConfig::RectangleStartCorner startCorner {ScanConfig::RectangleStartCorner::TopLeft};
+        ScanConfig::RectanglePrimaryAxis primaryAxis {ScanConfig::RectanglePrimaryAxis::Horizontal};
+        ScanConfig::RectangleTraversalMode traversalMode {ScanConfig::RectangleTraversalMode::ZigZag};
     };
 
 public:
@@ -155,6 +163,7 @@ private:
     void onConnectPotentiostat();
     void onStartCaPotentiostat();
     void onStopCaPotentiostat();
+    void onCalibrateDarkCurrent();
     void onExportPotentiostat();
     void onImportCsv();
     void onDisconnectPotentiostat();
@@ -379,6 +388,7 @@ private:
     QLabel*      potentiostatStatusLabel_      {nullptr};
     QPushButton* potentiostatRunButton_        {nullptr};
     QPushButton* potentiostatStopButton_       {nullptr};
+    QPushButton* potentiostatDarkCalibrateButton_ {nullptr};
     QPushButton* potentiostatExportButton_     {nullptr};
     QGroupBox*   potentiostatGraphBox_         {nullptr};
     QGroupBox*   potentiostatMapBox_           {nullptr};
@@ -459,6 +469,7 @@ private:
     double potentiostatMeasurementDurationS_ {0.0};
     std::optional<std::chrono::steady_clock::time_point> potentiostatMeasurementStartTime_;
     std::vector<std::pair<int, int>> potentiostatScanOrder_;
+    std::optional<double> darkCurrentA_;
     int potentiostatRows_ {0};
     int potentiostatCols_ {0};
     int potentiostatSampleCount_ {0};
@@ -544,9 +555,10 @@ private:
     void onCapturePosition();
     void showScanConfigDialog();
     [[nodiscard]] bool editScanConfigDialog(bool captureZoneSnapshotOnAccept = false);
-    [[nodiscard]] std::optional<std::pair<ScanConfig::RectangleStartCorner, ScanConfig::RectanglePrimaryAxis>> promptRectangleTraversalSelection();
+    [[nodiscard]] std::optional<RectangleTraversalChoice> promptRectangleTraversalSelection();
     [[nodiscard]] ScanConfig::RectangleStartCorner effectiveRectangleStartCorner() const;
     [[nodiscard]] ScanConfig::RectanglePrimaryAxis effectiveRectanglePrimaryAxis() const;
+    [[nodiscard]] ScanConfig::RectangleTraversalMode effectiveRectangleTraversalMode() const;
     [[nodiscard]] std::vector<std::pair<int, int>> buildRectangleTraversalOrder(int rows, int cols) const;
     [[nodiscard]] QString selectedPotentiostatTechniqueLabel() const;
 

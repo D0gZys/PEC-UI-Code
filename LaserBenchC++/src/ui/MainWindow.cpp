@@ -28,7 +28,6 @@
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
-#include <QInputDialog>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineF>
@@ -92,8 +91,14 @@ constexpr double kScanPlanningEpsilonMm = 1e-9;
 constexpr double kContinuousPollingPeriodS = 0.002;
 constexpr double kContinuousGuaranteedSamplePeriodS = 0.02;
 constexpr double kContinuousFreshValueTimeoutS = 0.25;
-constexpr double kContinuousRunUpMm = 0.04;
+constexpr double kContinuousMaxRunUpMm = 0.04;
+constexpr double kContinuousRunUpStepMultiplier = 5.0;
+constexpr double kContinuousOneWayReturnSpeedMmPerS = 1.0;
+constexpr double kMinimumScanStepMm = 0.0001; // 100 nm
 constexpr double kPointByPointPerPointOverheadS = 0.82;
+constexpr double kDarkCurrentCalibrationDurationS = 60.0;
+constexpr double kDarkCurrentCalibrationRecordDtS = 1.0;
+constexpr double kCaSimpleUntilStopDurationS = 86400.0;
 
 QGroupBox* createGroupBox(const QString& title)
 {
@@ -135,6 +140,7 @@ QPushButton* createActionButton(const QString& text)
 
 using RectangleStartCorner = MainWindow::ScanConfig::RectangleStartCorner;
 using RectanglePrimaryAxis = MainWindow::ScanConfig::RectanglePrimaryAxis;
+using RectangleTraversalMode = MainWindow::ScanConfig::RectangleTraversalMode;
 
 QString rectangleStartCornerLabel(RectangleStartCorner corner)
 {
@@ -162,6 +168,18 @@ QString rectanglePrimaryAxisLabel(RectanglePrimaryAxis axis)
     }
 
     return "Axe inconnu";
+}
+
+QString rectangleTraversalModeLabel(RectangleTraversalMode mode)
+{
+    switch (mode) {
+    case RectangleTraversalMode::ZigZag:
+        return "Zig-zag";
+    case RectangleTraversalMode::OneWay:
+        return "One-way";
+    }
+
+    return "Parcours inconnu";
 }
 
 bool rectangleStartCornerStartsTop(RectangleStartCorner corner)
@@ -198,6 +216,7 @@ struct RectangleTraversalSelection
 {
     RectangleStartCorner startCorner {RectangleStartCorner::TopLeft};
     RectanglePrimaryAxis primaryAxis {RectanglePrimaryAxis::Horizontal};
+    RectangleTraversalMode traversalMode {RectangleTraversalMode::ZigZag};
 };
 
 struct GridTraversalEntry
@@ -210,7 +229,8 @@ std::vector<GridTraversalEntry> buildRectangleTraversalEntries(
     int rows,
     int cols,
     RectangleStartCorner startCorner,
-    RectanglePrimaryAxis primaryAxis)
+    RectanglePrimaryAxis primaryAxis,
+    RectangleTraversalMode traversalMode)
 {
     std::vector<GridTraversalEntry> order;
     if (rows <= 0 || cols <= 0) {
@@ -219,12 +239,13 @@ std::vector<GridTraversalEntry> buildRectangleTraversalEntries(
 
     const bool startsTop = rectangleStartCornerStartsTop(startCorner);
     const bool startsLeft = rectangleStartCornerStartsLeft(startCorner);
+    const bool oneWay = traversalMode == RectangleTraversalMode::OneWay;
 
     order.reserve(static_cast<std::size_t>(rows * cols));
     if (primaryAxis == RectanglePrimaryAxis::Horizontal) {
         for (int rowOffset = 0; rowOffset < rows; ++rowOffset) {
             const int visualRow = startsTop ? rowOffset : (rows - 1 - rowOffset);
-            const bool leftToRight = (rowOffset % 2) == 0 ? startsLeft : !startsLeft;
+            const bool leftToRight = oneWay ? startsLeft : ((rowOffset % 2) == 0 ? startsLeft : !startsLeft);
             if (leftToRight) {
                 for (int col = 0; col < cols; ++col) {
                     order.push_back({visualRow, col});
@@ -240,7 +261,7 @@ std::vector<GridTraversalEntry> buildRectangleTraversalEntries(
 
     for (int colOffset = 0; colOffset < cols; ++colOffset) {
         const int visualCol = startsLeft ? colOffset : (cols - 1 - colOffset);
-        const bool topToBottom = (colOffset % 2) == 0 ? startsTop : !startsTop;
+        const bool topToBottom = oneWay ? startsTop : ((colOffset % 2) == 0 ? startsTop : !startsTop);
         if (topToBottom) {
             for (int row = 0; row < rows; ++row) {
                 order.push_back({row, visualCol});
@@ -274,6 +295,12 @@ public:
     RectangleTraversalSelection selection() const
     {
         return selection_;
+    }
+
+    void setTraversalMode(RectangleTraversalMode traversalMode)
+    {
+        selection_.traversalMode = traversalMode;
+        update();
     }
 
 protected:
@@ -311,7 +338,7 @@ protected:
         const QPointF pos = event->position();
         for (const PreviewOption& option : options_) {
             if (option.hitRect.contains(pos)) {
-                selection_ = {option.startCorner, option.primaryAxis};
+                selection_ = {option.startCorner, option.primaryAxis, selection_.traversalMode};
                 update();
                 event->accept();
                 return;
@@ -424,7 +451,8 @@ private:
             kPreviewRows,
             kPreviewCols,
             selection_.startCorner,
-            selection_.primaryAxis);
+            selection_.primaryAxis,
+            selection_.traversalMode);
         if (traversal.empty()) {
             return;
         }
@@ -446,11 +474,46 @@ private:
             painter.drawLine(QPointF(x, zoneRect.top()), QPointF(x, zoneRect.bottom()));
         }
 
-        painter.setPen(QPen(QColor("#1f6feb"), 3.0));
-        for (int i = 1; i < static_cast<int>(traversal.size()); ++i) {
-            const QPointF p0 = pointForCell(traversal[static_cast<std::size_t>(i - 1)].row, traversal[static_cast<std::size_t>(i - 1)].col);
-            const QPointF p1 = pointForCell(traversal[static_cast<std::size_t>(i)].row, traversal[static_cast<std::size_t>(i)].col);
-            painter.drawLine(p0, p1);
+        const QColor pathColor("#1f6feb");
+        painter.setPen(QPen(pathColor, 4.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        painter.setBrush(pathColor);
+
+        auto drawSweepLine = [&painter, pathColor](const QPointF& start, const QPointF& end) {
+            const QPointF delta = end - start;
+            const double length = std::hypot(delta.x(), delta.y());
+            if (length <= 0.1) {
+                painter.drawEllipse(start, 5.0, 5.0);
+                return;
+            }
+
+            const QPointF unit(delta.x() / length, delta.y() / length);
+            const QPointF normal(-unit.y(), unit.x());
+            const QPointF arrowBase = end - unit * 14.0;
+
+            painter.setPen(QPen(pathColor, 4.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            painter.drawLine(start, arrowBase + unit * 2.0);
+
+            QPolygonF arrowHead;
+            arrowHead << end
+                      << (arrowBase + normal * 8.0)
+                      << (arrowBase - normal * 8.0);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(pathColor);
+            painter.drawPolygon(arrowHead);
+        };
+
+        const int samplesPerSweep = selection_.primaryAxis == RectanglePrimaryAxis::Horizontal
+            ? kPreviewCols
+            : kPreviewRows;
+        for (int offset = 0; offset < static_cast<int>(traversal.size()); offset += samplesPerSweep) {
+            const int lineEndOffset = std::min(
+                offset + samplesPerSweep - 1,
+                static_cast<int>(traversal.size()) - 1);
+            const GridTraversalEntry& startCell = traversal[static_cast<std::size_t>(offset)];
+            const GridTraversalEntry& endCell = traversal[static_cast<std::size_t>(lineEndOffset)];
+            drawSweepLine(
+                pointForCell(startCell.row, startCell.col),
+                pointForCell(endCell.row, endCell.col));
         }
 
         const QPointF startPoint = pointForCell(traversal.front().row, traversal.front().col);
@@ -752,6 +815,7 @@ struct ContinuousRasterPlan
     bool rectangleMode {false};
     double samplePitchMm {0.0};
     double rowStepMm {0.0};
+    double runUpMm {0.0};
     double originalWidthMm {0.0};
     double originalHeightMm {0.0};
     double effectiveWidthMm {0.0};
@@ -775,6 +839,14 @@ int intervalCountForSpan(double spanMm, double stepMm)
     return std::max(1, static_cast<int>(std::ceil((spanMm - kScanPlanningEpsilonMm) / stepMm)));
 }
 
+double continuousRunUpMarginMm(double samplePitchMm)
+{
+    if (samplePitchMm <= 0.0) {
+        return 0.0;
+    }
+    return std::min(kContinuousMaxRunUpMm, kContinuousRunUpStepMultiplier * samplePitchMm);
+}
+
 std::vector<double> buildInclusiveAxis(double startMm, double stepMm, int intervals)
 {
     std::vector<double> values;
@@ -792,6 +864,7 @@ ContinuousRasterPlan buildContinuousRectanglePlan(
     double rowStepMm,
     RectangleStartCorner startCorner,
     RectanglePrimaryAxis primaryAxis,
+    RectangleTraversalMode traversalMode,
     bool visualLeftToRightIsIncreasingX,
     bool visualTopToBottomIsIncreasingY)
 {
@@ -799,6 +872,7 @@ ContinuousRasterPlan buildContinuousRectanglePlan(
     plan.rectangleMode = true;
     plan.samplePitchMm = samplePitchMm;
     plan.rowStepMm = rowStepMm;
+    plan.runUpMm = continuousRunUpMarginMm(samplePitchMm);
     plan.xMinMm = std::min(startMm.x(), endMm.x());
     plan.yMinMm = std::min(startMm.y(), endMm.y());
     plan.originalWidthMm = std::abs(endMm.x() - startMm.x());
@@ -819,6 +893,7 @@ ContinuousRasterPlan buildContinuousRectanglePlan(
     plan.linePlans.reserve(static_cast<std::size_t>(primaryHorizontal ? plan.rows : plan.cols));
     plan.sampleWaypoints.reserve(static_cast<std::size_t>(plan.rows * plan.cols));
     plan.order.reserve(static_cast<std::size_t>(plan.rows * plan.cols));
+    const bool oneWay = traversalMode == RectangleTraversalMode::OneWay;
 
     std::vector<double> xAxisVisual;
     xAxisVisual.reserve(static_cast<std::size_t>(plan.cols));
@@ -846,7 +921,7 @@ ContinuousRasterPlan buildContinuousRectanglePlan(
 
         for (int rowOffset = 0; rowOffset < plan.rows; ++rowOffset) {
             const int visualRow = startsTop ? rowOffset : (plan.rows - 1 - rowOffset);
-            const bool leftToRight = (rowOffset % 2) == 0 ? startsLeft : !startsLeft;
+            const bool leftToRight = oneWay ? startsLeft : ((rowOffset % 2) == 0 ? startsLeft : !startsLeft);
             ContinuousRasterRow rowPlan;
             rowPlan.primaryAxisHorizontal = true;
             const double rowYmm = yAxisVisual[static_cast<std::size_t>(visualRow)];
@@ -890,7 +965,7 @@ ContinuousRasterPlan buildContinuousRectanglePlan(
 
     for (int colOffset = 0; colOffset < plan.cols; ++colOffset) {
         const int visualCol = startsLeft ? colOffset : (plan.cols - 1 - colOffset);
-        const bool topToBottom = (colOffset % 2) == 0 ? startsTop : !startsTop;
+        const bool topToBottom = oneWay ? startsTop : ((colOffset % 2) == 0 ? startsTop : !startsTop);
         ContinuousRasterRow rowPlan;
         rowPlan.primaryAxisHorizontal = false;
         const double colXmm = xAxisVisual[static_cast<std::size_t>(visualCol)];
@@ -936,6 +1011,7 @@ ContinuousRasterPlan buildContinuousLinearPlan(const QPointF& startMm, const QPo
     plan.rectangleMode = false;
     plan.samplePitchMm = samplePitchMm;
     plan.rowStepMm = 0.0;
+    plan.runUpMm = continuousRunUpMarginMm(samplePitchMm);
     const double dx = endMm.x() - startMm.x();
     const double dy = endMm.y() - startMm.y();
     const double distanceMm = std::hypot(dx, dy);
@@ -998,6 +1074,20 @@ ContinuousRasterPlan buildContinuousLinearPlan(const QPointF& startMm, const QPo
     }
 
     return plan;
+}
+
+double continuousRepositionDistanceMm(const ContinuousRasterPlan& plan)
+{
+    double distanceMm = 0.0;
+    for (int i = 1; i < static_cast<int>(plan.linePlans.size()); ++i) {
+        const ContinuousRasterRow& previous = plan.linePlans[static_cast<std::size_t>(i - 1)];
+        const ContinuousRasterRow& next = plan.linePlans[static_cast<std::size_t>(i)];
+        const QPointF previousExtendedEnd = previous.endPointMm + plan.runUpMm * previous.unitDirection;
+        const QPointF nextExtendedStart = next.startPointMm - plan.runUpMm * next.unitDirection;
+        const QPointF delta = nextExtendedStart - previousExtendedEnd;
+        distanceMm += std::hypot(delta.x(), delta.y());
+    }
+    return distanceMm;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3829,6 +3919,11 @@ MainWindow::ScanConfig::RectanglePrimaryAxis MainWindow::effectiveRectanglePrima
     return legacyRectanglePrimaryAxis();
 }
 
+MainWindow::ScanConfig::RectangleTraversalMode MainWindow::effectiveRectangleTraversalMode() const
+{
+    return scanConfig_.rectangleTraversalMode;
+}
+
 std::vector<std::pair<int, int>> MainWindow::buildRectangleTraversalOrder(int rows, int cols) const
 {
     std::vector<std::pair<int, int>> order;
@@ -3836,7 +3931,8 @@ std::vector<std::pair<int, int>> MainWindow::buildRectangleTraversalOrder(int ro
              rows,
              cols,
              effectiveRectangleStartCorner(),
-             effectiveRectanglePrimaryAxis())) {
+             effectiveRectanglePrimaryAxis(),
+             effectiveRectangleTraversalMode())) {
         order.emplace_back(entry.row, entry.col);
     }
     return order;
@@ -4944,11 +5040,26 @@ QWidget* MainWindow::buildMeasureTab()
     potentiostatStopButton_->setToolTip("Arreter l'acquisition");
     potentiostatStopButton_->setEnabled(false);
 
+    potentiostatDarkCalibrateButton_ = new QPushButton("Dark");
+    potentiostatDarkCalibrateButton_->setMinimumWidth(52);
+    potentiostatDarkCalibrateButton_->setMaximumHeight(28);
+    potentiostatDarkCalibrateButton_->setStyleSheet(
+        "QPushButton { min-height:28px; max-height:28px; border-radius:14px;"
+        "              border:1px solid #c0c0c0; background:#f0f0f0; padding:0 10px;"
+        "              font-size:8pt; font-weight:600; }"
+        "QPushButton:hover  { background:#dde8f8; border-color:#1f6feb; }"
+        "QPushButton:pressed{ background:#c8d8f0; }"
+        "QPushButton:disabled{ background:#f0f2f5; color:#9aa4b2; }");
+    potentiostatDarkCalibrateButton_->setToolTip("Mesurer le dark current (CA 0 V, noir complet, 60 s)");
+    potentiostatDarkCalibrateButton_->setEnabled(false);
+
     connect(potentiostatRunButton_,  &QPushButton::clicked, this, &MainWindow::onStartCaPotentiostat);
     connect(potentiostatStopButton_, &QPushButton::clicked, this, &MainWindow::onStopCaPotentiostat);
+    connect(potentiostatDarkCalibrateButton_, &QPushButton::clicked, this, &MainWindow::onCalibrateDarkCurrent);
 
     topLayout->addWidget(potentiostatRunButton_);
     topLayout->addWidget(potentiostatStopButton_);
+    topLayout->addWidget(potentiostatDarkCalibrateButton_);
     topLayout->addWidget(makeSep());
 
     // ── Status / current ─────────────────────────────────────────────────
@@ -5735,8 +5846,11 @@ void MainWindow::refreshSummaries()
         const auto potState = potentiostatController_->state();
         const bool potOk = (potState == core::DeviceState::Connected || potState == core::DeviceState::Simulated);
         const QString potColor = potOk ? QLatin1String("#1a7f37") : QLatin1String("#c82020");
-        const QString potHtml = QString("<span style='font-weight:600; color:%1;'>Potentiostat</span>").arg(potColor)
+        QString potHtml = QString("<span style='font-weight:600; color:%1;'>Potentiostat</span>").arg(potColor)
             + (potOk ? QString("&nbsp;&nbsp;") + potentiostatController_->channelSummary() : QString());
+        if (darkCurrentA_.has_value()) {
+            potHtml += QString("&nbsp;&nbsp;|&nbsp;&nbsp;Dark current: %1").arg(formatReportCurrent(*darkCurrentA_));
+        }
 
         if (cameraSummaryLabel_ != nullptr && cameraSummaryLabel_->text() != cameraHtml)
             cameraSummaryLabel_->setText(cameraHtml);
@@ -6711,6 +6825,7 @@ void MainWindow::onConnectPotentiostat()
     if (potentiostatConnectButton_    != nullptr) potentiostatConnectButton_->setEnabled(false);
     if (potentiostatFirmwareButton_   != nullptr) potentiostatFirmwareButton_->setEnabled(false);
     if (potentiostatDisconnectButton_ != nullptr) potentiostatDisconnectButton_->setEnabled(false);
+    if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(false);
     if (potentiostatStatusLabel_      != nullptr) potentiostatStatusLabel_->setText("Connexion...");
 
     const QString dllPath = potentiostatDllPathEdit_  != nullptr ? potentiostatDllPathEdit_->text()  : QString();
@@ -6731,6 +6846,7 @@ void MainWindow::onConnectPotentiostat()
             if (potentiostatMeasureStateLabel_ != nullptr) { potentiostatMeasureStateLabel_->setText(ok ? QString("Etat : %1").arg(msg) : "Etat : non connecte"); potentiostatMeasureStateLabel_->setStyleSheet(style); }
             if (potentiostatRunButton_        != nullptr) potentiostatRunButton_->setEnabled(ok);
             if (potentiostatStopButton_       != nullptr) potentiostatStopButton_->setEnabled(false);
+            if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(ok);
             if (potentiostatConnectButton_    != nullptr) potentiostatConnectButton_->setEnabled(!ok);
             if (potentiostatFirmwareButton_   != nullptr) potentiostatFirmwareButton_->setEnabled(ok);
             if (potentiostatDisconnectButton_ != nullptr) potentiostatDisconnectButton_->setEnabled(ok);
@@ -6747,6 +6863,7 @@ void MainWindow::onDisconnectPotentiostat()
     if (potentiostatConnectButton_    != nullptr) potentiostatConnectButton_->setEnabled(false);
     if (potentiostatFirmwareButton_   != nullptr) potentiostatFirmwareButton_->setEnabled(false);
     if (potentiostatDisconnectButton_ != nullptr) potentiostatDisconnectButton_->setEnabled(false);
+    if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(false);
 
     auto ctrl = potentiostatController_;
     if (potentiostatThread_.joinable()) {
@@ -6761,6 +6878,7 @@ void MainWindow::onDisconnectPotentiostat()
             if (potentiostatMeasureStateLabel_ != nullptr) { potentiostatMeasureStateLabel_->setText("Etat : non connecte"); potentiostatMeasureStateLabel_->setStyleSheet(kStyleOff); }
             if (potentiostatRunButton_         != nullptr) potentiostatRunButton_->setEnabled(false);
             if (potentiostatStopButton_        != nullptr) potentiostatStopButton_->setEnabled(false);
+            if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(false);
             if (potentiostatConnectButton_     != nullptr) potentiostatConnectButton_->setEnabled(true);
             if (potentiostatFirmwareButton_    != nullptr) potentiostatFirmwareButton_->setEnabled(false);
             if (potentiostatDisconnectButton_  != nullptr) potentiostatDisconnectButton_->setEnabled(false);
@@ -6775,6 +6893,7 @@ void MainWindow::onLoadFirmware()
     }
     potentiostatBusy_.store(true);
     if (potentiostatFirmwareButton_   != nullptr) potentiostatFirmwareButton_->setEnabled(false);
+    if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(false);
     if (potentiostatStatusLabel_      != nullptr) potentiostatStatusLabel_->setText("Chargement firmware...");
 
     const int channel = potentiostatChannelCombo_ != nullptr ? potentiostatChannelCombo_->currentIndex() + 1 : 1;
@@ -6799,7 +6918,191 @@ void MainWindow::onLoadFirmware()
             if (potentiostatFirmwareButton_ != nullptr) {
                 potentiostatFirmwareButton_->setEnabled(stillOk);
             }
+            if (potentiostatDarkCalibrateButton_ != nullptr) {
+                potentiostatDarkCalibrateButton_->setEnabled(stillOk);
+            }
         }, Qt::QueuedConnection);
+    });
+}
+
+void MainWindow::onCalibrateDarkCurrent()
+{
+    if (potentiostatController_ == nullptr || !potentiostatController_->isConnected()) {
+        QMessageBox::warning(this, "Dark current", "Connecter d'abord le potentiostat.");
+        return;
+    }
+    if (potentiostatBusy_.load() || sequenceRunning_) {
+        QMessageBox::information(this, "Dark current", "Une acquisition est deja en cours.");
+        return;
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle("Calibration dark current");
+    dlg.setMinimumWidth(420);
+    auto* layout = new QVBoxLayout(&dlg);
+    auto* message = new QLabel(
+        "Eteindre toutes les lumieres et couper le laser.\n\n"
+        "La calibration va lancer une CA a Ewe = 0 V pendant 60 s, puis calculer la moyenne du courant mesure.");
+    message->setWordWrap(true);
+    layout->addWidget(message);
+
+    auto* btnBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    btnBox->button(QDialogButtonBox::Ok)->setText("Start");
+    btnBox->button(QDialogButtonBox::Cancel)->setText("Annuler");
+    connect(btnBox, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(btnBox, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    layout->addWidget(btnBox);
+
+    if (dlg.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    hardware::CaParams params;
+    params.channel = potentiostatChannelCombo_ != nullptr ? potentiostatChannelCombo_->currentIndex() + 1 : 1;
+    params.voltage = 0.0;
+    params.duration = kDarkCurrentCalibrationDurationS;
+    params.recordDt = kDarkCurrentCalibrationRecordDtS;
+    params.vsInit = false;
+    params.eRange = potentiostatErangeCombo_ != nullptr ? potentiostatErangeCombo_->currentIndex() : 0;
+    params.iRange = potentiostatCurrentRangeCombo_ != nullptr ? potentiostatCurrentRangeCombo_->currentIndex() : 12;
+    params.bandwidth = potentiostatBandwidthCombo_ != nullptr ? potentiostatBandwidthCombo_->currentText().toInt() : 8;
+    params.nCycles = 0;
+
+    auto ctrl = potentiostatController_;
+    if (potentiostatThread_.joinable()) {
+        potentiostatThread_.join();
+    }
+
+    potentiostatBusy_.store(true);
+    potentiostatStopRequested_.store(false);
+    if (potentiostatRunButton_ != nullptr) potentiostatRunButton_->setEnabled(false);
+    if (potentiostatStopButton_ != nullptr) potentiostatStopButton_->setEnabled(true);
+    if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(false);
+    if (potentiostatExportButton_ != nullptr) potentiostatExportButton_->setEnabled(false);
+    if (potentiostatMeasureStateLabel_ != nullptr) potentiostatMeasureStateLabel_->setText("Calibration dark current...");
+    if (potentiostatProgressLabel_ != nullptr) potentiostatProgressLabel_->setText("Dark current");
+    if (potentiostatCurrentLabel_ != nullptr) potentiostatCurrentLabel_->setText("---  A");
+    if (potentiostatPointCountLabel_ != nullptr) potentiostatPointCountLabel_->setText("0");
+    if (potentiostatDurationLabel_ != nullptr) potentiostatDurationLabel_->setText(formatMeasurementDuration(0.0));
+    statusBar()->showMessage("Calibration dark current en cours...");
+    appendLog("Calibration dark current : CA 0 V pendant 60 s.");
+
+    potentiostatThread_ = std::thread([this, ctrl, params]() {
+        using namespace std::chrono_literals;
+
+        const int channel = params.channel;
+        bool channelStarted = false;
+        bool userStopped = false;
+        std::vector<double> currents;
+        currents.reserve(static_cast<std::size_t>(kDarkCurrentCalibrationDurationS / kDarkCurrentCalibrationRecordDtS) + 4);
+
+        try {
+            if (!ctrl->startCa(params)) {
+                throw std::runtime_error(QString("Demarrage CA dark current impossible : %1").arg(ctrl->lastError()).toStdString());
+            }
+            channelStarted = true;
+            appendLog(ctrl->lastStartDetails());
+
+            double lastElapsed = -std::numeric_limits<double>::infinity();
+            const auto startedAt = std::chrono::steady_clock::now();
+            while (!potentiostatStopRequested_.load()) {
+                const auto now = std::chrono::steady_clock::now();
+                const double wallElapsedS = std::chrono::duration<double>(now - startedAt).count();
+                if (wallElapsedS >= kDarkCurrentCalibrationDurationS + 0.5) {
+                    break;
+                }
+
+                const auto cv = ctrl->getCurrentValues(channel);
+                if (cv.ok && cv.elapsedTime > lastElapsed + kScanPlanningEpsilonMm) {
+                    lastElapsed = cv.elapsedTime;
+                    currents.push_back(cv.I);
+                    const int sampleCount = static_cast<int>(currents.size());
+                    QMetaObject::invokeMethod(this, [this, sampleCount, cv, wallElapsedS]() {
+                        if (potentiostatCurrentLabel_ != nullptr) {
+                            potentiostatCurrentLabel_->setText(formatReportCurrent(cv.I));
+                        }
+                        if (potentiostatPointCountLabel_ != nullptr) {
+                            potentiostatPointCountLabel_->setText(QString::number(sampleCount));
+                        }
+                        if (potentiostatDurationLabel_ != nullptr) {
+                            potentiostatDurationLabel_->setText(formatMeasurementDuration(wallElapsedS));
+                        }
+                        if (potentiostatProgressLabel_ != nullptr) {
+                            potentiostatProgressLabel_->setText(QString("Dark %1 / 60 s").arg(qMin(60, static_cast<int>(std::lround(wallElapsedS)))));
+                        }
+                    }, Qt::QueuedConnection);
+
+                    if (cv.stopped && wallElapsedS > 1.0) {
+                        break;
+                    }
+                }
+
+                std::this_thread::sleep_for(200ms);
+            }
+
+            userStopped = potentiostatStopRequested_.load();
+            if (channelStarted) {
+                try { ctrl->stopChannel(channel); } catch (...) {}
+            }
+
+            if (userStopped) {
+                QMetaObject::invokeMethod(this, [this]() {
+                    potentiostatBusy_.store(false);
+                    potentiostatStopRequested_.store(false);
+                    if (potentiostatRunButton_ != nullptr) potentiostatRunButton_->setEnabled(true);
+                    if (potentiostatStopButton_ != nullptr) potentiostatStopButton_->setEnabled(false);
+                    if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(true);
+                    if (potentiostatMeasureStateLabel_ != nullptr) potentiostatMeasureStateLabel_->setText("Calibration dark current arretee.");
+                    if (potentiostatProgressLabel_ != nullptr) potentiostatProgressLabel_->setText("Arrete");
+                    statusBar()->showMessage("Calibration dark current arretee.", 5000);
+                    appendLog("Calibration dark current arretee par l'utilisateur.");
+                }, Qt::QueuedConnection);
+                return;
+            }
+
+            if (currents.empty()) {
+                throw std::runtime_error("Aucun point de courant recu pendant la calibration dark current.");
+            }
+
+            const double sum = std::accumulate(currents.begin(), currents.end(), 0.0);
+            const double mean = sum / static_cast<double>(currents.size());
+            const int sampleCount = static_cast<int>(currents.size());
+
+            QMetaObject::invokeMethod(this, [this, mean, sampleCount]() {
+                darkCurrentA_ = mean;
+                potentiostatBusy_.store(false);
+                potentiostatStopRequested_.store(false);
+                if (potentiostatRunButton_ != nullptr) potentiostatRunButton_->setEnabled(true);
+                if (potentiostatStopButton_ != nullptr) potentiostatStopButton_->setEnabled(false);
+                if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(true);
+                if (potentiostatMeasureStateLabel_ != nullptr) potentiostatMeasureStateLabel_->setText("Dark current calibre.");
+                if (potentiostatProgressLabel_ != nullptr) potentiostatProgressLabel_->setText("Dark OK");
+                if (potentiostatCurrentLabel_ != nullptr) potentiostatCurrentLabel_->setText(formatReportCurrent(mean));
+                if (potentiostatPointCountLabel_ != nullptr) potentiostatPointCountLabel_->setText(QString::number(sampleCount));
+                statusBar()->showMessage(QString("Dark current = %1").arg(formatReportCurrent(mean)), 8000);
+                appendLog(QString("Calibration dark current terminee : moyenne=%1 | echantillons=%2")
+                    .arg(formatReportCurrent(mean))
+                    .arg(sampleCount));
+                refreshSummaries();
+            }, Qt::QueuedConnection);
+        } catch (const std::exception& ex) {
+            if (channelStarted) {
+                try { ctrl->stopChannel(channel); } catch (...) {}
+            }
+            const QString error = QString::fromUtf8(ex.what());
+            QMetaObject::invokeMethod(this, [this, error]() {
+                potentiostatBusy_.store(false);
+                potentiostatStopRequested_.store(false);
+                if (potentiostatRunButton_ != nullptr) potentiostatRunButton_->setEnabled(true);
+                if (potentiostatStopButton_ != nullptr) potentiostatStopButton_->setEnabled(false);
+                if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(true);
+                if (potentiostatMeasureStateLabel_ != nullptr) potentiostatMeasureStateLabel_->setText("Erreur dark current.");
+                if (potentiostatProgressLabel_ != nullptr) potentiostatProgressLabel_->setText("Erreur");
+                statusBar()->showMessage("Erreur calibration dark current.", 8000);
+                appendLog("Erreur calibration dark current : " + error);
+                QMessageBox::warning(this, "Dark current", error);
+            }, Qt::QueuedConnection);
+        }
     });
 }
 
@@ -6807,22 +7110,20 @@ void MainWindow::onStartCaPotentiostat()
 {
     const PotentiostatTechnique technique = selectedPotentiostatTechnique();
     const QString techniqueLabel = selectedPotentiostatTechniqueLabel();
-    const bool hasScanZone = sequenceStartMotorMm_.has_value() && sequenceEndMotorMm_.has_value();
+    const bool zoneDefined = sequenceStartMotorMm_.has_value() && sequenceEndMotorMm_.has_value();
+    const bool techniqueForcesSimpleMeasurement =
+        technique == PotentiostatTechnique::OCV || technique == PotentiostatTechnique::CVA;
 
     if (potentiostatController_ == nullptr || !potentiostatController_->isConnected()) {
         QMessageBox::warning(this, techniqueLabel, "Connecter d'abord le potentiostat.");
-        return;
-    }
-    if (hasScanZone && motorController_ == nullptr) {
-        QMessageBox::warning(this, techniqueLabel, "Connecter d'abord les moteurs.");
         return;
     }
     if (potentiostatBusy_.load() || sequenceRunning_) {
         return;
     }
 
-    bool simpleMeasurement = !hasScanZone;
-    if (simpleMeasurement) {
+    bool simpleMeasurement = !zoneDefined || techniqueForcesSimpleMeasurement;
+    if (simpleMeasurement && !zoneDefined && !techniqueForcesSimpleMeasurement) {
         const auto reply = QMessageBox::question(
             this,
             techniqueLabel,
@@ -6835,7 +7136,7 @@ void MainWindow::onStartCaPotentiostat()
         }
     }
 
-    if (hasScanZone) {
+    if (zoneDefined && !techniqueForcesSimpleMeasurement) {
         const QPointF currentStartMm = *sequenceStartMotorMm_;
         const QPointF currentEndMm = *sequenceEndMotorMm_;
         const double zoneWidthMm = std::abs(currentEndMm.x() - currentStartMm.x());
@@ -6851,7 +7152,8 @@ void MainWindow::onStartCaPotentiostat()
                     "Arrivee : X=%3  Y=%4 mm\n"
                     "Taille : %5 x %6 mm\n\n"
                     "Modifier ouvre les parametres de balayage.\n"
-                    "Lancer sans modifier reutilise exactement cette zone avec les parametres actuels.")
+                    "Lancer sans modifier reutilise exactement cette zone avec les parametres actuels.\n"
+                    "Mesure simple ignore la zone et ne deplace pas les moteurs.")
                 .arg(currentStartMm.x(), 0, 'f', 4)
                 .arg(currentStartMm.y(), 0, 'f', 4)
                 .arg(currentEndMm.x(), 0, 'f', 4)
@@ -6860,6 +7162,7 @@ void MainWindow::onStartCaPotentiostat()
                 .arg(zoneHeightMm, 0, 'f', 4));
         auto* modifyButton = launchPrompt.addButton("Modifier", QMessageBox::YesRole);
         auto* launchButton = launchPrompt.addButton("Lancer sans modifier", QMessageBox::NoRole);
+        auto* simpleButton = launchPrompt.addButton("Mesure simple", QMessageBox::ActionRole);
         auto* cancelButton = launchPrompt.addButton(QMessageBox::Cancel);
         cancelButton->setText("Annuler");
         launchPrompt.setDefaultButton(launchButton);
@@ -6868,11 +7171,24 @@ void MainWindow::onStartCaPotentiostat()
         if (launchPrompt.clickedButton() == cancelButton) {
             return;
         }
+        if (launchPrompt.clickedButton() == simpleButton) {
+            simpleMeasurement = true;
+        }
         if (launchPrompt.clickedButton() == modifyButton && !editScanConfigDialog()) {
             return;
         }
     }
 
+    if (zoneDefined && simpleMeasurement) {
+        appendLog(QString("%1 simple : zone ignoree, aucun deplacement moteur.").arg(techniqueLabel));
+    }
+
+    if (zoneDefined && !simpleMeasurement && motorController_ == nullptr) {
+        QMessageBox::warning(this, techniqueLabel, "Connecter d'abord les moteurs.");
+        return;
+    }
+
+    const bool hasScanZone = zoneDefined && !simpleMeasurement;
     const QPointF startMm = hasScanZone ? *sequenceStartMotorMm_ : QPointF();
     const QPointF endMm   = hasScanZone ? *sequenceEndMotorMm_ : QPointF();
     const QString mode = sequenceModeCombo_ != nullptr ? sequenceModeCombo_->currentText() : QString("Lineaire");
@@ -6880,10 +7196,11 @@ void MainWindow::onStartCaPotentiostat()
     const ScanConfig cfg = scanConfig_;
     const ScanConfig::RectangleStartCorner rectangleStartCorner = effectiveRectangleStartCorner();
     const ScanConfig::RectanglePrimaryAxis rectanglePrimaryAxis = effectiveRectanglePrimaryAxis();
+    const ScanConfig::RectangleTraversalMode rectangleTraversalMode = effectiveRectangleTraversalMode();
 
     double stepMm = 0.0;
     double durationS = 0.0;
-    double caSimpleDurationS = 60.0;
+    double caSimpleDurationS = kCaSimpleUntilStopDurationS;
     double simpleMeasurementSamplePeriodS = 1.0;
     double continuousSamplePitchMm = 0.0;
     double continuousRowStepMm = 0.0;
@@ -6947,8 +7264,8 @@ void MainWindow::onStartCaPotentiostat()
                     techniqueLabel,
                     QString("Vitesse trop elevee pour garantir un echantillonnage tous les %1 mm.\n"
                             "Vitesse maximale recommandee : %2 mm/s.")
-                        .arg(cfg.triggerDistanceMm, 0, 'f', 3)
-                        .arg(recommendedMaxSpeed, 0, 'f', 3));
+                        .arg(cfg.triggerDistanceMm, 0, 'f', 4)
+                        .arg(recommendedMaxSpeed, 0, 'f', 4));
                 return;
             }
             continuousSamplePitchMm = cfg.triggerDistanceMm;
@@ -6977,7 +7294,7 @@ void MainWindow::onStartCaPotentiostat()
         if (rectangleMode) {
             continuousRowStepMm = cfg.rowStepMm;
             if (continuousRowStepMm <= 0.0) {
-                QMessageBox::warning(this, techniqueLabel, "Le saut de ligne doit etre strictement positif en mode continu.");
+                QMessageBox::warning(this, techniqueLabel, "Le saut ligne/colonne doit etre strictement positif en mode continu.");
                 return;
             }
             const auto scale = currentGotoScale();
@@ -6988,6 +7305,7 @@ void MainWindow::onStartCaPotentiostat()
                 continuousRowStepMm,
                 rectangleStartCorner,
                 rectanglePrimaryAxis,
+                rectangleTraversalMode,
                 scale.first > 0.0,
                 scale.second > 0.0);
         } else {
@@ -7009,22 +7327,6 @@ void MainWindow::onStartCaPotentiostat()
     if (!simpleMeasurement && waypoints.empty()) {
         QMessageBox::warning(this, techniqueLabel, "Aucun point de balayage (depart == arrivee ?).");
         return;
-    }
-
-    if (simpleMeasurement && technique == PotentiostatTechnique::CA) {
-        bool durationOk = false;
-        caSimpleDurationS = QInputDialog::getDouble(
-            this,
-            techniqueLabel,
-            "Duree de la mesure simple CA (s)",
-            60.0,
-            0.1,
-            86400.0,
-            1,
-            &durationOk);
-        if (!durationOk) {
-            return;
-        }
     }
 
     double stageSpeedMmPerS = 1.0;
@@ -7057,24 +7359,33 @@ void MainWindow::onStartCaPotentiostat()
         } else {
             double totalLineTimeS = 0.0;
             for (const ContinuousRasterRow& rowPlan : continuousPlan.linePlans) {
-                const double extendedLengthMm = rowPlan.lengthMm + 2.0 * kContinuousRunUpMm;
+                const double extendedLengthMm = rowPlan.lengthMm + 2.0 * continuousPlan.runUpMm;
                 totalLineTimeS += (cfg.scanSpeedMmPerS > 0.0) ? (extendedLengthMm / cfg.scanSpeedMmPerS) : 0.0;
             }
-            const double transitionDistanceMm = (rectangleMode && rows > 1) ? continuousRowStepMm : 0.0;
-            const double repoExtraMm = 2.0 * kContinuousRunUpMm; // extendedEnd → next extendedStart
             const int nSweepLines = static_cast<int>(continuousPlan.linePlans.size());
-            const double transitionTimeS = (nSweepLines > 1 && stageSpeedMmPerS > 0.0)
-                ? ((transitionDistanceMm + repoExtraMm) / stageSpeedMmPerS + 1.0)
+            const double transitionDistanceMm = continuousRepositionDistanceMm(continuousPlan);
+            const double transitionSpeedMmPerS =
+                (rectangleMode && cfg.rectangleTraversalMode == ScanConfig::RectangleTraversalMode::OneWay)
+                    ? kContinuousOneWayReturnSpeedMmPerS
+                    : stageSpeedMmPerS;
+            const double transitionTimeS = (nSweepLines > 1 && transitionSpeedMmPerS > 0.0)
+                ? (transitionDistanceMm / transitionSpeedMmPerS + static_cast<double>(nSweepLines - 1))
                 : 0.0;
-            params.duration = totalLineTimeS + std::max(0, nSweepLines - 1) * transitionTimeS + 15.0;
+            params.duration = totalLineTimeS + transitionTimeS + 15.0;
         }
         if (!simpleMeasurement) {
             params.recordDt = std::max(60.0, params.duration);
         }
-        techniqueLogSummary = QString("tension=%1 V, duree=%2 s, record_dt=%3 s")
-            .arg(params.voltage, 0, 'f', 3)
-            .arg(params.duration, 0, 'f', 1)
-            .arg(params.recordDt, 0, 'f', 1);
+        if (simpleMeasurement) {
+            techniqueLogSummary = QString("tension=%1 V, duree=jusqu'a Stop, record_dt=%2 s")
+                .arg(params.voltage, 0, 'f', 3)
+                .arg(params.recordDt, 0, 'f', 1);
+        } else {
+            techniqueLogSummary = QString("tension=%1 V, duree=%2 s, record_dt=%3 s")
+                .arg(params.voltage, 0, 'f', 3)
+                .arg(params.duration, 0, 'f', 1)
+                .arg(params.recordDt, 0, 'f', 1);
+        }
         techniqueParams = params;
     } else if (technique == PotentiostatTechnique::OCV) {
         bool restOk = false;
@@ -7280,6 +7591,7 @@ void MainWindow::onStartCaPotentiostat()
     }
     if (potentiostatRunButton_   != nullptr) potentiostatRunButton_->setEnabled(false);
     if (potentiostatStopButton_  != nullptr) potentiostatStopButton_->setEnabled(true);
+    if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(false);
     if (potentiostatExportButton_ != nullptr) potentiostatExportButton_->setEnabled(false);
     if (potentiostatCurrentLabel_   != nullptr) potentiostatCurrentLabel_->setText("...");
     if (potentiostatMeasureStateLabel_ != nullptr) potentiostatMeasureStateLabel_->setText("Lancement...");
@@ -7305,9 +7617,13 @@ void MainWindow::onStartCaPotentiostat()
     }
 
     if (simpleMeasurement) {
-        appendLog(QString("%1 simple : sans zone, sans deplacement moteur | echantillonnage UI=%2 s")
+        QString simpleLogLine = QString("%1 simple : sans zone, sans deplacement moteur | echantillonnage UI=%2 s")
             .arg(techniqueLabel)
-            .arg(simpleMeasurementSamplePeriodS, 0, 'f', 3));
+            .arg(simpleMeasurementSamplePeriodS, 0, 'f', 3);
+        if (technique == PotentiostatTechnique::CA) {
+            simpleLogLine += " | arret=Stop";
+        }
+        appendLog(simpleLogLine);
         appendLog(QString("[POTDBG] start simple=%1 technique=%2 potStop=%3 seqStop=%4 busy=%5")
             .arg(simpleMeasurement ? "oui" : "non")
             .arg(techniqueLabel)
@@ -7320,14 +7636,14 @@ void MainWindow::onStartCaPotentiostat()
             .arg(nPoints)
             .arg(durationS, 0, 'f', 2));
     } else {
-        appendLog(QString("%1 continu : %2 pts (%3 x %4) | pas acquisition=%5 mm | vitesse=%6 mm/s | pas inter-ligne=%7 mm")
+        appendLog(QString("%1 continu : %2 pts (%3 x %4) | pas acquisition=%5 mm | vitesse=%6 mm/s | pas transversal=%7 mm")
             .arg(techniqueLabel)
             .arg(nPoints)
             .arg(cols)
             .arg(rows)
-            .arg(continuousSamplePitchMm, 0, 'f', 3)
+            .arg(continuousSamplePitchMm, 0, 'f', 4)
             .arg(cfg.scanSpeedMmPerS, 0, 'f', 3)
-            .arg(rectangleMode ? continuousRowStepMm : 0.0, 0, 'f', 3));
+            .arg(rectangleMode ? continuousRowStepMm : 0.0, 0, 'f', 4));
         if (rectangleMode) {
             appendLog(QString("Zone continue effective : X [%1, %2] mm (origine=%3 mm, effective=%4 mm) | Y [%5, %6] mm (origine=%7 mm, effective=%8 mm)")
                 .arg(continuousPlan.xMinMm, 0, 'f', 4)
@@ -7345,9 +7661,10 @@ void MainWindow::onStartCaPotentiostat()
         }
     }
     if (rectangleMode) {
-        appendLog(QString("Balayage rectangle : depart=%1 | axe principal=%2")
+        appendLog(QString("Balayage rectangle : depart=%1 | axe principal=%2 | parcours=%3")
             .arg(rectangleStartCornerLabel(rectangleStartCorner))
-            .arg(rectanglePrimaryAxisLabel(rectanglePrimaryAxis)));
+            .arg(rectanglePrimaryAxisLabel(rectanglePrimaryAxis))
+            .arg(rectangleTraversalModeLabel(rectangleTraversalMode)));
     }
     appendLog(QString("Parametres %1 : %2").arg(techniqueLabel).arg(techniqueLogSummary));
 
@@ -7417,13 +7734,18 @@ void MainWindow::onStartCaPotentiostat()
     }
 
     if (rectangleMode) {
-        measurementHeaderLines << QString("Parcours rectangle: depart=%1 | axe principal=%2")
+        measurementHeaderLines << QString("Parcours rectangle: depart=%1 | axe principal=%2 | parcours=%3")
             .arg(rectangleStartCornerLabel(rectangleStartCorner))
-            .arg(rectanglePrimaryAxisLabel(rectanglePrimaryAxis));
+            .arg(rectanglePrimaryAxisLabel(rectanglePrimaryAxis))
+            .arg(rectangleTraversalModeLabel(rectangleTraversalMode));
     }
 
     if (simpleMeasurement) {
-        measurementHeaderLines << QString("Acquisition simple: periode UI=%1 s").arg(simpleMeasurementSamplePeriodS, 0, 'f', 3);
+        QString simpleLine = QString("Acquisition simple: periode UI=%1 s").arg(simpleMeasurementSamplePeriodS, 0, 'f', 3);
+        if (technique == PotentiostatTechnique::CA) {
+            simpleLine += " | arret manuel par Stop";
+        }
+        measurementHeaderLines << simpleLine;
     } else if (cfg.mode == ScanConfig::AcquisitionMode::PointByPoint) {
         measurementHeaderLines << QString("Balayage pas a pas: pas=%1 mm | dwell=%2 s | mesures_par_point=%3 | vitesse reposition=%4 mm/s")
             .arg(stepMm, 0, 'f', 4)
@@ -7441,26 +7763,32 @@ void MainWindow::onStartCaPotentiostat()
             triggerLine += QString(" | pas trigger=%1 s").arg(cfg.triggerTimeS, 0, 'f', 4);
         }
         if (rectangleMode) {
-            triggerLine += QString(" | saut inter-ligne=%1 mm").arg(continuousRowStepMm, 0, 'f', 4);
+            triggerLine += QString(" | saut transversal=%1 mm").arg(continuousRowStepMm, 0, 'f', 4);
+            if (rectangleTraversalMode == ScanConfig::RectangleTraversalMode::OneWay) {
+                triggerLine += QString(" | retour_ligne=%1 mm/s").arg(kContinuousOneWayReturnSpeedMmPerS, 0, 'f', 3);
+            }
             measurementHeaderLines << QString("Zone continue effective: largeur=%1 mm (origine=%2) | hauteur=%3 mm (origine=%4) | marge_acceleration=%5 mm")
                 .arg(continuousPlan.effectiveWidthMm, 0, 'f', 4)
                 .arg(continuousPlan.originalWidthMm, 0, 'f', 4)
                 .arg(continuousPlan.effectiveHeightMm, 0, 'f', 4)
                 .arg(continuousPlan.originalHeightMm, 0, 'f', 4)
-                .arg(kContinuousRunUpMm, 0, 'f', 4);
+                .arg(continuousPlan.runUpMm, 0, 'f', 4);
         } else {
             measurementHeaderLines << QString("Ligne continue effective: longueur=%1 mm (origine=%2) | marge_acceleration=%3 mm")
                 .arg(continuousPlan.effectiveWidthMm, 0, 'f', 4)
                 .arg(continuousPlan.originalWidthMm, 0, 'f', 4)
-                .arg(kContinuousRunUpMm, 0, 'f', 4);
+                .arg(continuousPlan.runUpMm, 0, 'f', 4);
         }
         measurementHeaderLines << triggerLine;
     }
 
     if (const auto* caParams = std::get_if<hardware::CaParams>(&techniqueParams)) {
-        measurementHeaderLines << QString("Params CA: U=%1 V | duree=%2 s | record_dt=%3 s | vs_init=%4 | e_range=%5 | i_range=%6 | bandwidth=%7 | cycles=%8")
+        const QString caDurationText = simpleMeasurement
+            ? QString("jusqu'a Stop")
+            : QString("%1 s").arg(caParams->duration, 0, 'f', 4);
+        measurementHeaderLines << QString("Params CA: U=%1 V | duree=%2 | record_dt=%3 s | vs_init=%4 | e_range=%5 | i_range=%6 | bandwidth=%7 | cycles=%8")
             .arg(caParams->voltage, 0, 'f', 4)
-            .arg(caParams->duration, 0, 'f', 4)
+            .arg(caDurationText)
             .arg(caParams->recordDt, 0, 'f', 4)
             .arg(yesNoText(caParams->vsInit))
             .arg(caParams->eRange)
@@ -7511,16 +7839,17 @@ void MainWindow::onStartCaPotentiostat()
             }
             reportMovementLines
                 << "Mode de deplacement: continu"
-                << QString("Parametres: vitesse=%1 mm/s | acquisition=%2 | saut ligne=%3 um")
+                << QString("Parametres: vitesse=%1 mm/s | acquisition=%2 | saut transversal=%3 um")
                     .arg(cfg.scanSpeedMmPerS, 0, 'f', 3)
                     .arg(acquisitionText)
                     .arg(continuousRowStepMm * 1000.0, 0, 'f', 1);
         }
 
         reportMovementLines << (rectangleMode
-            ? QString("Parcours: depart=%1 | axe=%2")
+            ? QString("Parcours: depart=%1 | axe=%2 | type=%3")
                 .arg(rectangleStartCornerLabel(rectangleStartCorner))
                 .arg(rectanglePrimaryAxisLabel(rectanglePrimaryAxis))
+                .arg(rectangleTraversalModeLabel(rectangleTraversalMode))
             : QString("Parcours: ligne"));
     }
     lastReportMovementLines_ = reportMovementLines;
@@ -7545,6 +7874,7 @@ void MainWindow::onStartCaPotentiostat()
                 potentiostatBusy_.store(false);
                 if (potentiostatRunButton_   != nullptr) potentiostatRunButton_->setEnabled(true);
                 if (potentiostatStopButton_  != nullptr) potentiostatStopButton_->setEnabled(false);
+                if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(true);
                 if (potentiostatExportButton_ != nullptr)
                     potentiostatExportButton_->setEnabled(potentiostatSampleCount_ > 0);
                 if (potentiostatMeasureStateLabel_ != nullptr) potentiostatMeasureStateLabel_->setText(stateMsg);
@@ -7569,7 +7899,7 @@ void MainWindow::onStartCaPotentiostat()
                 // For continuous mode, go directly to the extended start (before first sample)
                 if (cfg.mode == ScanConfig::AcquisitionMode::Continuous && !continuousPlan.linePlans.empty()) {
                     const auto& firstRow = continuousPlan.linePlans.front();
-                    firstPt = firstRow.startPointMm - kContinuousRunUpMm * firstRow.unitDirection;
+                    firstPt = firstRow.startPointMm - continuousPlan.runUpMm * firstRow.unitDirection;
                 }
                 QMetaObject::invokeMethod(this, [this]() {
                     if (potentiostatMeasureStateLabel_ != nullptr)
@@ -7708,6 +8038,23 @@ void MainWindow::onStartCaPotentiostat()
                 int lastLoggedCurrentState = std::numeric_limits<int>::min();
                 QString stopReason = "natural_completion";
 
+                auto appendSimplePoint = [&](const hardware::PotDataPoint& point) {
+                    const int idx = sampleIdx++;
+                    acquiredSampleCount = sampleIdx;
+                    appendMeasurementLogEvent("ACQ", QString("simple | t_abs=%1 | acq=%2 | t_pot=%3 s | moteur=(%4) | Ewe=%5 V | I=%6 A")
+                        .arg(currentLogTimestampText())
+                        .arg(idx + 1)
+                        .arg(point.t, 0, 'f', 6)
+                        .arg(currentMotorPositionLogText(motorCtrl))
+                        .arg(point.ewe, 0, 'e', 3)
+                        .arg(point.I, 0, 'e', 3));
+                    QMetaObject::invokeMethod(this, [this, idx, point]() {
+                        currentWaypointIndex_ = idx + 1;
+                        appendPotentiostatVisualizationSample(
+                            idx, 0, -1, -1, QPointF(), point.t, point.ewe, point.I);
+                    }, Qt::QueuedConnection);
+                };
+
                 QMetaObject::invokeMethod(this, [this, techniqueLabel, effectiveSamplePeriodS, simplePollPeriodS, stopGracePeriodS]() {
                     appendLog(QString("[POTDBG] %1 simple loop: samplePeriod=%2 s pollPeriod=%3 s stopGrace=%4 s")
                         .arg(techniqueLabel)
@@ -7728,28 +8075,20 @@ void MainWindow::onStartCaPotentiostat()
                     }
 
                     bool acceptedSample = false;
+                    bool simpleStopped = data.stopped;
                     if (useWallClockSampling) {
-                        if (!data.points.empty()) {
-                            const double wallClockElapsedS = std::chrono::duration<double>(
-                                std::chrono::steady_clock::now() - simpleLoopStartedAt).count();
-                            if (wallClockElapsedS >= lastAcceptedSampleStamp + effectiveSamplePeriodS - kScanPlanningEpsilonMm) {
+                        const double wallClockElapsedS = std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - simpleLoopStartedAt).count();
+                        if (wallClockElapsedS >= lastAcceptedSampleStamp + effectiveSamplePeriodS - kScanPlanningEpsilonMm) {
+                            std::optional<hardware::PotDataPoint> pointToAppend;
+                            if (!data.points.empty()) {
+                                pointToAppend = data.points.back();
+                            }
+
+                            if (pointToAppend.has_value()) {
                                 lastAcceptedSampleStamp = wallClockElapsedS;
                                 acceptedSample = true;
-                                const auto point = data.points.back();
-                                const int idx = sampleIdx++;
-                                acquiredSampleCount = sampleIdx;
-                                appendMeasurementLogEvent("ACQ", QString("simple | t_abs=%1 | acq=%2 | t_pot=%3 s | moteur=(%4) | Ewe=%5 V | I=%6 A")
-                                    .arg(currentLogTimestampText())
-                                    .arg(idx + 1)
-                                    .arg(point.t, 0, 'f', 6)
-                                    .arg(currentMotorPositionLogText(motorCtrl))
-                                    .arg(point.ewe, 0, 'e', 3)
-                                    .arg(point.I, 0, 'e', 3));
-                                QMetaObject::invokeMethod(this, [this, idx, point]() {
-                                    currentWaypointIndex_ = idx + 1;
-                                    appendPotentiostatVisualizationSample(
-                                        idx, 0, -1, -1, QPointF(), point.t, point.ewe, point.I);
-                                }, Qt::QueuedConnection);
+                                appendSimplePoint(*pointToAppend);
                             }
                         }
                     } else {
@@ -7759,20 +8098,7 @@ void MainWindow::onStartCaPotentiostat()
                             }
                             lastAcceptedSampleStamp = point.t;
                             acceptedSample = true;
-                            const int idx = sampleIdx++;
-                            acquiredSampleCount = sampleIdx;
-                            appendMeasurementLogEvent("ACQ", QString("simple | t_abs=%1 | acq=%2 | t_pot=%3 s | moteur=(%4) | Ewe=%5 V | I=%6 A")
-                                .arg(currentLogTimestampText())
-                                .arg(idx + 1)
-                                .arg(point.t, 0, 'f', 6)
-                                .arg(currentMotorPositionLogText(motorCtrl))
-                                .arg(point.ewe, 0, 'e', 3)
-                                .arg(point.I, 0, 'e', 3));
-                            QMetaObject::invokeMethod(this, [this, idx, point]() {
-                                currentWaypointIndex_ = idx + 1;
-                                appendPotentiostatVisualizationSample(
-                                    idx, 0, -1, -1, QPointF(), point.t, point.ewe, point.I);
-                            }, Qt::QueuedConnection);
+                            appendSimplePoint(point);
                         }
                     }
 
@@ -7824,14 +8150,14 @@ void MainWindow::onStartCaPotentiostat()
                         lastLoggedCurrentState = data.currentState;
                     }
 
-                    if (!data.stopped) {
+                    if (!simpleStopped) {
                         sawInstrumentRunning = true;
                         lastSimpleProgress = std::chrono::steady_clock::now();
                     } else if (acceptedSample) {
                         lastSimpleProgress = std::chrono::steady_clock::now();
                     }
 
-                    if (data.stopped && sawInstrumentRunning) {
+                    if (simpleStopped && sawInstrumentRunning) {
                         const double stoppedForS = std::chrono::duration<double>(
                             std::chrono::steady_clock::now() - lastSimpleProgress).count();
                         instrumentStopped = stoppedForS >= stopGracePeriodS;
@@ -7891,10 +8217,22 @@ void MainWindow::onStartCaPotentiostat()
                     [&](int row, int col, const QPointF& plannedPoint, double timeoutS,
                         std::optional<QPointF> triggerMotorPos = std::nullopt) -> bool {
                     const auto maybeCv = waitForFreshValue(timeoutS);
-                    if (!maybeCv.has_value()) {
-                        return false;
+                    hardware::PotCurrentValues cv;
+                    bool staleValue = false;
+                    if (maybeCv.has_value()) {
+                        cv = *maybeCv;
+                    } else {
+                        cv = ctrl->getCurrentValues(channel);
+                        if (!cv.ok) {
+                            return false;
+                        }
+                        staleValue = true;
+                        appendMeasurementLogEvent("WARN", QString("Valeur non rafraichie avant timeout | row=%1 | col=%2 | timeout=%3 s | t_pot=%4 s")
+                            .arg(row + 1)
+                            .arg(col + 1)
+                            .arg(timeoutS, 0, 'f', 3)
+                            .arg(cv.elapsedTime, 0, 'f', 6));
                     }
-                    const hardware::PotCurrentValues cv = *maybeCv;
                     const int idx = globalSampleIdx++;
                     acquiredSampleCount = globalSampleIdx;
                     lastSampleElapsed = cv.elapsedTime;
@@ -7921,7 +8259,7 @@ void MainWindow::onStartCaPotentiostat()
                     }
 
                     appendLog(
-                        QString("[POTCONT] t_abs=%1 acq=%2 row=%3 col=%4 t_pot=%5 s cible=(%6,%7) mm moteur=(%8) Ewe=%9 V I=%10 A")
+                        QString("[POTCONT] t_abs=%1 acq=%2 row=%3 col=%4 t_pot=%5 s cible=(%6,%7) mm moteur=(%8) Ewe=%9 V I=%10 A stale=%11")
                             .arg(acquisitionTimestamp)
                             .arg(idx + 1)
                             .arg(row + 1)
@@ -7931,8 +8269,9 @@ void MainWindow::onStartCaPotentiostat()
                             .arg(plannedPoint.y(), 0, 'f', 4)
                             .arg(actualMotorText)
                             .arg(cv.ewe, 0, 'e', 3)
-                            .arg(cv.I, 0, 'e', 3));
-                    appendMeasurementLogEvent("ACQ", QString("continu | t_abs=%1 | acq=%2 | row=%3 | col=%4 | t_pot=%5 s | cible=%6 | moteur=(%7) | Ewe=%8 V | I=%9 A")
+                            .arg(cv.I, 0, 'e', 3)
+                            .arg(staleValue ? "oui" : "non"));
+                    appendMeasurementLogEvent("ACQ", QString("continu | t_abs=%1 | acq=%2 | row=%3 | col=%4 | t_pot=%5 s | cible=%6 | moteur=(%7) | Ewe=%8 V | I=%9 A | stale=%10")
                         .arg(acquisitionTimestamp)
                         .arg(idx + 1)
                         .arg(row + 1)
@@ -7941,7 +8280,8 @@ void MainWindow::onStartCaPotentiostat()
                         .arg(formatPointMm(plannedPoint))
                         .arg(actualMotorText)
                         .arg(cv.ewe, 0, 'e', 3)
-                        .arg(cv.I, 0, 'e', 3));
+                        .arg(cv.I, 0, 'e', 3)
+                        .arg(staleValue ? "oui" : "non"));
 
                     QMetaObject::invokeMethod(this, [this, idx, totalEstimate, row, col, plannedPoint, cv]() {
                         currentWaypointIndex_ = idx + 1;
@@ -7970,7 +8310,7 @@ void MainWindow::onStartCaPotentiostat()
                     return true;
                 };
 
-                const double regularSampleTimeoutS = 0.05;
+                const double regularSampleTimeoutS = kContinuousFreshValueTimeoutS;
 
                 for (int lineIndex = 0; lineIndex < static_cast<int>(continuousPlan.linePlans.size()); ++lineIndex) {
                     const ContinuousRasterRow& rowPlan = continuousPlan.linePlans[static_cast<std::size_t>(lineIndex)];
@@ -7987,8 +8327,8 @@ void MainWindow::onStartCaPotentiostat()
                     const bool moveLineY = std::abs(rowEnd.y() - rowStart.y()) > 0.0005;
 
                     // ── Run-up / overrun margins for motor acceleration ──
-                    const QPointF extendedStart = rowStart - kContinuousRunUpMm * rowPlan.unitDirection;
-                    const QPointF extendedEnd   = rowEnd   + kContinuousRunUpMm * rowPlan.unitDirection;
+                    const QPointF extendedStart = rowStart - continuousPlan.runUpMm * rowPlan.unitDirection;
+                    const QPointF extendedEnd   = rowEnd   + continuousPlan.runUpMm * rowPlan.unitDirection;
 
                     appendMeasurementLogEvent("LINE", QString("ligne=%1/%2 | depart=%3 | arrivee=%4 | axe=%5 | longueur=%6 mm | longueur_mouvement=%7 mm | echantillons=%8 | marge=%9 mm")
                         .arg(lineIndex + 1)
@@ -7997,28 +8337,34 @@ void MainWindow::onStartCaPotentiostat()
                         .arg(formatPointMm(rowEnd))
                         .arg(rowPlan.primaryAxisHorizontal ? "horizontal" : "vertical")
                         .arg(rowPlan.lengthMm, 0, 'f', 4)
-                        .arg(rowPlan.lengthMm + 2.0 * kContinuousRunUpMm, 0, 'f', 4)
+                        .arg(rowPlan.lengthMm + 2.0 * continuousPlan.runUpMm, 0, 'f', 4)
                         .arg(static_cast<int>(rowPlan.samplePoints.size()))
-                        .arg(kContinuousRunUpMm, 0, 'f', 4));
+                        .arg(continuousPlan.runUpMm, 0, 'f', 4));
 
                     // ── Reposition to extended start (before first sample) ──
                     {
                         const QPointF repoTarget = (lineIndex == 0) ? extendedStart : extendedStart;
+                        const double repositionSpeedMmPerS =
+                            (lineIndex > 0
+                             && continuousPlan.rectangleMode
+                             && cfg.rectangleTraversalMode == ScanConfig::RectangleTraversalMode::OneWay)
+                                ? kContinuousOneWayReturnSpeedMmPerS
+                                : stageSpeedMmPerS;
                         appendMeasurementLogEvent("MOVE", QString("repositionnement_ligne_debut | ligne=%1/%2 | cible=%3 | moteur_avant=(%4) | vitesse=%5 mm/s")
                             .arg(lineIndex + 1)
                             .arg(static_cast<int>(continuousPlan.linePlans.size()))
                             .arg(formatPointMm(repoTarget))
                             .arg(currentMotorPositionLogText(motorCtrl))
-                            .arg(stageSpeedMmPerS, 0, 'f', 4));
+                            .arg(repositionSpeedMmPerS, 0, 'f', 4));
                         const auto both = motorCtrl->snapshotBoth();
                         if (both.x.positionValid && both.y.positionValid) {
                             startPredictedMotorMotion(
                                 both.x.positionMm, both.y.positionMm,
                                 repoTarget.x(), repoTarget.y(),
-                                stageSpeedMmPerS, stageSpeedMmPerS);
+                                repositionSpeedMmPerS, repositionSpeedMmPerS);
                         }
-                        motorCtrl->setVelocity(hardware::AxisId::X, stageSpeedMmPerS);
-                        motorCtrl->setVelocity(hardware::AxisId::Y, stageSpeedMmPerS);
+                        motorCtrl->setVelocity(hardware::AxisId::X, repositionSpeedMmPerS);
+                        motorCtrl->setVelocity(hardware::AxisId::Y, repositionSpeedMmPerS);
                         motorCtrl->moveAbsoluteNoWait(hardware::AxisId::X, repoTarget.x());
                         motorCtrl->moveAbsoluteNoWait(hardware::AxisId::Y, repoTarget.y());
                         motorCtrl->waitAxis(hardware::AxisId::X, kDefaultMotorTimeoutMs);
@@ -8079,7 +8425,8 @@ void MainWindow::onStartCaPotentiostat()
                     auto calibSnapTime = std::chrono::steady_clock::now();
                     QPointF calibSnapPos = extendedStart;
                     {
-                        constexpr double kMotionDetectThresholdMm = 0.001;  // 1 µm
+                        const double motionDetectThresholdMm =
+                            std::clamp(continuousPlan.samplePitchMm * 0.5, 0.00005, 0.001);
                         const auto deadline = calibSnapTime + std::chrono::seconds(3);
                         while (!potentiostatStopRequested_.load()
                                && !instrumentStopped
@@ -8092,7 +8439,7 @@ void MainWindow::onStartCaPotentiostat()
                                 const double travelled =
                                     delta.x() * rowPlan.unitDirection.x()
                                     + delta.y() * rowPlan.unitDirection.y();
-                                if (travelled > kMotionDetectThresholdMm) {
+                                if (travelled > motionDetectThresholdMm) {
                                     calibSnapTime = beforeSnap;
                                     calibSnapPos  = p;
                                     appendMeasurementLogEvent("SYNC",
@@ -8434,6 +8781,7 @@ void MainWindow::onStartCaPotentiostat()
                 currentWaypointIndex_ = simpleMeasurement ? potentiostatSampleCount_ : nPoints;
                 if (potentiostatRunButton_    != nullptr) potentiostatRunButton_->setEnabled(true);
                 if (potentiostatStopButton_   != nullptr) potentiostatStopButton_->setEnabled(false);
+                if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(true);
                 if (potentiostatExportButton_ != nullptr) {
                     potentiostatExportButton_->setEnabled(potentiostatSampleCount_ > 0);
                 }
@@ -9316,11 +9664,11 @@ void MainWindow::onStopCaPotentiostat()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-std::optional<std::pair<MainWindow::ScanConfig::RectangleStartCorner, MainWindow::ScanConfig::RectanglePrimaryAxis>>
+std::optional<MainWindow::RectangleTraversalChoice>
 MainWindow::promptRectangleTraversalSelection()
 {
     QDialog dlg(this);
-    dlg.setWindowTitle("Sens du balayage rectangle");
+    dlg.setWindowTitle("Parcours du balayage rectangle");
     dlg.setMinimumWidth(420);
 
     auto* layout = new QVBoxLayout(&dlg);
@@ -9328,13 +9676,34 @@ MainWindow::promptRectangleTraversalSelection()
     intro->setWordWrap(true);
     layout->addWidget(intro);
     auto* preview = new RectangleTraversalPreviewWidget;
-    preview->setSelection({effectiveRectangleStartCorner(), effectiveRectanglePrimaryAxis()});
+    preview->setSelection({effectiveRectangleStartCorner(), effectiveRectanglePrimaryAxis(), effectiveRectangleTraversalMode()});
     layout->addWidget(preview);
 
-    auto* hint = new QLabel("Fleches horizontales : balayage gauche-droite. Fleches verticales : balayage haut-bas.");
+    auto* traversalModeGroup = new QGroupBox("Type de parcours");
+    auto* traversalModeLayout = new QHBoxLayout(traversalModeGroup);
+    auto* zigZagBtn = new QRadioButton("Zig-zag");
+    auto* oneWayBtn = new QRadioButton("One-way");
+    zigZagBtn->setChecked(effectiveRectangleTraversalMode() == ScanConfig::RectangleTraversalMode::ZigZag);
+    oneWayBtn->setChecked(effectiveRectangleTraversalMode() == ScanConfig::RectangleTraversalMode::OneWay);
+    traversalModeLayout->addWidget(zigZagBtn);
+    traversalModeLayout->addWidget(oneWayBtn);
+    layout->addWidget(traversalModeGroup);
+
+    auto* hint = new QLabel("Zig-zag alterne le sens a chaque ligne. One-way garde le meme sens et revient au depart de la ligne suivante sans acquisition.");
     hint->setWordWrap(true);
     hint->setStyleSheet("color:#5c6570; font-size:9pt;");
     layout->addWidget(hint);
+
+    connect(zigZagBtn, &QRadioButton::toggled, this, [preview](bool checked) {
+        if (checked) {
+            preview->setTraversalMode(ScanConfig::RectangleTraversalMode::ZigZag);
+        }
+    });
+    connect(oneWayBtn, &QRadioButton::toggled, this, [preview](bool checked) {
+        if (checked) {
+            preview->setTraversalMode(ScanConfig::RectangleTraversalMode::OneWay);
+        }
+    });
 
     auto* btnBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
     connect(btnBox, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
@@ -9346,7 +9715,11 @@ MainWindow::promptRectangleTraversalSelection()
     }
 
     const RectangleTraversalSelection selection = preview->selection();
-    return std::make_pair(selection.startCorner, selection.primaryAxis);
+    return RectangleTraversalChoice {
+        selection.startCorner,
+        selection.primaryAxis,
+        selection.traversalMode
+    };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -9403,7 +9776,7 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
     estimateGrid->addWidget(new QLabel("Duree totale"), 6, 0);
     estimateGrid->addWidget(estimateTotalDurationLabel, 6, 1);
 
-    auto* estimateHint = new QLabel("Point par point : déplacement de ligne + (pause + marge commande/lecture) x points/ligne. Continu : longueur ligne + zones d'élan, divisé par vitesse. Total = ligne x nombre de lignes.");
+    auto* estimateHint = new QLabel("Point par point : deplacement de ligne + (pause + marge commande/lecture) x points/ligne. Continu : balayage des lignes + zones d'elan + repositionnements entre lignes.");
     estimateHint->setWordWrap(true);
     estimateHint->setStyleSheet("color:#5c6570; font-size:8pt;");
     estimateGrid->addWidget(estimateHint, 7, 0, 1, 2);
@@ -9430,7 +9803,7 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
     auto* ppGrid   = new QGridLayout(ppWidget);
     ppGrid->addWidget(new QLabel("Pas :"), 0, 0);
     auto* stepSpin = new QDoubleSpinBox;
-    stepSpin->setRange(0.001, 25.0); stepSpin->setDecimals(3); stepSpin->setSuffix(" mm");
+    stepSpin->setRange(kMinimumScanStepMm, 25.0); stepSpin->setDecimals(4); stepSpin->setSingleStep(kMinimumScanStepMm); stepSpin->setSuffix(" mm");
     stepSpin->setValue(scanConfig_.stepMm);
     ppGrid->addWidget(stepSpin, 0, 1);
     ppGrid->addWidget(new QLabel("Durée pause avant mesure :"), 1, 0);
@@ -9453,17 +9826,21 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
     speedSpin->setRange(0.001, 10.0); speedSpin->setDecimals(3); speedSpin->setSuffix(" mm/s");
     speedSpin->setValue(scanConfig_.scanSpeedMmPerS);
     cntGrid->addWidget(speedSpin, 0, 1);
-    cntGrid->addWidget(new QLabel("Saut de ligne :"), 1, 0);
+    cntGrid->addWidget(new QLabel("Saut ligne/colonne :"), 1, 0);
     auto* rowStepSpin = new QDoubleSpinBox;
-    rowStepSpin->setRange(0.001, 25.0); rowStepSpin->setDecimals(3); rowStepSpin->setSuffix(" mm");
+    rowStepSpin->setRange(kMinimumScanStepMm, 25.0); rowStepSpin->setDecimals(4); rowStepSpin->setSingleStep(kMinimumScanStepMm); rowStepSpin->setSuffix(" mm");
     const QString objNameForScan = objectiveCombo_ != nullptr
         ? objectiveCombo_->currentText().trimmed() : QString("4x");
     const double laserDiameterMm = laserRadiusPx_ * 2.0 * autoMmPerPxForObjective(objNameForScan);
     const double defaultRowStepMm = scanConfig_.rowStepMm > 0.0
         ? scanConfig_.rowStepMm
-        : std::max(0.001, laserDiameterMm);
+        : std::max(kMinimumScanStepMm, laserDiameterMm);
     rowStepSpin->setValue(defaultRowStepMm);
     cntGrid->addWidget(rowStepSpin, 1, 1);
+    auto* rowStepHint = new QLabel("Direction gauche/droite : ecart entre lignes. Direction haut/bas : ecart entre colonnes.");
+    rowStepHint->setWordWrap(true);
+    rowStepHint->setStyleSheet("color:#5c6570; font-size:8pt;");
+    cntGrid->addWidget(rowStepHint, 2, 0, 1, 2);
 
     auto* intGrp  = new QGroupBox("Intervalle d'acquisition");
     auto* intGrid = new QGridLayout(intGrp);
@@ -9472,14 +9849,14 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
     distBtn->setChecked(scanConfig_.trigger == ScanConfig::ContinuousTrigger::Distance);
     timeBtn->setChecked(scanConfig_.trigger == ScanConfig::ContinuousTrigger::Time);
     auto* distSpin = new QDoubleSpinBox;
-    distSpin->setRange(0.001, 25.0); distSpin->setDecimals(3); distSpin->setSuffix(" mm");
+    distSpin->setRange(kMinimumScanStepMm, 25.0); distSpin->setDecimals(4); distSpin->setSingleStep(kMinimumScanStepMm); distSpin->setSuffix(" mm");
     distSpin->setValue(scanConfig_.triggerDistanceMm);
     auto* timeSpin = new QDoubleSpinBox;
     timeSpin->setRange(0.01, 3600.0); timeSpin->setDecimals(2); timeSpin->setSuffix(" s");
     timeSpin->setValue(scanConfig_.triggerTimeS);
     intGrid->addWidget(distBtn, 0, 0); intGrid->addWidget(distSpin, 0, 1);
     intGrid->addWidget(timeBtn, 1, 0); intGrid->addWidget(timeSpin, 1, 1);
-    cntGrid->addWidget(intGrp, 2, 0, 1, 2);
+    cntGrid->addWidget(intGrp, 3, 0, 1, 2);
     stack->addWidget(cntWidget);  // index 1
 
     controlsLayout->addWidget(stack);
@@ -9580,6 +9957,7 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
                         rowStepSpin->value(),
                         effectiveRectangleStartCorner(),
                         effectiveRectanglePrimaryAxis(),
+                        effectiveRectangleTraversalMode(),
                         scale.first > 0.0,
                         scale.second > 0.0);
                     rows = plan.rows;
@@ -9591,9 +9969,19 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
                     pointsPerLine = horizontal ? cols : rows;
                     lineCount = horizontal ? rows : cols;
                     lineDurationSeconds = speedMmPerS > 0.0
-                        ? (lineLengthMm + 2.0 * kContinuousRunUpMm) / speedMmPerS
+                        ? (lineLengthMm + 2.0 * plan.runUpMm) / speedMmPerS
                         : 0.0;
-                    totalDurationSeconds = lineDurationSeconds * static_cast<double>(lineCount);
+                    double transitionDurationSeconds = 0.0;
+                    const double transitionSpeedMmPerS =
+                        effectiveRectangleTraversalMode() == ScanConfig::RectangleTraversalMode::OneWay
+                            ? kContinuousOneWayReturnSpeedMmPerS
+                            : stageSpeedMmPerS;
+                    if (speedOk && transitionSpeedMmPerS > 0.0) {
+                        transitionDurationSeconds = continuousRepositionDistanceMm(plan) / transitionSpeedMmPerS
+                            + static_cast<double>(std::max(0, lineCount - 1));
+                    }
+                    totalDurationSeconds = lineDurationSeconds * static_cast<double>(lineCount)
+                        + transitionDurationSeconds;
                 } catch (...) {
                     rows = cols = pointCount = pointsPerLine = lineCount = 0;
                     lineDurationSeconds = 0.0;
@@ -9607,7 +9995,7 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
                 pointsPerLine = pointCount;
                 lineCount = 1;
                 lineDurationSeconds = speedMmPerS > 0.0
-                    ? (plan.effectiveWidthMm + 2.0 * kContinuousRunUpMm) / speedMmPerS
+                    ? (plan.effectiveWidthMm + 2.0 * plan.runUpMm) / speedMmPerS
                     : 0.0;
                 totalDurationSeconds = lineDurationSeconds;
             }
@@ -9644,7 +10032,7 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
 
     const bool rectangleScan = sequenceModeCombo_ != nullptr
         && sequenceModeCombo_->currentText().trimmed() == "Rectangle";
-    std::optional<std::pair<ScanConfig::RectangleStartCorner, ScanConfig::RectanglePrimaryAxis>> selectedRectangleTraversal;
+    std::optional<RectangleTraversalChoice> selectedRectangleTraversal;
     if (rectangleScan) {
         selectedRectangleTraversal = promptRectangleTraversalSelection();
         if (!selectedRectangleTraversal.has_value()) {
@@ -9660,7 +10048,7 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
         if (sequenceStepMmEdit_)   sequenceStepMmEdit_->setText(QString::number(scanConfig_.stepMm, 'g', 4));
         if (sequenceDurationEdit_) sequenceDurationEdit_->setText(QString::number(scanConfig_.dwellS, 'g', 3));
         appendLog(QString("Balayage point par point : pas=%1 mm, dwell=%2 s, %3 mesure(s)/pt")
-            .arg(scanConfig_.stepMm, 0, 'f', 3).arg(scanConfig_.dwellS, 0, 'f', 2).arg(scanConfig_.dwellSamples));
+            .arg(scanConfig_.stepMm, 0, 'f', 4).arg(scanConfig_.dwellS, 0, 'f', 2).arg(scanConfig_.dwellSamples));
     } else {
         scanConfig_.mode              = ScanConfig::AcquisitionMode::Continuous;
         scanConfig_.scanSpeedMmPerS   = speedSpin->value();
@@ -9671,23 +10059,25 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
         scanConfig_.triggerTimeS      = timeSpin->value();
         scanConfig_.rowStepMm         = rowStepSpin->value();
         appendLog(distBtn->isChecked()
-            ? QString("Balayage continu : vitesse=%1 mm/s, acquisition toutes les %2 mm, saut de ligne=%3 mm")
+            ? QString("Balayage continu : vitesse=%1 mm/s, acquisition toutes les %2 mm, saut transversal=%3 mm")
                 .arg(scanConfig_.scanSpeedMmPerS, 0, 'f', 3)
-                .arg(scanConfig_.triggerDistanceMm, 0, 'f', 3)
-                .arg(scanConfig_.rowStepMm, 0, 'f', 3)
-            : QString("Balayage continu : vitesse=%1 mm/s, acquisition toutes les %2 s, saut de ligne=%3 mm")
+                .arg(scanConfig_.triggerDistanceMm, 0, 'f', 4)
+                .arg(scanConfig_.rowStepMm, 0, 'f', 4)
+            : QString("Balayage continu : vitesse=%1 mm/s, acquisition toutes les %2 s, saut transversal=%3 mm")
                 .arg(scanConfig_.scanSpeedMmPerS, 0, 'f', 3)
                 .arg(scanConfig_.triggerTimeS, 0, 'f', 2)
-                .arg(scanConfig_.rowStepMm, 0, 'f', 3));
+                .arg(scanConfig_.rowStepMm, 0, 'f', 4));
     }
 
     if (selectedRectangleTraversal.has_value()) {
-        scanConfig_.rectangleStartCorner = selectedRectangleTraversal->first;
-        scanConfig_.rectanglePrimaryAxis = selectedRectangleTraversal->second;
+        scanConfig_.rectangleStartCorner = selectedRectangleTraversal->startCorner;
+        scanConfig_.rectanglePrimaryAxis = selectedRectangleTraversal->primaryAxis;
+        scanConfig_.rectangleTraversalMode = selectedRectangleTraversal->traversalMode;
         scanConfig_.rectangleTraversalExplicit = true;
-        appendLog(QString("Balayage rectangle selectionne : depart=%1 | axe principal=%2")
-            .arg(rectangleStartCornerLabel(selectedRectangleTraversal->first))
-            .arg(rectanglePrimaryAxisLabel(selectedRectangleTraversal->second)));
+        appendLog(QString("Balayage rectangle selectionne : depart=%1 | axe principal=%2 | parcours=%3")
+            .arg(rectangleStartCornerLabel(selectedRectangleTraversal->startCorner))
+            .arg(rectanglePrimaryAxisLabel(selectedRectangleTraversal->primaryAxis))
+            .arg(rectangleTraversalModeLabel(selectedRectangleTraversal->traversalMode)));
     }
 
     if (captureZoneSnapshotOnAccept) {

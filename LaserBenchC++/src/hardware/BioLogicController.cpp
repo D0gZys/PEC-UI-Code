@@ -775,7 +775,7 @@ PotDataResult BioLogicController::getData(int channel)
             double t = info.StartTime;
             if (impl_.blConvertTimeSecs) {
                 double dt = 0.0;
-                impl_.blConvertTimeSecs(&buf.data[offset], &dt, curr.TimeBase, impl_.boardType);
+                impl_.blConvertTimeSecs(&buf.data[offset], &dt, curr.TimeBase, 0);
                 t += dt;
             }
 
