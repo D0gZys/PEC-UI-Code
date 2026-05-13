@@ -94,11 +94,14 @@ constexpr double kContinuousFreshValueTimeoutS = 0.25;
 constexpr double kContinuousMaxRunUpMm = 0.04;
 constexpr double kContinuousRunUpStepMultiplier = 5.0;
 constexpr double kContinuousOneWayReturnSpeedMmPerS = 1.0;
+constexpr double kContinuousLineControlOverheadS = 3.0;
+constexpr double kContinuousSafetyDurationS = 30.0;
 constexpr double kMinimumScanStepMm = 0.0001; // 100 nm
 constexpr double kPointByPointPerPointOverheadS = 0.82;
 constexpr double kDarkCurrentCalibrationDurationS = 60.0;
 constexpr double kDarkCurrentCalibrationRecordDtS = 1.0;
 constexpr double kCaSimpleUntilStopDurationS = 86400.0;
+constexpr std::size_t kMaxPreviewWaypointOverlayPoints = 1000;
 
 QGroupBox* createGroupBox(const QString& title)
 {
@@ -751,9 +754,9 @@ struct ObjectivePreset
 };
 
 std::array<ObjectivePreset, 3> kObjectivePresets {{
-    {"4x",  4.0,  2588, 1350, 32},
-    {"10x", 10.0, 2588, 1350, 32},
-    {"50x", 50.0, 2588, 1350, 32},
+    {"4x",  4.0,  2625, 1311, 35},
+    {"10x", 10.0, 2573, 1460, 47},
+    {"50x", 50.0, 2618, 1420, 27},
 }};
 
 ObjectivePreset* findObjectivePreset(const QString& name)
@@ -3382,6 +3385,7 @@ void MainWindow::clearSequencePreviewSelection()
     sequenceRectStartFrame_.reset();
     sequenceRectEndFrame_.reset();
     sequenceBaseMotorMm_.reset();
+    sequenceOverlayAnchorMotorMm_.reset();
     sequenceRectFollowSample_ = false;
     waypointsMm_.clear();
     currentWaypointIndex_ = -1;
@@ -3624,9 +3628,13 @@ void MainWindow::syncSequenceOverlay()
 
     const bool showZone = !sequenceRunning_ || (showZoneCheck_ == nullptr || showZoneCheck_->isChecked());
     const bool showWaypoints = !waypointsMm_.empty()
+        && waypointsMm_.size() <= kMaxPreviewWaypointOverlayPoints
         && (!sequenceRunning_ || (hideWaypointsCheck_ == nullptr || !hideWaypointsCheck_->isChecked()));
 
-    const std::optional<QPointF> displayMotorMm = cachedMotorMm_;
+    const std::optional<QPointF> displayMotorMm =
+        sequenceOverlayAnchorMotorMm_.has_value()
+            ? sequenceOverlayAnchorMotorMm_
+            : cachedMotorMm_;
 
     // Zone rect
     if (!showZone) {
@@ -3635,7 +3643,10 @@ void MainWindow::syncSequenceOverlay()
         std::optional<QPoint> startPoint = sequenceRectStartFrame_.has_value() ? sequenceRectStartFrame_ : sequenceFirstFramePoint_;
         std::optional<QPoint> endPoint = sequenceRectEndFrame_;
 
-        if (sequenceRectFollowSample_ && sequenceStartMotorMm_.has_value() && sequenceEndMotorMm_.has_value() && displayMotorMm.has_value()) {
+        if (sequenceRectFollowSample_
+            && sequenceStartMotorMm_.has_value()
+            && sequenceEndMotorMm_.has_value()
+            && displayMotorMm.has_value()) {
             try {
                 startPoint = motorTargetToFramePoint(*sequenceStartMotorMm_, *displayMotorMm);
                 endPoint = motorTargetToFramePoint(*sequenceEndMotorMm_, *displayMotorMm);
@@ -7197,6 +7208,9 @@ void MainWindow::onStartCaPotentiostat()
     const ScanConfig::RectangleStartCorner rectangleStartCorner = effectiveRectangleStartCorner();
     const ScanConfig::RectanglePrimaryAxis rectanglePrimaryAxis = effectiveRectanglePrimaryAxis();
     const ScanConfig::RectangleTraversalMode rectangleTraversalMode = effectiveRectangleTraversalMode();
+    const QString scanObjectiveName = objectiveCombo_ != nullptr
+        ? objectiveCombo_->currentText().trimmed()
+        : QString("4x");
 
     double stepMm = 0.0;
     double durationS = 0.0;
@@ -7371,7 +7385,8 @@ void MainWindow::onStartCaPotentiostat()
             const double transitionTimeS = (nSweepLines > 1 && transitionSpeedMmPerS > 0.0)
                 ? (transitionDistanceMm / transitionSpeedMmPerS + static_cast<double>(nSweepLines - 1))
                 : 0.0;
-            params.duration = totalLineTimeS + transitionTimeS + 15.0;
+            const double controlOverheadS = static_cast<double>(std::max(1, nSweepLines)) * kContinuousLineControlOverheadS;
+            params.duration = totalLineTimeS + transitionTimeS + controlOverheadS + kContinuousSafetyDurationS;
         }
         if (!simpleMeasurement) {
             params.recordDt = std::max(60.0, params.duration);
@@ -7536,9 +7551,7 @@ void MainWindow::onStartCaPotentiostat()
         techniqueParams = params;
     }
 
-    const QString reportObjectiveName = objectiveCombo_ != nullptr
-        ? objectiveCombo_->currentText().trimmed()
-        : QString("4x");
+    const QString reportObjectiveName = scanObjectiveName;
     const double reportLaserDiameterUm =
         static_cast<double>(laserRadiusPx_) * 2.0 * autoMmPerPxForObjective(reportObjectiveName) * 1000.0;
     QStringList reportSetupLines;
@@ -8196,6 +8209,7 @@ void MainWindow::onStartCaPotentiostat()
             } else if (cfg.mode == ScanConfig::AcquisitionMode::Continuous) {
                 int globalSampleIdx = 0;
                 double lastSampleElapsed = -std::numeric_limits<double>::infinity();
+                std::optional<hardware::PotCurrentValues> lastAcceptedCv;
                 bool instrumentStopped = false;
 
                 const auto waitForFreshValue = [&](double timeoutS) -> std::optional<hardware::PotCurrentValues> {
@@ -8216,6 +8230,7 @@ void MainWindow::onStartCaPotentiostat()
                 const auto appendScheduledSample =
                     [&](int row, int col, const QPointF& plannedPoint, double timeoutS,
                         std::optional<QPointF> triggerMotorPos = std::nullopt) -> bool {
+                    const double previousSampleElapsed = lastSampleElapsed;
                     const auto maybeCv = waitForFreshValue(timeoutS);
                     hardware::PotCurrentValues cv;
                     bool staleValue = false;
@@ -8226,16 +8241,33 @@ void MainWindow::onStartCaPotentiostat()
                         if (!cv.ok) {
                             return false;
                         }
-                        staleValue = true;
-                        appendMeasurementLogEvent("WARN", QString("Valeur non rafraichie avant timeout | row=%1 | col=%2 | timeout=%3 s | t_pot=%4 s")
-                            .arg(row + 1)
-                            .arg(col + 1)
-                            .arg(timeoutS, 0, 'f', 3)
-                            .arg(cv.elapsedTime, 0, 'f', 6));
+                        if (cv.elapsedTime <= previousSampleElapsed + kScanPlanningEpsilonMm) {
+                            staleValue = true;
+                            appendMeasurementLogEvent("WARN", QString("Valeur non rafraichie avant timeout | row=%1 | col=%2 | timeout=%3 s | t_pot=%4 s | dernier_t=%5 s")
+                                .arg(row + 1)
+                                .arg(col + 1)
+                                .arg(timeoutS, 0, 'f', 3)
+                                .arg(cv.elapsedTime, 0, 'f', 6)
+                                .arg(previousSampleElapsed, 0, 'f', 6));
+
+                            const auto retryCv = waitForFreshValue(std::max(timeoutS * 2.0, kContinuousFreshValueTimeoutS));
+                            if (!retryCv.has_value()) {
+                                if (cv.stopped && lastAcceptedCv.has_value()) {
+                                    appendMeasurementLogEvent("WARN", QString("STOP ignore sur lecture stale/reset | row=%1 | col=%2 | t_pot=%3 s | dernier_t=%4 s")
+                                        .arg(row + 1)
+                                        .arg(col + 1)
+                                        .arg(cv.elapsedTime, 0, 'f', 6)
+                                        .arg(previousSampleElapsed, 0, 'f', 6));
+                                }
+                                return false;
+                            }
+                            cv = *retryCv;
+                        }
                     }
                     const int idx = globalSampleIdx++;
                     acquiredSampleCount = globalSampleIdx;
                     lastSampleElapsed = cv.elapsedTime;
+                    lastAcceptedCv = cv;
                     const QString acquisitionTimestamp = currentLogTimestampText();
 
                     QString actualMotorText = "X=--- Y=---";
@@ -8289,7 +8321,7 @@ void MainWindow::onStartCaPotentiostat()
                             idx, totalEstimate, row, col, plannedPoint, cv.elapsedTime, cv.ewe, cv.I);
                     }, Qt::QueuedConnection);
 
-                    if (cv.stopped) {
+                    if (cv.stopped && cv.elapsedTime > previousSampleElapsed + kScanPlanningEpsilonMm) {
                         const auto confirm = ctrl->getData(channel);
                         if (confirm.ok && confirm.stopped) {
                             instrumentStopped = true;
@@ -8416,12 +8448,8 @@ void MainWindow::onStartCaPotentiostat()
                     // exact wall-clock ↔ motor-position mapping.  One calibration
                     // snapshot is enough because the motor speed is constant.
                     //
-                    // The position returned by snapshotBoth() was measured ~10 ms
-                    // into the call (TS + TP on the scan axis only; Y and JSON
-                    // overhead occur afterwards).  Using the *start* of the call
-                    // as the position timestamp therefore introduces a systematic
-                    // offset of only ~10 ms × speed = 0.5 µm at 0.05 mm/s.
-                    // That is well below 1 µm, so we use the call start time.
+                    // The snapshot timestamp is approximated with the middle of
+                    // the call.  At 50x, even a 100 ms timestamp error is visible.
                     auto calibSnapTime = std::chrono::steady_clock::now();
                     QPointF calibSnapPos = extendedStart;
                     {
@@ -8433,6 +8461,7 @@ void MainWindow::onStartCaPotentiostat()
                                && std::chrono::steady_clock::now() < deadline) {
                             const auto beforeSnap = std::chrono::steady_clock::now();
                             const auto pos = motorCtrl->snapshotBoth();
+                            const auto afterSnap = std::chrono::steady_clock::now();
                             if (pos.x.positionValid && pos.y.positionValid) {
                                 const QPointF p(pos.x.positionMm, pos.y.positionMm);
                                 const QPointF delta = p - extendedStart;
@@ -8440,14 +8469,17 @@ void MainWindow::onStartCaPotentiostat()
                                     delta.x() * rowPlan.unitDirection.x()
                                     + delta.y() * rowPlan.unitDirection.y();
                                 if (travelled > motionDetectThresholdMm) {
-                                    calibSnapTime = beforeSnap;
+                                    calibSnapTime = beforeSnap
+                                        + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                            (afterSnap - beforeSnap) / 2);
                                     calibSnapPos  = p;
                                     appendMeasurementLogEvent("SYNC",
-                                        QString("ligne=%1/%2 | calibration_temps | deplacement=%3 mm | pos=%4")
+                                        QString("ligne=%1/%2 | calibration_temps | deplacement=%3 mm | pos=%4 | duree_snapshot=%5 ms")
                                             .arg(lineIndex + 1)
                                             .arg(static_cast<int>(continuousPlan.linePlans.size()))
                                             .arg(travelled, 0, 'f', 4)
-                                            .arg(formatPointMm(p)));
+                                            .arg(formatPointMm(p))
+                                            .arg(std::chrono::duration<double, std::milli>(afterSnap - beforeSnap).count(), 0, 'f', 1));
                                     break;
                                 }
                             }
@@ -8474,16 +8506,7 @@ void MainWindow::onStartCaPotentiostat()
                         while (!potentiostatStopRequested_.load() && !instrumentStopped) {
                             const auto now = std::chrono::steady_clock::now();
                             if (now >= expectedTime) {
-                                // Trigger fired at the right time.
-                                // Take a real snapshot for logging/verification.
-                                // This adds ~100ms but doesn't affect trigger precision.
-                                try {
-                                    const auto snap = motorCtrl->snapshotBoth();
-                                    if (snap.x.positionValid && snap.y.positionValid) {
-                                        return QPointF(snap.x.positionMm, snap.y.positionMm);
-                                    }
-                                } catch (...) {}
-                                return targetPos; // fallback if snapshot fails
+                                return targetPos;
                             }
                             const double remainingS = std::chrono::duration<double>(expectedTime - now).count();
                             const double sleepS = std::clamp(remainingS * 0.5, 0.0005, kContinuousPollingPeriodS);
@@ -9980,8 +10003,12 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
                         transitionDurationSeconds = continuousRepositionDistanceMm(plan) / transitionSpeedMmPerS
                             + static_cast<double>(std::max(0, lineCount - 1));
                     }
+                    const double controlOverheadSeconds =
+                        static_cast<double>(std::max(1, lineCount)) * kContinuousLineControlOverheadS
+                        + kContinuousSafetyDurationS;
                     totalDurationSeconds = lineDurationSeconds * static_cast<double>(lineCount)
-                        + transitionDurationSeconds;
+                        + transitionDurationSeconds
+                        + controlOverheadSeconds;
                 } catch (...) {
                     rows = cols = pointCount = pointsPerLine = lineCount = 0;
                     lineDurationSeconds = 0.0;
@@ -9997,7 +10024,7 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
                 lineDurationSeconds = speedMmPerS > 0.0
                     ? (plan.effectiveWidthMm + 2.0 * plan.runUpMm) / speedMmPerS
                     : 0.0;
-                totalDurationSeconds = lineDurationSeconds;
+                totalDurationSeconds = lineDurationSeconds + kContinuousLineControlOverheadS + kContinuousSafetyDurationS;
             }
         }
 

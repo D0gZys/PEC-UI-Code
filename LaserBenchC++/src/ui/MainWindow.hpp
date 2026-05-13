@@ -451,6 +451,7 @@ private:
     std::optional<QPoint> sequenceRectStartFrame_;
     std::optional<QPoint> sequenceRectEndFrame_;
     std::optional<QPointF> sequenceBaseMotorMm_;
+    std::optional<QPointF> sequenceOverlayAnchorMotorMm_;
     std::vector<QPointF> waypointsMm_;
     std::vector<double> potentiostatPlotTimes_;
     std::vector<double> potentiostatPlotCurrents_;
