@@ -60,6 +60,15 @@ void PotentiostatHeatmapWidget::setGrid(
     update();
 }
 
+void PotentiostatHeatmapWidget::setElectrodeMode(PotentiostatElectrodeMode mode)
+{
+    if (electrodeMode_ == mode) {
+        return;
+    }
+    electrodeMode_ = mode;
+    update();
+}
+
 void PotentiostatHeatmapWidget::clear()
 {
     rows_ = 0;
@@ -141,16 +150,22 @@ void PotentiostatHeatmapWidget::paintEvent(QPaintEvent* event)
         return;
     }
 
-    // Collect acquired values and compute min/max for colour mapping
-    std::vector<double> acquired;
-    acquired.reserve(values_.size());
-    for (const auto& v : values_)
-        if (v.has_value()) acquired.push_back(*v);
+    // Collect acquired values and compute display min/max for colour mapping.
+    std::vector<double> acquiredDisplay;
+    acquiredDisplay.reserve(values_.size());
+    for (const auto& v : values_) {
+        if (v.has_value() && std::isfinite(*v)) {
+            acquiredDisplay.push_back(displayCurrentForElectrode(*v, electrodeMode_));
+        }
+    }
 
-    const double minV = acquired.empty() ? 0.0
-                       : *std::min_element(acquired.begin(), acquired.end());
-    const double maxV = acquired.empty() ? 1.0
-                       : *std::max_element(acquired.begin(), acquired.end());
+    double minDisplay = acquiredDisplay.empty() ? 0.0
+        : *std::min_element(acquiredDisplay.begin(), acquiredDisplay.end());
+    double maxDisplay = acquiredDisplay.empty() ? 1.0
+        : *std::max_element(acquiredDisplay.begin(), acquiredDisplay.end());
+    if (maxDisplay <= minDisplay) {
+        maxDisplay = minDisplay + std::max(1.0, std::abs(minDisplay) * 0.05);
+    }
 
     const double cw = gr.width()  / std::max(cols_, 1);
     const double ch = gr.height() / std::max(rows_, 1);
@@ -163,8 +178,12 @@ void PotentiostatHeatmapWidget::paintEvent(QPaintEvent* event)
             const QRectF cell(gr.left() + col * cw, gr.top() + row * ch, cw, ch);
 
             QColor fill = QColor("#e5e7eb");
-            if (idx < values_.size() && values_[idx].has_value())
-                fill = valueToColor(*values_[idx], minV, maxV);
+            if (idx < values_.size() && values_[idx].has_value() && std::isfinite(*values_[idx])) {
+                fill = valueToColor(
+                    displayCurrentForElectrode(*values_[idx], electrodeMode_),
+                    minDisplay,
+                    maxDisplay);
+            }
 
             painter.fillRect(cell.adjusted(-0.25, -0.25, 0.25, 0.25), fill);
         }
@@ -175,7 +194,7 @@ void PotentiostatHeatmapWidget::paintEvent(QPaintEvent* event)
     painter.drawRect(gr.adjusted(0.0, 0.0, -1.0, -1.0));
 
     // ── Color scale bar ──────────────────────────────────────────────────────
-    if (!acquired.empty()) {
+    if (!acquiredDisplay.empty()) {
         const double barX = gr.right() + kBarGap;
         const double barY = gr.top();
         const double barH = gr.height();
@@ -186,7 +205,10 @@ void PotentiostatHeatmapWidget::paintEvent(QPaintEvent* event)
             // t=1 at top (max), t=0 at bottom (min)
             const double t = 1.0 - static_cast<double>(s) / std::max(1.0, static_cast<double>(nStrips - 1));
             painter.setPen(Qt::NoPen);
-            painter.setBrush(valueToColor(minV + t * (maxV - minV), minV, maxV));
+            painter.setBrush(valueToColor(
+                minDisplay + t * (maxDisplay - minDisplay),
+                minDisplay,
+                maxDisplay));
             painter.drawRect(QRectF(barX, barY + s, kBarWidth, 1.5));
         }
 
@@ -201,20 +223,21 @@ void PotentiostatHeatmapWidget::paintEvent(QPaintEvent* event)
         painter.setRenderHint(QPainter::Antialiasing, true);
         QFont f = painter.font(); f.setPointSizeF(7.5); painter.setFont(f);
 
-        const struct { double t; double v; } ticks[] = {
-            {0.0,  maxV},
-            {0.5,  (minV + maxV) / 2.0},
-            {1.0,  minV}
+        const struct { double t; double displayValue; } ticks[] = {
+            {0.0,  maxDisplay},
+            {0.5,  (minDisplay + maxDisplay) / 2.0},
+            {1.0,  minDisplay}
         };
         for (const auto& tick : ticks) {
             const double ty = barY + tick.t * barH;
+            const double currentValue = currentFromElectrodeDisplay(tick.displayValue, electrodeMode_);
             // Tick line
             painter.setPen(QPen(QColor("#9ca3af"), 1.0));
             painter.drawLine(QPointF(barX + kBarWidth, ty), QPointF(lx - 1.0, ty));
             // Label
             painter.setPen(QColor("#374151"));
             painter.drawText(QRectF(lx, ty - 7.0, lw, 14.0),
-                             Qt::AlignLeft | Qt::AlignVCenter, formatCurrent(tick.v));
+                             Qt::AlignLeft | Qt::AlignVCenter, formatCurrent(currentValue));
         }
     }
 }

@@ -4,6 +4,8 @@
 #include <optional>
 #include <vector>
 
+#include "ui/PotentiostatElectrodeMode.hpp"
+
 namespace laserbench::ui {
 
 class Potentiostat3DWidget final : public QWidget
@@ -17,6 +19,7 @@ public:
     void setGrid(int rows, int cols,
                  std::vector<std::optional<double>> values,
                  double xSpanMm, double ySpanMm);
+    void setElectrodeMode(PotentiostatElectrodeMode mode);
     void clear();
 
 protected:
@@ -33,6 +36,7 @@ private:
     int    cols_     {0};
     double xSpanMm_  {1.0};
     double ySpanMm_  {1.0};
+    PotentiostatElectrodeMode electrodeMode_ {PotentiostatElectrodeMode::Anode};
     std::vector<std::optional<double>> values_;
 
     // View parameters

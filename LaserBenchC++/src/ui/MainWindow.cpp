@@ -769,6 +769,37 @@ ObjectivePreset* findObjectivePreset(const QString& name)
     return nullptr;
 }
 
+bool isManualObjectiveName(const QString& name)
+{
+    const QString trimmed = name.trimmed();
+    return trimmed.compare("Manuel", Qt::CaseInsensitive) == 0
+        || trimmed.compare("Manual", Qt::CaseInsensitive) == 0;
+}
+
+std::optional<double> objectiveMagnificationFromText(QString text)
+{
+    text = text.trimmed();
+    text.replace(',', '.');
+
+    const ObjectivePreset* preset = findObjectivePreset(text);
+    if (preset != nullptr && preset->magnification > 0.0) {
+        return preset->magnification;
+    }
+
+    static const QRegularExpression re(R"(([0-9]+(?:\.[0-9]+)?))");
+    const auto match = re.match(text);
+    if (!match.hasMatch()) {
+        return std::nullopt;
+    }
+
+    bool ok = false;
+    const double magnification = match.captured(1).toDouble(&ok);
+    if (!ok || magnification <= 0.0) {
+        return std::nullopt;
+    }
+    return magnification;
+}
+
 struct RuntimeDependencySpec
 {
     const char* area;
@@ -1203,11 +1234,23 @@ QImage renderWidgetSnapshot(QWidget* widget, const QSize& fallbackSize)
     return image;
 }
 
+QImage renderRectangleTraversalSelectionSketch(
+    RectangleStartCorner startCorner,
+    RectanglePrimaryAxis primaryAxis,
+    RectangleTraversalMode traversalMode)
+{
+    RectangleTraversalPreviewWidget preview;
+    preview.resize(520, 320);
+    preview.setSelection({startCorner, primaryAxis, traversalMode});
+    return renderWidgetSnapshot(&preview, preview.size());
+}
+
 QImage renderReportHeatmapSnapshot(
     int rows,
     int cols,
     const std::vector<std::optional<double>>& values,
-    const std::vector<std::pair<int, int>>& scanOrder)
+    const std::vector<std::pair<int, int>>& scanOrder,
+    PotentiostatElectrodeMode electrodeMode)
 {
     if (rows <= 0 || cols <= 0) {
         return {};
@@ -1227,6 +1270,7 @@ QImage renderReportHeatmapSnapshot(
 
     PotentiostatHeatmapWidget heatmap;
     heatmap.resize(imageSize);
+    heatmap.setElectrodeMode(electrodeMode);
     heatmap.setGrid(rows, cols, values, std::nullopt);
     QImage image = renderWidgetSnapshot(&heatmap, imageSize);
     if (image.isNull()) {
@@ -1825,6 +1869,15 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
         return QMainWindow::eventFilter(watched, event);
     }
 
+    if (event->type() == QEvent::Wheel) {
+        if (auto* combo = qobject_cast<QComboBox*>(watched);
+            combo != nullptr && (combo->view() == nullptr || !combo->view()->isVisible())) {
+            event->accept();
+            return true;
+        }
+        return QMainWindow::eventFilter(watched, event);
+    }
+
     if (event->type() != QEvent::KeyPress && event->type() != QEvent::KeyRelease) {
         return QMainWindow::eventFilter(watched, event);
     }
@@ -1902,75 +1955,8 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
 
 void MainWindow::buildMenus()
 {
-    auto* fileMenu = menuBar()->addMenu("&Fichier");
-    auto* quitAction = fileMenu->addAction("Quitter");
-    connect(quitAction, &QAction::triggered, this, &QWidget::close);
-
-    auto* deviceMenu = menuBar()->addMenu("&Moteurs");
-    auto* connectionAction = deviceMenu->addAction("Connexion moteurs...");
-    deviceMenu->addSeparator();
-    auto* scanAction = deviceMenu->addAction("Chercher les ports COM");
-    auto* connectAction = deviceMenu->addAction("Connecter les moteurs");
-    auto* homeAction = deviceMenu->addAction("Initialiser / Homing");
-    auto* disconnectAction = deviceMenu->addAction("Deconnecter");
-
-    connect(connectionAction, &QAction::triggered, this, &MainWindow::openMotorConnectionDialog);
-    connect(scanAction, &QAction::triggered, this, &MainWindow::onScanPorts);
-    connect(connectAction, &QAction::triggered, this, &MainWindow::onConnectAxes);
-    connect(homeAction, &QAction::triggered, this, &MainWindow::onHomeAxes);
-    connect(disconnectAction, &QAction::triggered, this, &MainWindow::onDisconnectAxes);
-
-    auto* cameraMenu = menuBar()->addMenu("&Camera");
-    auto* cameraConnectionAction = cameraMenu->addAction("Connexion camera...");
-    auto* cameraDiscoverAction = cameraMenu->addAction("Chercher les cameras");
-    auto* cameraConnectAction = cameraMenu->addAction("Connecter la camera");
-    auto* cameraDisconnectAction = cameraMenu->addAction("Deconnecter la camera");
-    cameraMenu->addSeparator();
-    auto* cameraStartLiveAction = cameraMenu->addAction("Live");
-    auto* cameraStopLiveAction = cameraMenu->addAction("Stop");
-    cameraMenu->addSeparator();
-    auto* cameraSettingsAction = cameraMenu->addAction("Parametres...");
-    connect(cameraConnectionAction, &QAction::triggered, this, &MainWindow::openCameraConnectionDialog);
-    connect(cameraDiscoverAction, &QAction::triggered, this, &MainWindow::openCameraConnectionDialog);
-    connect(cameraConnectAction, &QAction::triggered, this, &MainWindow::openCameraConnectionDialog);
-    connect(cameraStartLiveAction, &QAction::triggered, this, &MainWindow::startCameraLive);
-    connect(cameraStopLiveAction, &QAction::triggered, this, &MainWindow::stopCameraLive);
-    connect(cameraSettingsAction, &QAction::triggered, this, &MainWindow::openCameraSettingsDialog);
-    connect(cameraDisconnectAction, &QAction::triggered, this, [this]() {
-        try {
-            stopCameraLive();
-            cameraController_->disconnectCamera();
-            appendLog("Camera deconnectee.");
-            statusBar()->showMessage("Camera deconnectee.", 3000);
-            refreshSummaries();
-        } catch (const std::exception& ex) {
-            QMessageBox::warning(this, "Camera", QString::fromUtf8(ex.what()));
-        }
-    });
-
-    auto* helpMenu = menuBar()->addMenu("&Aide");
-    auto* calibrationAction = helpMenu->addAction("Calibrage");
-    auto* runtimeCheckAction = helpMenu->addAction("Diagnostic runtime");
-    auto* openLogsAction = helpMenu->addAction("Ouvrir dossier logs");
-    auto* aboutAction = helpMenu->addAction("A propos");
-    connect(calibrationAction, &QAction::triggered, this, &MainWindow::openCalibrationDialog);
-    connect(runtimeCheckAction, &QAction::triggered, this, &MainWindow::runRuntimeDependencyCheck);
-    connect(openLogsAction, &QAction::triggered, this, [this]() {
-        if (sessionLogPath_.isEmpty()) {
-            QMessageBox::information(this, "Logs", "Aucun journal de session n'est disponible.");
-            return;
-        }
-
-        const QString logsDir = QFileInfo(sessionLogPath_).absolutePath();
-        QDesktopServices::openUrl(QUrl::fromLocalFile(logsDir));
-    });
-    connect(aboutAction, &QAction::triggered, this, [this]() {
-        QMessageBox::about(
-            this,
-            "A propos de LaserBench",
-            "Premiere etape Qt6: scan COM, connexion moteurs Newport, homing, jog, mouvement absolu et lecture continue des positions."
-        );
-    });
+    menuBar()->clear();
+    menuBar()->hide();
 }
 
 void MainWindow::buildUi()
@@ -1985,9 +1971,24 @@ void MainWindow::buildUi()
     logView_->setMaximumBlockCount(1000);
     logView_->hide();
 
+    auto* topActions = new QHBoxLayout;
+    topActions->setSpacing(8);
+    auto* quitButton = createActionButton("Quitter");
+    auto* connectionButton = createActionButton("Connexion");
+    auto* calibrationButton = createActionButton("Calibrage");
+    connectionButton->setProperty("accent", true);
+    connect(quitButton, &QPushButton::clicked, this, &QWidget::close);
+    connect(connectionButton, &QPushButton::clicked, this, &MainWindow::openStartupConnectionDialog);
+    connect(calibrationButton, &QPushButton::clicked, this, &MainWindow::openCalibrationDialog);
+    topActions->addWidget(quitButton);
+    topActions->addWidget(connectionButton);
+    topActions->addWidget(calibrationButton);
+    topActions->addStretch(1);
+    mainLayout->addLayout(topActions);
+
     tabWidget_ = new QTabWidget;
     tabWidget_->addTab(buildSetupTab(), "Camera");
-    tabWidget_->addTab(buildMeasureTab(), "Resultat");
+    tabWidget_->addTab(buildMeasureTab(), "Mesure");
     tabWidget_->addTab(buildImportTab(), "Import");
     mainLayout->addWidget(tabWidget_, 1);
 
@@ -2176,6 +2177,7 @@ QWidget* MainWindow::buildSetupTab()
         objectiveCombo_->addItem(QLatin1String(preset.name));
     }
     objectiveCombo_->setCurrentText("4x");
+    objectiveCombo_->setInsertPolicy(QComboBox::NoInsert);
     objectiveCombo_->setStyleSheet("font-size:8pt;");
     if (QAbstractItemView* v = objectiveCombo_->view()) {
         v->setStyleSheet("background:#ffffff; color:#18212b;"
@@ -2184,12 +2186,30 @@ QWidget* MainWindow::buildSetupTab()
     cameraLayout->addWidget(objLbl,          2, 0);
     cameraLayout->addWidget(objectiveCombo_, 2, 1, 1, 3);
 
+    manualObjectiveCheck_ = new QCheckBox("Manual");
+    manualObjectiveCheck_->setStyleSheet(
+        "QCheckBox { font-size:8pt; spacing:6px; }"
+        "QCheckBox::indicator {"
+        "width:14px; height:14px;"
+        "border:1px solid #64748b;"
+        "border-radius:3px;"
+        "background:#ffffff;"
+        "}"
+        "QCheckBox::indicator:checked {"
+        "background:#1f6feb;"
+        "border-color:#1f6feb;"
+        "image:none;"
+        "}"
+        "QCheckBox::indicator:checked:hover { background:#1b63d3; }"
+        "QCheckBox::indicator:hover { border-color:#1f6feb; }");
+    cameraLayout->addWidget(manualObjectiveCheck_, 3, 1, 1, 3);
+
     auto* laserMetricLbl = new QLabel(QString::fromUtf8("Diam. laser :"));
     laserMetricLbl->setStyleSheet("font-size:8pt;");
     laserMetricDiameterLabel_ = new QLabel("---");
     laserMetricDiameterLabel_->setStyleSheet("font-size:8pt; font-weight:600; color:#1f6feb;");
-    cameraLayout->addWidget(laserMetricLbl,            3, 0);
-    cameraLayout->addWidget(laserMetricDiameterLabel_, 3, 1, 1, 3);
+    cameraLayout->addWidget(laserMetricLbl,            4, 0);
+    cameraLayout->addWidget(laserMetricDiameterLabel_, 4, 1, 1, 3);
 
     // Connections
     connect(cameraPageLiveButton_, &QPushButton::toggled, this, [this](bool checked) {
@@ -2198,12 +2218,50 @@ QWidget* MainWindow::buildSetupTab()
     });
     connect(cameraExposureEdit_, &QLineEdit::editingFinished, this, &MainWindow::applyCameraSettings);
     connect(cameraGainEdit_,     &QLineEdit::editingFinished, this, &MainWindow::applyCameraSettings);
-    connect(objectiveCombo_, &QComboBox::currentTextChanged, this, [this](const QString&) {
+    objectiveCombo_->setProperty("lastPresetObjective", objectiveCombo_->currentText());
+    objectiveCombo_->setProperty("lastManualObjective", QString("30"));
+    auto syncManualObjectiveUi = [this]() {
+        if (objectiveCombo_ == nullptr || manualObjectiveCheck_ == nullptr) {
+            return;
+        }
+        const bool manual = manualObjectiveCheck_->isChecked();
+        if (manual) {
+            const QString current = objectiveCombo_->currentText().trimmed();
+            if (findObjectivePreset(current) != nullptr) {
+                objectiveCombo_->setProperty("lastPresetObjective", current);
+            }
+            const QString manualText = objectiveCombo_->property("lastManualObjective").toString().trimmed();
+            objectiveCombo_->setEditable(true);
+            objectiveCombo_->setCurrentText(manualText.isEmpty() ? QString("30") : manualText);
+            if (objectiveCombo_->lineEdit() != nullptr) {
+                objectiveCombo_->lineEdit()->selectAll();
+            }
+        } else {
+            objectiveCombo_->setProperty("lastManualObjective", objectiveCombo_->currentText().trimmed());
+            objectiveCombo_->setEditable(false);
+            const QString presetText = objectiveCombo_->property("lastPresetObjective").toString().trimmed();
+            objectiveCombo_->setCurrentText(findObjectivePreset(presetText) != nullptr ? presetText : QString("4x"));
+        }
+    };
+    connect(manualObjectiveCheck_, &QCheckBox::toggled, this, [this, syncManualObjectiveUi](bool) {
+        syncManualObjectiveUi();
         applyObjectivePreset();
         updateRulerOverlay();
         updateCircleOverlay();
         updateRectOverlay();
     });
+    connect(objectiveCombo_, &QComboBox::currentTextChanged, this, [this](const QString&) {
+        if (objectiveCombo_ != nullptr && manualObjectiveCheck_ != nullptr && manualObjectiveCheck_->isChecked()) {
+            objectiveCombo_->setProperty("lastManualObjective", objectiveCombo_->currentText().trimmed());
+        } else if (objectiveCombo_ != nullptr) {
+            objectiveCombo_->setProperty("lastPresetObjective", objectiveCombo_->currentText().trimmed());
+        }
+        applyObjectivePreset();
+        updateRulerOverlay();
+        updateCircleOverlay();
+        updateRectOverlay();
+    });
+    syncManualObjectiveUi();
 
     // GoTo widgets — added to motorLayout below
     gotoButton_ = new QPushButton("GoTo");
@@ -2388,14 +2446,10 @@ QWidget* MainWindow::buildSetupTab()
         "QPushButton:pressed { background:#195cc4; }"
         "QPushButton:checked { background:#0f4faf; }");
     zoneLayout->addWidget(sequencePickButton_);
-    showZoneCheck_ = new QCheckBox("Zone visible");
-    showZoneCheck_->setChecked(true);
-    showZoneCheck_->setStyleSheet("font-size:9pt;");
-    hideWaypointsCheck_ = new QCheckBox("Masquer points");
-    hideWaypointsCheck_->setStyleSheet("font-size:9pt;");
-    zoneLayout->addWidget(showZoneCheck_);
-    zoneLayout->addWidget(hideWaypointsCheck_);
+    sequenceClearButton_ = createActionButton("Supprimer zone");
+    zoneLayout->addWidget(sequenceClearButton_);
     connect(sequencePickButton_, &QPushButton::clicked, this, &MainWindow::onArmSequenceRectangle);
+    connect(sequenceClearButton_, &QPushButton::clicked, this, &MainWindow::clearDefinedSequenceZone);
     leftLayout->addWidget(zoneBox);
 
     leftLayout->addStretch();
@@ -3036,16 +3090,13 @@ void MainWindow::openStartupConnectionDialog()
             potentiostatChannelCombo_->addItem(QString::number(i));
         potConnGrid->addWidget(potentiostatChannelCombo_, 1, 3);
 
-        // Connect / Firmware / Disconnect
+        // Connect / Disconnect
         potentiostatConnectButton_    = createActionButton("Connecter");
-        potentiostatFirmwareButton_   = createActionButton("Firmware");
         potentiostatDisconnectButton_ = createActionButton("Deconnecter");
         potentiostatConnectButton_->setProperty("accent", true);
-        potentiostatFirmwareButton_->setEnabled(false);
         potentiostatDisconnectButton_->setEnabled(false);
         potConnGrid->addWidget(potentiostatConnectButton_,    2, 0, 1, 2);
-        potConnGrid->addWidget(potentiostatFirmwareButton_,   2, 2);
-        potConnGrid->addWidget(potentiostatDisconnectButton_, 2, 3);
+        potConnGrid->addWidget(potentiostatDisconnectButton_, 2, 2, 1, 2);
 
         // Status (shared with Parametrage tab small status label via slot)
         auto* potDialogStatusLabel = new QLabel("Deconnecte");
@@ -3059,7 +3110,6 @@ void MainWindow::openStartupConnectionDialog()
                 potentiostatDllPathEdit_->setText(QDir::toNativeSeparators(path));
         });
         connect(potentiostatConnectButton_,    &QPushButton::clicked, this, &MainWindow::onConnectPotentiostat);
-        connect(potentiostatFirmwareButton_,   &QPushButton::clicked, this, &MainWindow::onLoadFirmware);
         connect(potentiostatDisconnectButton_, &QPushButton::clicked, this, &MainWindow::onDisconnectPotentiostat);
 
         // Keep the dialog status label in sync with potentiostatStatusLabel_
@@ -3122,28 +3172,6 @@ void MainWindow::openCalibrationDialog()
         layout->setContentsMargins(18, 18, 18, 18);
         layout->setSpacing(12);
 
-        auto* gotoBox = createGroupBox("Corrections GoTo");
-        auto* gotoLayout = new QGridLayout(gotoBox);
-
-        gotoInvertXCheck_ = new QCheckBox("Inv X");
-        gotoInvertYCheck_ = new QCheckBox("Inv Y");
-        gotoLayout->addWidget(gotoInvertXCheck_, 0, 2);
-        gotoLayout->addWidget(gotoInvertYCheck_, 0, 3);
-
-        gotoLayout->addWidget(new QLabel("Corr X+ (mm)"), 1, 0);
-        gotoCorrXpEdit_ = new QLineEdit("0");
-        gotoLayout->addWidget(gotoCorrXpEdit_, 1, 1);
-        gotoLayout->addWidget(new QLabel("Corr X- (mm)"), 1, 2);
-        gotoCorrXmEdit_ = new QLineEdit("0");
-        gotoLayout->addWidget(gotoCorrXmEdit_, 1, 3);
-
-        gotoLayout->addWidget(new QLabel("Corr Y+ (mm)"), 2, 0);
-        gotoCorrYpEdit_ = new QLineEdit("0");
-        gotoLayout->addWidget(gotoCorrYpEdit_, 2, 1);
-        gotoLayout->addWidget(new QLabel("Corr Y- (mm)"), 2, 2);
-        gotoCorrYmEdit_ = new QLineEdit("0");
-        gotoLayout->addWidget(gotoCorrYmEdit_, 2, 3);
-
         auto* laserBox = createGroupBox("Cible laser");
         auto* laserLayout = new QGridLayout(laserBox);
 
@@ -3152,6 +3180,7 @@ void MainWindow::openCalibrationDialog()
         for (const ObjectivePreset& preset : kObjectivePresets) {
             calibObjectiveCombo_->addItem(QLatin1String(preset.name));
         }
+        calibObjectiveCombo_->addItem("Manuel");
         const QString curObj = objectiveCombo_ != nullptr ? objectiveCombo_->currentText() : QString("4x");
         calibObjectiveCombo_->setCurrentText(curObj);
         laserLayout->addWidget(calibObjectiveCombo_, 0, 1, 1, 3);
@@ -3187,11 +3216,10 @@ void MainWindow::openCalibrationDialog()
         applyLaserButton->setProperty("accent", true);
         laserLayout->addWidget(applyLaserButton, 5, 2, 1, 2);
 
-        layout->addWidget(gotoBox);
         layout->addWidget(laserBox);
 
         auto* helpLabel = new QLabel(QString::fromUtf8(
-            "Aide - Unités : corrections GoTo en millimètres (mm), position de cible laser X/Y en pixels (px), "
+            "Aide - Unités : position de cible laser X/Y en pixels (px), "
             "pas de déplacement de la cible en pixels (px), rayon de la cible en pixels (px). "
             "Le diamètre métrique affiché dans la page caméra est calculé en micromètres (µm) avec l'objectif sélectionné."));
         helpLabel->setWordWrap(true);
@@ -3212,7 +3240,14 @@ void MainWindow::openCalibrationDialog()
         connect(calibObjectiveCombo_, &QComboBox::currentTextChanged,
                 this, [this](const QString& name) {
             const ObjectivePreset* preset = findObjectivePreset(name);
-            if (preset == nullptr) return;
+            if (preset == nullptr) {
+                if (isManualObjectiveName(name)) {
+                    if (laserXEdit_)    laserXEdit_->setText(QString::number(laserPointPx_.x()));
+                    if (laserYEdit_)    laserYEdit_->setText(QString::number(laserPointPx_.y()));
+                    if (laserSizeEdit_) laserSizeEdit_->setText(QString::number(laserRadiusPx_));
+                }
+                return;
+            }
             if (laserXEdit_)    laserXEdit_->setText(QString::number(preset->laserX));
             if (laserYEdit_)    laserYEdit_->setText(QString::number(preset->laserY));
             if (laserSizeEdit_) laserSizeEdit_->setText(QString::number(preset->laserRadiusPx));
@@ -3226,11 +3261,52 @@ void MainWindow::openCalibrationDialog()
     calibrationDialog_->activateWindow();
 }
 
+double MainWindow::currentObjectiveMagnification() const
+{
+    const QString objectiveName = objectiveCombo_ != nullptr
+        ? objectiveCombo_->currentText().trimmed()
+        : QString("4x");
+
+    if (manualObjectiveCheck_ != nullptr && manualObjectiveCheck_->isChecked()) {
+        const std::optional<double> manualMagnification = objectiveMagnificationFromText(objectiveName);
+        return manualMagnification.value_or(0.0);
+    }
+
+    const std::optional<double> presetMagnification = objectiveMagnificationFromText(objectiveName);
+    return presetMagnification.value_or(0.0);
+}
+
+QString MainWindow::currentObjectiveLabel() const
+{
+    const QString objectiveName = objectiveCombo_ != nullptr
+        ? objectiveCombo_->currentText().trimmed()
+        : QString("4x");
+    if (manualObjectiveCheck_ == nullptr || !manualObjectiveCheck_->isChecked()) {
+        return objectiveName;
+    }
+
+    const double magnification = currentObjectiveMagnification();
+    if (magnification <= 0.0) {
+        return "Manual";
+    }
+    return QString("Manual (%1x)").arg(magnification, 0, 'g', 4);
+}
+
 void MainWindow::applyObjectivePreset()
 {
     const QString objectiveName = objectiveCombo_ != nullptr ? objectiveCombo_->currentText().trimmed() : QString("4x");
+    if (manualObjectiveCheck_ != nullptr && manualObjectiveCheck_->isChecked()) {
+        syncCalibrationUi();
+        updateLaserLabel();
+        syncSequenceOverlay();
+        return;
+    }
+
     const ObjectivePreset* preset = findObjectivePreset(objectiveName);
     if (preset == nullptr) {
+        syncCalibrationUi();
+        updateLaserLabel();
+        syncSequenceOverlay();
         return;
     }
 
@@ -3387,9 +3463,30 @@ void MainWindow::clearSequencePreviewSelection()
     sequenceBaseMotorMm_.reset();
     sequenceOverlayAnchorMotorMm_.reset();
     sequenceRectFollowSample_ = false;
+    lastReportPathSketchImage_ = {};
     waypointsMm_.clear();
     currentWaypointIndex_ = -1;
     syncSequenceOverlay();
+}
+
+void MainWindow::clearDefinedSequenceZone()
+{
+    setSequenceSelectArmed(false);
+    sequenceStartMotorMm_.reset();
+    sequenceEndMotorMm_.reset();
+    lastValidatedZoneImage_ = {};
+    clearSequencePreviewSelection();
+    if (sequenceStartLabel_ != nullptr) {
+        sequenceStartLabel_->setText("Depart  : ---");
+    }
+    if (sequenceEndLabel_ != nullptr) {
+        sequenceEndLabel_->setText("Arrivee : ---");
+    }
+    if (sequenceStatusLabel_ != nullptr) {
+        sequenceStatusLabel_->setText("Zone supprimee.");
+    }
+    appendLog("Zone image supprimee.");
+    statusBar()->showMessage("Zone supprimee. Definir une nouvelle zone pour une cartographie CA.", 5000);
 }
 
 void MainWindow::updateSequenceLabels(const QPointF& startMm, const QPointF& endMm)
@@ -3397,6 +3494,7 @@ void MainWindow::updateSequenceLabels(const QPointF& startMm, const QPointF& end
     sequenceStartMotorMm_ = startMm;
     sequenceEndMotorMm_ = endMm;
     lastValidatedZoneImage_ = {};
+    lastReportPathSketchImage_ = {};
     if (sequenceStartLabel_ != nullptr) {
         sequenceStartLabel_->setText(QString("Depart  : X=%1  Y=%2 mm").arg(startMm.x(), 0, 'f', 4).arg(startMm.y(), 0, 'f', 4));
     }
@@ -3626,10 +3724,9 @@ void MainWindow::syncSequenceOverlay()
         return;
     }
 
-    const bool showZone = !sequenceRunning_ || (showZoneCheck_ == nullptr || showZoneCheck_->isChecked());
+    const bool showZone = true;
     const bool showWaypoints = !waypointsMm_.empty()
-        && waypointsMm_.size() <= kMaxPreviewWaypointOverlayPoints
-        && (!sequenceRunning_ || (hideWaypointsCheck_ == nullptr || !hideWaypointsCheck_->isChecked()));
+        && waypointsMm_.size() <= kMaxPreviewWaypointOverlayPoints;
 
     const std::optional<QPointF> displayMotorMm =
         sequenceOverlayAnchorMotorMm_.has_value()
@@ -3760,17 +3857,27 @@ void MainWindow::nudgeLaserTarget(int dxPx, int dyPx, int dRadiusPx)
 
 double MainWindow::autoMmPerPxForObjective(const QString& objectiveName) const
 {
-    const ObjectivePreset* preset = findObjectivePreset(objectiveName.trimmed());
-    if (preset == nullptr || preset->magnification <= 0.0) {
+    double magnification = 0.0;
+    if (manualObjectiveCheck_ != nullptr && manualObjectiveCheck_->isChecked()) {
+        magnification = currentObjectiveMagnification();
+    } else {
+        const std::optional<double> parsedMagnification = objectiveMagnificationFromText(objectiveName);
+        magnification = parsedMagnification.value_or(0.0);
+    }
+
+    if (magnification <= 0.0) {
         return kDefaultGotoMmPerPx;
     }
 
-    return kCameraPixelPitchUm / (preset->magnification * 1000.0);
+    return kCameraPixelPitchUm / (magnification * 1000.0);
 }
 
 std::pair<double, double> MainWindow::currentGotoScale() const
 {
     const QString objectiveName = objectiveCombo_ != nullptr ? objectiveCombo_->currentText().trimmed() : QString("4x");
+    if (manualObjectiveCheck_ != nullptr && manualObjectiveCheck_->isChecked() && currentObjectiveMagnification() <= 0.0) {
+        throw std::runtime_error("Le zoom de l'objectif manuel doit etre un nombre strictement positif.");
+    }
     const double mmPerPx = autoMmPerPxForObjective(objectiveName);
     if (mmPerPx <= 0.0) {
         throw std::runtime_error("Les valeurs mm/px X et Y doivent etre positives.");
@@ -3932,6 +4039,11 @@ MainWindow::ScanConfig::RectanglePrimaryAxis MainWindow::effectiveRectanglePrima
 
 MainWindow::ScanConfig::RectangleTraversalMode MainWindow::effectiveRectangleTraversalMode() const
 {
+    constexpr double kOneWayOnlyMagnification = 50.0;
+    if (currentObjectiveMagnification() >= kOneWayOnlyMagnification) {
+        return ScanConfig::RectangleTraversalMode::OneWay;
+    }
+
     return scanConfig_.rectangleTraversalMode;
 }
 
@@ -4931,6 +5043,23 @@ QString MainWindow::selectedPotentiostatTechniqueLabel() const
     }
 }
 
+PotentiostatElectrodeMode MainWindow::selectedPotentiostatElectrodeMode() const
+{
+    const QString electrode = potentiostatElectrodeCombo_ != nullptr
+        ? potentiostatElectrodeCombo_->currentText().trimmed().toLower()
+        : QString("anode");
+    return electrode == "cathode"
+        ? PotentiostatElectrodeMode::Cathode
+        : PotentiostatElectrodeMode::Anode;
+}
+
+QString MainWindow::selectedPotentiostatElectrodeLabel() const
+{
+    return selectedPotentiostatElectrodeMode() == PotentiostatElectrodeMode::Cathode
+        ? QString("Cathode")
+        : QString("Anode");
+}
+
 void MainWindow::syncPotentiostatTechniqueUi()
 {
     int stackIndex = 0;
@@ -5179,7 +5308,20 @@ QWidget* MainWindow::buildMeasureTab()
     connLayout->addWidget(potentiostatStatusLabel_, 0, 0);
     connLayout->addWidget(openConnBtn, 0, 1);
 
-    connLayout->addWidget(S("Technique"), 1, 0);
+    connLayout->addWidget(S("Electrode"), 1, 0);
+    potentiostatElectrodeCombo_ = new QComboBox;
+    potentiostatElectrodeCombo_->addItems({"Anode", "Cathode"});
+    potentiostatElectrodeCombo_->setStyleSheet("font-size:8pt;");
+    if (QAbstractItemView* v = potentiostatElectrodeCombo_->view()) {
+        v->setStyleSheet("background:#ffffff; color:#18212b;"
+                         "selection-background-color:#eef4ff; selection-color:#111927;");
+    }
+    connect(potentiostatElectrodeCombo_, &QComboBox::currentIndexChanged, this, [this](int) {
+        refreshPotentiostatVisualization();
+    });
+    connLayout->addWidget(potentiostatElectrodeCombo_, 1, 1);
+
+    connLayout->addWidget(S("Technique"), 2, 0);
     potentiostatTechniqueCombo_ = new QComboBox;
     potentiostatTechniqueCombo_->addItems({"CA", "OCV", "CVA"});
     potentiostatTechniqueCombo_->setStyleSheet("font-size:8pt;");
@@ -5187,7 +5329,7 @@ QWidget* MainWindow::buildMeasureTab()
         v->setStyleSheet("background:#ffffff; color:#18212b;"
                          "selection-background-color:#eef4ff; selection-color:#111927;");
     }
-    connLayout->addWidget(potentiostatTechniqueCombo_, 1, 1);
+    connLayout->addWidget(potentiostatTechniqueCombo_, 2, 1);
     connLayout->setColumnStretch(0, 1);
     leftLayout->addWidget(connBox);
 
@@ -5544,6 +5686,9 @@ void MainWindow::clearPotentiostatVisualization()
     if (potentiostatHeatmapWidget_ != nullptr) {
         potentiostatHeatmapWidget_->clear();
     }
+    if (potentiostat3DWidget_ != nullptr) {
+        potentiostat3DWidget_->clear();
+    }
 }
 
 void MainWindow::resetPotentiostatVisualization(int rows, int cols, const std::vector<std::pair<int, int>>& order)
@@ -5662,6 +5807,7 @@ void MainWindow::refreshPotentiostatVisualization()
         if (potentiostatSampleCount_ > 0) {
             highlightedCell = potentiostatLastSampledCell_;
         }
+        potentiostatHeatmapWidget_->setElectrodeMode(selectedPotentiostatElectrodeMode());
         potentiostatHeatmapWidget_->setGrid(
             potentiostatRows_,
             potentiostatCols_,
@@ -5671,6 +5817,7 @@ void MainWindow::refreshPotentiostatVisualization()
     }
 
     if (potentiostat3DWidget_ != nullptr) {
+        potentiostat3DWidget_->setElectrodeMode(selectedPotentiostatElectrodeMode());
         const double xSpan = potentiostatCols_ > 0
             ? std::max(1e-6, std::abs(potentiostatXMax_ - potentiostatXMin_))
             : 1.0;
@@ -5750,10 +5897,12 @@ void MainWindow::refreshImportVisualization()
     }
 
     if (importHeatmapWidget_ != nullptr) {
+        importHeatmapWidget_->setElectrodeMode(importElectrodeMode_);
         importHeatmapWidget_->setGrid(importRows_, importCols_, importMatrix_, std::nullopt);
     }
 
     if (import3DWidget_ != nullptr) {
+        import3DWidget_->setElectrodeMode(importElectrodeMode_);
         const double xSpan = importCols_ > 0
             ? std::max(1e-6, std::abs(importXMax_ - importXMin_)) : 1.0;
         const double ySpan = importRows_ > 0
@@ -5964,6 +6113,7 @@ void MainWindow::refreshMotorUi()
     setWidgetEnabledIfChanged(sequenceSetStartButton_, !motorTaskRunning_ && !sequenceRunning_);
     setWidgetEnabledIfChanged(sequenceSetEndButton_, !motorTaskRunning_ && !sequenceRunning_);
     setWidgetEnabledIfChanged(sequencePickButton_, !motorTaskRunning_ && !sequenceRunning_);
+    setWidgetEnabledIfChanged(sequenceClearButton_, !motorTaskRunning_ && !sequenceRunning_);
     setWidgetEnabledIfChanged(jogStepEdit_, !motorTaskRunning_ && !sequenceRunning_);
     setWidgetEnabledIfChanged(absXEdit_, enableCommands);
     setWidgetEnabledIfChanged(absYEdit_, enableCommands);
@@ -6834,10 +6984,9 @@ void MainWindow::onConnectPotentiostat()
     }
     potentiostatBusy_.store(true);
     if (potentiostatConnectButton_    != nullptr) potentiostatConnectButton_->setEnabled(false);
-    if (potentiostatFirmwareButton_   != nullptr) potentiostatFirmwareButton_->setEnabled(false);
     if (potentiostatDisconnectButton_ != nullptr) potentiostatDisconnectButton_->setEnabled(false);
     if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(false);
-    if (potentiostatStatusLabel_      != nullptr) potentiostatStatusLabel_->setText("Connexion...");
+    if (potentiostatStatusLabel_      != nullptr) potentiostatStatusLabel_->setText("Connexion et chargement firmware...");
 
     const QString dllPath = potentiostatDllPathEdit_  != nullptr ? potentiostatDllPathEdit_->text()  : QString();
     const QString address = potentiostatAddressEdit_  != nullptr ? potentiostatAddressEdit_->text()  : "169.254.3.150";
@@ -6848,19 +6997,31 @@ void MainWindow::onConnectPotentiostat()
         potentiostatThread_.join();
     }
     potentiostatThread_ = std::thread([this, ctrl, dllPath, address, channel]() {
-        const bool ok = ctrl->connect(dllPath, address, channel);
-        const QString msg = ok ? QString("Connecte - %1").arg(ctrl->connectedModel()) : ctrl->lastError();
-        QMetaObject::invokeMethod(this, [this, ok, msg]() {
+        const bool connected = ctrl->connect(dllPath, address, channel);
+        bool ready = false;
+        QString msg;
+        if (!connected) {
+            msg = ctrl->lastError();
+        } else {
+            try {
+                ctrl->loadFirmware(channel);
+                ready = true;
+                msg = QString("Firmware charge - %1").arg(ctrl->connectedModel());
+            } catch (const std::exception& ex) {
+                msg = QString("Erreur firmware : %1").arg(QString::fromUtf8(ex.what()));
+            }
+        }
+
+        QMetaObject::invokeMethod(this, [this, connected, ready, msg]() {
             potentiostatBusy_.store(false);
-            const QString style = ok ? "color:#1a7f37; font-size:9pt;" : "color:#c0392b; font-size:9pt;";
+            const QString style = ready ? "color:#1a7f37; font-size:9pt;" : "color:#c0392b; font-size:9pt;";
             if (potentiostatStatusLabel_      != nullptr) { potentiostatStatusLabel_->setText(msg);      potentiostatStatusLabel_->setStyleSheet(style); }
-            if (potentiostatMeasureStateLabel_ != nullptr) { potentiostatMeasureStateLabel_->setText(ok ? QString("Etat : %1").arg(msg) : "Etat : non connecte"); potentiostatMeasureStateLabel_->setStyleSheet(style); }
-            if (potentiostatRunButton_        != nullptr) potentiostatRunButton_->setEnabled(ok);
+            if (potentiostatMeasureStateLabel_ != nullptr) { potentiostatMeasureStateLabel_->setText(ready ? QString("Etat : %1").arg(msg) : "Etat : non pret"); potentiostatMeasureStateLabel_->setStyleSheet(style); }
+            if (potentiostatRunButton_        != nullptr) potentiostatRunButton_->setEnabled(ready);
             if (potentiostatStopButton_       != nullptr) potentiostatStopButton_->setEnabled(false);
-            if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(ok);
-            if (potentiostatConnectButton_    != nullptr) potentiostatConnectButton_->setEnabled(!ok);
-            if (potentiostatFirmwareButton_   != nullptr) potentiostatFirmwareButton_->setEnabled(ok);
-            if (potentiostatDisconnectButton_ != nullptr) potentiostatDisconnectButton_->setEnabled(ok);
+            if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(ready);
+            if (potentiostatConnectButton_    != nullptr) potentiostatConnectButton_->setEnabled(!connected);
+            if (potentiostatDisconnectButton_ != nullptr) potentiostatDisconnectButton_->setEnabled(connected);
         }, Qt::QueuedConnection);
     });
 }
@@ -6872,7 +7033,6 @@ void MainWindow::onDisconnectPotentiostat()
     }
     potentiostatBusy_.store(true);
     if (potentiostatConnectButton_    != nullptr) potentiostatConnectButton_->setEnabled(false);
-    if (potentiostatFirmwareButton_   != nullptr) potentiostatFirmwareButton_->setEnabled(false);
     if (potentiostatDisconnectButton_ != nullptr) potentiostatDisconnectButton_->setEnabled(false);
     if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(false);
 
@@ -6891,47 +7051,7 @@ void MainWindow::onDisconnectPotentiostat()
             if (potentiostatStopButton_        != nullptr) potentiostatStopButton_->setEnabled(false);
             if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(false);
             if (potentiostatConnectButton_     != nullptr) potentiostatConnectButton_->setEnabled(true);
-            if (potentiostatFirmwareButton_    != nullptr) potentiostatFirmwareButton_->setEnabled(false);
             if (potentiostatDisconnectButton_  != nullptr) potentiostatDisconnectButton_->setEnabled(false);
-        }, Qt::QueuedConnection);
-    });
-}
-
-void MainWindow::onLoadFirmware()
-{
-    if (potentiostatBusy_.load() || potentiostatController_ == nullptr || !potentiostatController_->isConnected()) {
-        return;
-    }
-    potentiostatBusy_.store(true);
-    if (potentiostatFirmwareButton_   != nullptr) potentiostatFirmwareButton_->setEnabled(false);
-    if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(false);
-    if (potentiostatStatusLabel_      != nullptr) potentiostatStatusLabel_->setText("Chargement firmware...");
-
-    const int channel = potentiostatChannelCombo_ != nullptr ? potentiostatChannelCombo_->currentIndex() + 1 : 1;
-    auto ctrl = potentiostatController_;
-    if (potentiostatThread_.joinable()) {
-        potentiostatThread_.join();
-    }
-    potentiostatThread_ = std::thread([this, ctrl, channel]() {
-        QString msg;
-        try {
-            ctrl->loadFirmware(channel);
-            msg = QString("Firmware charge - %1").arg(ctrl->connectedModel());
-        } catch (const std::exception& ex) {
-            msg = QString("Erreur firmware : %1").arg(QString::fromUtf8(ex.what()));
-        }
-        const bool stillOk = ctrl->isConnected();
-        QMetaObject::invokeMethod(this, [this, msg, stillOk]() {
-            potentiostatBusy_.store(false);
-            if (potentiostatStatusLabel_ != nullptr) {
-                potentiostatStatusLabel_->setText(msg);
-            }
-            if (potentiostatFirmwareButton_ != nullptr) {
-                potentiostatFirmwareButton_->setEnabled(stillOk);
-            }
-            if (potentiostatDarkCalibrateButton_ != nullptr) {
-                potentiostatDarkCalibrateButton_->setEnabled(stillOk);
-            }
         }, Qt::QueuedConnection);
     });
 }
@@ -7208,9 +7328,7 @@ void MainWindow::onStartCaPotentiostat()
     const ScanConfig::RectangleStartCorner rectangleStartCorner = effectiveRectangleStartCorner();
     const ScanConfig::RectanglePrimaryAxis rectanglePrimaryAxis = effectiveRectanglePrimaryAxis();
     const ScanConfig::RectangleTraversalMode rectangleTraversalMode = effectiveRectangleTraversalMode();
-    const QString scanObjectiveName = objectiveCombo_ != nullptr
-        ? objectiveCombo_->currentText().trimmed()
-        : QString("4x");
+    const QString scanObjectiveName = currentObjectiveLabel();
 
     double stepMm = 0.0;
     double durationS = 0.0;
@@ -7551,6 +7669,20 @@ void MainWindow::onStartCaPotentiostat()
         techniqueParams = params;
     }
 
+    QMessageBox launchConfirmation(this);
+    launchConfirmation.setWindowTitle("Confirmation mesure");
+    launchConfirmation.setIcon(QMessageBox::Information);
+    launchConfirmation.setText("Eteindre les lumieres et activer le laser.");
+    launchConfirmation.setInformativeText("Valider quand le banc est pret pour demarrer la mesure.");
+    auto* confirmLaunchButton = launchConfirmation.addButton("Lancer la mesure", QMessageBox::AcceptRole);
+    auto* cancelLaunchButton = launchConfirmation.addButton(QMessageBox::Cancel);
+    cancelLaunchButton->setText("Annuler");
+    launchConfirmation.setDefaultButton(confirmLaunchButton);
+    launchConfirmation.exec();
+    if (launchConfirmation.clickedButton() != confirmLaunchButton) {
+        return;
+    }
+
     const QString reportObjectiveName = scanObjectiveName;
     const double reportLaserDiameterUm =
         static_cast<double>(laserRadiusPx_) * 2.0 * autoMmPerPxForObjective(reportObjectiveName) * 1000.0;
@@ -7564,6 +7696,18 @@ void MainWindow::onStartCaPotentiostat()
             .arg(caParams->vsInit ? QString("Pref") : QString("Ref"));
     }
     lastReportSetupLines_ = reportSetupLines;
+    lastReportPathSketchImage_ = {};
+    if (!simpleMeasurement) {
+        if (rectangleMode) {
+            lastReportPathSketchImage_ = renderRectangleTraversalSelectionSketch(
+                rectangleStartCorner,
+                rectanglePrimaryAxis,
+                rectangleTraversalMode);
+        }
+        if (lastReportPathSketchImage_.isNull()) {
+            lastReportPathSketchImage_ = renderReportPathSketch(rows, cols, order);
+        }
+    }
 
     potentiostatBusy_.store(true);
     potentiostatStopRequested_.store(false);
@@ -8960,6 +9104,8 @@ void MainWindow::onExportPotentiostat()
     const QDir outDir(parentDir.absoluteFilePath(name));
     int exportCount = 0;
     const QString gsfPath = outDir.absoluteFilePath(name + ".gsf");
+    const PotentiostatElectrodeMode exportElectrodeMode = selectedPotentiostatElectrodeMode();
+    const QString exportElectrodeLabel = selectedPotentiostatElectrodeLabel();
 
     const auto writeGsfFile = [&]() -> bool {
         if (!hasGrid) {
@@ -9004,7 +9150,7 @@ void MainWindow::onExportPotentiostat()
         header.append('\n');
         header.append("XYUnits = m\n");
         header.append("ZUnits = A\n");
-        header.append("Title = Courant I(x,y)\n");
+        header.append(QString("Title = Courant I(x,y) - %1\n").arg(exportElectrodeLabel).toUtf8());
         header += '\0';
         while (header.size() % 4 != 0) header += '\0';
         file.write(header);
@@ -9014,7 +9160,9 @@ void MainWindow::onExportPotentiostat()
                 const std::size_t matIdx = static_cast<std::size_t>(r * potentiostatCols_ + c);
                 float val = std::numeric_limits<float>::quiet_NaN();
                 if (matIdx < potentiostatMatrix_.size() && potentiostatMatrix_[matIdx].has_value()) {
-                    val = static_cast<float>(*potentiostatMatrix_[matIdx]);
+                    val = static_cast<float>(displayCurrentForElectrode(
+                        *potentiostatMatrix_[matIdx],
+                        exportElectrodeMode));
                 }
                 file.write(reinterpret_cast<const char*>(&val), sizeof(float));
             }
@@ -9039,6 +9187,7 @@ void MainWindow::onExportPotentiostat()
                 // ── Simple measurement: time-series ──
                 ts << "# LaserBench - Export CSV - Mesure simple\n";
                 ts << "# Date: " << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss") << "\n";
+                ts << "# Electrode: " << exportElectrodeLabel << "\n";
                 ts << QString("# Points: %1\n").arg(potentiostatPlotTimes_.size());
                 ts << "#\n";
                 ts << "t_s;I_A;Ewe_V\n";
@@ -9056,6 +9205,7 @@ void MainWindow::onExportPotentiostat()
                 // ── Grid measurement ──
                 ts << "# LaserBench - Export CSV\n";
                 ts << "# Date: " << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss") << "\n";
+                ts << "# Electrode: " << exportElectrodeLabel << "\n";
                 ts << QString("# Grille: %1 col x %2 row\n").arg(potentiostatCols_).arg(potentiostatRows_);
                 ts << QString("# X: [%1 ; %2] mm\n")
                       .arg(potentiostatXMin_, 0, 'f', 4).arg(potentiostatXMax_, 0, 'f', 4);
@@ -9305,12 +9455,11 @@ void MainWindow::onExportPotentiostat()
         parameterLines << QString("Dimension: %1 x %2 um")
             .arg(widthUm, 0, 'f', 1)
             .arg(heightUm, 0, 'f', 1);
+        parameterLines << QString("Electrode: %1").arg(exportElectrodeLabel);
 
         QStringList setupLines = lastReportSetupLines_;
         if (setupLines.isEmpty()) {
-            const QString objectiveName = objectiveCombo_ != nullptr
-                ? objectiveCombo_->currentText().trimmed()
-                : QString("4x");
+            const QString objectiveName = currentObjectiveLabel();
             const double laserDiameterPx = static_cast<double>(laserRadiusPx_) * 2.0;
             const double laserDiameterUm = laserDiameterPx * autoMmPerPxForObjective(objectiveName) * 1000.0;
             setupLines
@@ -9370,11 +9519,14 @@ void MainWindow::onExportPotentiostat()
             potentiostatRows_,
             potentiostatCols_,
             potentiostatMatrix_,
-            potentiostatScanOrder_);
-        const QImage pathSketchImage = renderReportPathSketch(
-            potentiostatRows_,
-            potentiostatCols_,
-            potentiostatScanOrder_);
+            potentiostatScanOrder_,
+            exportElectrodeMode);
+        const QImage pathSketchImage = !lastReportPathSketchImage_.isNull()
+            ? lastReportPathSketchImage_
+            : renderReportPathSketch(
+                potentiostatRows_,
+                potentiostatCols_,
+                potentiostatScanOrder_);
         const QImage surface3DImage = renderWidgetSnapshot(potentiostat3DWidget_, QSize(1200, 900));
         const QString pdfPath = outDir.absoluteFilePath(name + "_rapport.pdf");
 
@@ -9428,6 +9580,7 @@ void MainWindow::onImportCsv()
     double metaXMin = 0, metaXMax = 0, metaYMin = 0, metaYMax = 0;
     bool hasMeta = false;
     double metaDwellS = 0.0;
+    PotentiostatElectrodeMode metaElectrodeMode = PotentiostatElectrodeMode::Anode;
 
     struct GridRow { int row; int col; double x; double y; double t; double iMean; double ewe; };
     std::vector<GridRow> gridData;
@@ -9448,6 +9601,12 @@ void MainWindow::onImportCsv()
         if (line.isEmpty()) continue;
 
         if (line.startsWith('#')) {
+            if (line.startsWith("# Electrode:", Qt::CaseInsensitive)) {
+                const QString electrode = line.section(':', 1).trimmed();
+                metaElectrodeMode = electrode.compare("Cathode", Qt::CaseInsensitive) == 0
+                    ? PotentiostatElectrodeMode::Cathode
+                    : PotentiostatElectrodeMode::Anode;
+            }
             static const QRegularExpression reGrid(
                 R"(#\s*Grille\s*:\s*(\d+)\s*col\s*x\s*(\d+)\s*row)");
             auto mGrid = reGrid.match(line);
@@ -9555,6 +9714,7 @@ void MainWindow::onImportCsv()
     importCols_ = 0;
     importXMin_ = importXMax_ = importYMin_ = importYMax_ = 0.0;
     importLastDwellS_ = 0.0;
+    importElectrodeMode_ = metaElectrodeMode;
 
     // ── Populate import data ──────────────────────────────────────────────────
     if (!gridData.empty()) {
@@ -9694,25 +9854,37 @@ MainWindow::promptRectangleTraversalSelection()
     dlg.setWindowTitle("Parcours du balayage rectangle");
     dlg.setMinimumWidth(420);
 
+    const QString objectiveName = currentObjectiveLabel();
+    constexpr double kOneWayOnlyMagnification = 50.0;
+    const bool oneWayOnly = currentObjectiveMagnification() >= kOneWayOnlyMagnification;
+    const ScanConfig::RectangleTraversalMode initialTraversalMode = effectiveRectangleTraversalMode();
+
     auto* layout = new QVBoxLayout(&dlg);
     auto* intro = new QLabel("Cliquer sur une fleche pour choisir le point de depart et la direction initiale du balayage.");
     intro->setWordWrap(true);
     layout->addWidget(intro);
     auto* preview = new RectangleTraversalPreviewWidget;
-    preview->setSelection({effectiveRectangleStartCorner(), effectiveRectanglePrimaryAxis(), effectiveRectangleTraversalMode()});
+    preview->setSelection({effectiveRectangleStartCorner(), effectiveRectanglePrimaryAxis(), initialTraversalMode});
     layout->addWidget(preview);
 
     auto* traversalModeGroup = new QGroupBox("Type de parcours");
     auto* traversalModeLayout = new QHBoxLayout(traversalModeGroup);
     auto* zigZagBtn = new QRadioButton("Zig-zag");
     auto* oneWayBtn = new QRadioButton("One-way");
-    zigZagBtn->setChecked(effectiveRectangleTraversalMode() == ScanConfig::RectangleTraversalMode::ZigZag);
-    oneWayBtn->setChecked(effectiveRectangleTraversalMode() == ScanConfig::RectangleTraversalMode::OneWay);
+    zigZagBtn->setChecked(initialTraversalMode == ScanConfig::RectangleTraversalMode::ZigZag);
+    zigZagBtn->setEnabled(!oneWayOnly);
+    oneWayBtn->setChecked(initialTraversalMode == ScanConfig::RectangleTraversalMode::OneWay);
     traversalModeLayout->addWidget(zigZagBtn);
     traversalModeLayout->addWidget(oneWayBtn);
     layout->addWidget(traversalModeGroup);
 
-    auto* hint = new QLabel("Zig-zag alterne le sens a chaque ligne. One-way garde le meme sens et revient au depart de la ligne suivante sans acquisition.");
+    QString hintText = "Zig-zag alterne le sens a chaque ligne. One-way garde le meme sens et revient au depart de la ligne suivante sans acquisition.";
+    if (oneWayOnly) {
+        hintText = QString("Avec l'objectif %1, seul One-way est disponible.\n\n%2")
+            .arg(objectiveName)
+            .arg(hintText);
+    }
+    auto* hint = new QLabel(hintText);
     hint->setWordWrap(true);
     hint->setStyleSheet("color:#5c6570; font-size:9pt;");
     layout->addWidget(hint);
@@ -10101,6 +10273,10 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
         scanConfig_.rectanglePrimaryAxis = selectedRectangleTraversal->primaryAxis;
         scanConfig_.rectangleTraversalMode = selectedRectangleTraversal->traversalMode;
         scanConfig_.rectangleTraversalExplicit = true;
+        lastReportPathSketchImage_ = renderRectangleTraversalSelectionSketch(
+            selectedRectangleTraversal->startCorner,
+            selectedRectangleTraversal->primaryAxis,
+            selectedRectangleTraversal->traversalMode);
         appendLog(QString("Balayage rectangle selectionne : depart=%1 | axe principal=%2 | parcours=%3")
             .arg(rectangleStartCornerLabel(selectedRectangleTraversal->startCorner))
             .arg(rectanglePrimaryAxisLabel(selectedRectangleTraversal->primaryAxis))

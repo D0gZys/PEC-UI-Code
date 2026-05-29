@@ -20,6 +20,7 @@
 
 #include "core/AppState.hpp"
 #include "hardware/NewportConexController.hpp"
+#include "ui/PotentiostatElectrodeMode.hpp"
 
 QT_BEGIN_NAMESPACE
 class QCheckBox;
@@ -129,7 +130,10 @@ private:
     void loadCalibrationPresets();
     void saveCalibrationPresets();
     void syncCalibrationUi();
+    [[nodiscard]] double currentObjectiveMagnification() const;
+    [[nodiscard]] QString currentObjectiveLabel() const;
     void clearSequencePreviewSelection();
+    void clearDefinedSequenceZone();
     void updateSequenceLabels(const QPointF& startMm, const QPointF& endMm);
     void syncSequenceOverlay();
     void applyLaserCalibrationEdits();
@@ -167,7 +171,6 @@ private:
     void onExportPotentiostat();
     void onImportCsv();
     void onDisconnectPotentiostat();
-    void onLoadFirmware();
     void syncPotentiostatTechniqueUi();
 
     void onScanPorts();
@@ -380,11 +383,11 @@ private:
     QLineEdit*   potentiostatCvaTfMinutesEdit_   {nullptr};
     QLineEdit*   potentiostatCvaTfSecondsEdit_   {nullptr};
     QLineEdit*   potentiostatCvaDtfEdit_         {nullptr};
+    QComboBox*   potentiostatElectrodeCombo_   {nullptr};
     QComboBox*   potentiostatGraphTypeCombo_   {nullptr};
     QPushButton* colorGraphButton_             {nullptr};
     QPushButton* potentiostatConnectButton_    {nullptr};
     QPushButton* potentiostatDisconnectButton_ {nullptr};
-    QPushButton* potentiostatFirmwareButton_   {nullptr};
     QLabel*      potentiostatStatusLabel_      {nullptr};
     QPushButton* potentiostatRunButton_        {nullptr};
     QPushButton* potentiostatStopButton_       {nullptr};
@@ -421,6 +424,7 @@ private:
     QComboBox* yPortCombo_ {nullptr};
     QComboBox* cameraSerialCombo_ {nullptr};
     QComboBox* objectiveCombo_ {nullptr};
+    QCheckBox* manualObjectiveCheck_ {nullptr};
     QLineEdit* jogStepEdit_ {nullptr};
     QLineEdit* jogMoveStepEdit_ {nullptr};
     QLineEdit* absXEdit_ {nullptr};
@@ -460,6 +464,7 @@ private:
     QStringList lastReportSetupLines_;
     QStringList lastReportMovementLines_;
     QImage lastValidatedZoneImage_;
+    QImage lastReportPathSketchImage_;
     std::vector<std::optional<double>> potentiostatMatrix_;
     std::vector<std::vector<double>> potentiostatCellCurrentSamples_;
     std::vector<std::vector<double>> potentiostatCellEweSamples_;
@@ -490,6 +495,7 @@ private:
     std::vector<std::vector<double>> importCellEweSamples_;
     std::vector<QPointF> importCellPositions_;
     std::vector<double> importCellTimes_;
+    PotentiostatElectrodeMode importElectrodeMode_ {PotentiostatElectrodeMode::Anode};
     int importRows_ {0};
     int importCols_ {0};
     double importXMin_ {0.0};
@@ -509,9 +515,6 @@ private:
     QLabel* sequenceStartLabel_ {nullptr};
     QLabel* sequenceEndLabel_ {nullptr};
     QLabel* sequenceStatusLabel_ {nullptr};
-    QCheckBox* showZoneCheck_ {nullptr};
-    QCheckBox* hideWaypointsCheck_ {nullptr};
-
     QPushButton* scanPortsButton_ {nullptr};
     QPushButton* connectAxesButton_ {nullptr};
     QPushButton* homeAxesButton_ {nullptr};
@@ -536,6 +539,7 @@ private:
     QPushButton* sequenceSetStartButton_ {nullptr};
     QPushButton* sequenceSetEndButton_ {nullptr};
     QPushButton* sequencePickButton_ {nullptr};
+    QPushButton* sequenceClearButton_ {nullptr};
     QPushButton* sequenceRunButton_ {nullptr};
     QPushButton* sequenceStopButton_ {nullptr};
     QPushButton* captureButton_      {nullptr};
@@ -562,6 +566,8 @@ private:
     [[nodiscard]] ScanConfig::RectangleTraversalMode effectiveRectangleTraversalMode() const;
     [[nodiscard]] std::vector<std::pair<int, int>> buildRectangleTraversalOrder(int rows, int cols) const;
     [[nodiscard]] QString selectedPotentiostatTechniqueLabel() const;
+    [[nodiscard]] QString selectedPotentiostatElectrodeLabel() const;
+    [[nodiscard]] PotentiostatElectrodeMode selectedPotentiostatElectrodeMode() const;
 
     enum class PotentiostatTechnique
     {

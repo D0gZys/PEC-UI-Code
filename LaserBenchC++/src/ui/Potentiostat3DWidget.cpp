@@ -169,6 +169,15 @@ void Potentiostat3DWidget::setGrid(
     update();
 }
 
+void Potentiostat3DWidget::setElectrodeMode(PotentiostatElectrodeMode mode)
+{
+    if (electrodeMode_ == mode) {
+        return;
+    }
+    electrodeMode_ = mode;
+    update();
+}
+
 void Potentiostat3DWidget::clear()
 {
     rows_ = 0;
@@ -262,21 +271,24 @@ void Potentiostat3DWidget::paintEvent(QPaintEvent* event)
         return;
     }
 
-    double zMin = std::numeric_limits<double>::max();
-    double zMax = -std::numeric_limits<double>::max();
+    double displayMin = std::numeric_limits<double>::max();
+    double displayMax = -std::numeric_limits<double>::max();
     for (const auto& value : values_) {
         if (value.has_value() && std::isfinite(*value)) {
-            zMin = std::min(zMin, *value);
-            zMax = std::max(zMax, *value);
+            const double displayValue = displayCurrentForElectrode(*value, electrodeMode_);
+            displayMin = std::min(displayMin, displayValue);
+            displayMax = std::max(displayMax, displayValue);
         }
     }
-    if (zMin == std::numeric_limits<double>::max()) {
+    if (displayMin == std::numeric_limits<double>::max()) {
         painter.setPen(QColor("#5c6570"));
         painter.drawText(plotRect, Qt::AlignCenter, "Aucune donnee de mesure");
         return;
     }
-    if (zMax <= zMin) zMax = zMin + 1.0;
-    const double zRange = zMax - zMin;
+    if (displayMax <= displayMin) {
+        displayMax = displayMin + std::max(1.0, std::abs(displayMin) * 0.05);
+    }
+    const double displayRange = displayMax - displayMin;
 
     const double cMax = static_cast<double>(std::max(1, cols_ - 1));
     const double rMax = static_cast<double>(std::max(1, rows_ - 1));
@@ -285,11 +297,11 @@ void Potentiostat3DWidget::paintEvent(QPaintEvent* event)
     const double yAspect = ySpanMm_ / maxSpanMm;
     constexpr double kZModelScale = 0.48;
 
-    const auto valueAt = [&](int row, int col) -> double {
+    const auto displayValueAt = [&](int row, int col) -> double {
         const std::size_t idx = static_cast<std::size_t>(row * cols_ + col);
         return (idx < values_.size() && values_[idx].has_value() && std::isfinite(*values_[idx]))
-            ? *values_[idx]
-            : zMin;
+            ? displayCurrentForElectrode(*values_[idx], electrodeMode_)
+            : displayMin;
     };
 
     const auto modelPoint = [&](double col, double row, double zNorm) -> Vec3 {
@@ -301,11 +313,11 @@ void Potentiostat3DWidget::paintEvent(QPaintEvent* event)
     };
 
     const auto zNorm = [&](double value) -> double {
-        return (value - zMin) / zRange;
+        return (value - displayMin) / displayRange;
     };
 
-    const auto projectCell = [&](double col, double row, double value) -> QPointF {
-        const Vec3 p = modelPoint(col, row, zNorm(value));
+    const auto projectCell = [&](double col, double row, double displayValue) -> QPointF {
+        const Vec3 p = modelPoint(col, row, zNorm(displayValue));
         return project(p.x, p.y, p.z);
     };
 
@@ -323,7 +335,7 @@ void Potentiostat3DWidget::paintEvent(QPaintEvent* event)
     bool hasBounds = false;
     for (int row = 0; row < rows_; ++row) {
         for (int col = 0; col < cols_; ++col) {
-            const QPointF p = projectCell(col, row, valueAt(row, col));
+            const QPointF p = projectCell(col, row, displayValueAt(row, col));
             if (!hasBounds) {
                 bounds = QRectF(p, QSizeF(1.0, 1.0));
                 hasBounds = true;
@@ -333,10 +345,10 @@ void Potentiostat3DWidget::paintEvent(QPaintEvent* event)
         }
     }
     const std::array<QPointF, 8> boxPoints {
-        projectCell(0, 0, zMin), projectCell(cMax, 0, zMin),
-        projectCell(cMax, rMax, zMin), projectCell(0, rMax, zMin),
-        projectCell(0, 0, zMax), projectCell(cMax, 0, zMax),
-        projectCell(cMax, rMax, zMax), projectCell(0, rMax, zMax)
+        projectCell(0, 0, displayMin), projectCell(cMax, 0, displayMin),
+        projectCell(cMax, rMax, displayMin), projectCell(0, rMax, displayMin),
+        projectCell(0, 0, displayMax), projectCell(cMax, 0, displayMax),
+        projectCell(cMax, rMax, displayMax), projectCell(0, rMax, displayMax)
     };
     for (const QPointF& p : boxPoints) {
         bounds = bounds.united(QRectF(p, QSizeF(1.0, 1.0)));
@@ -361,10 +373,10 @@ void Potentiostat3DWidget::paintEvent(QPaintEvent* event)
 
     for (int row = 0; row < rows_ - 1; ++row) {
         for (int col = 0; col < cols_ - 1; ++col) {
-            const Vec3 p00 = modelPoint(col, row, zNorm(valueAt(row, col)));
-            const Vec3 p10 = modelPoint(col + 1, row, zNorm(valueAt(row, col + 1)));
-            const Vec3 p11 = modelPoint(col + 1, row + 1, zNorm(valueAt(row + 1, col + 1)));
-            const Vec3 p01 = modelPoint(col, row + 1, zNorm(valueAt(row + 1, col)));
+            const Vec3 p00 = modelPoint(col, row, zNorm(displayValueAt(row, col)));
+            const Vec3 p10 = modelPoint(col + 1, row, zNorm(displayValueAt(row, col + 1)));
+            const Vec3 p11 = modelPoint(col + 1, row + 1, zNorm(displayValueAt(row + 1, col + 1)));
+            const Vec3 p01 = modelPoint(col, row + 1, zNorm(displayValueAt(row + 1, col)));
             const double depth = (depthOf(p00) + depthOf(p10) + depthOf(p11) + depthOf(p01)) * 0.25;
             quads.push_back({row, col, depth});
         }
@@ -377,15 +389,15 @@ void Potentiostat3DWidget::paintEvent(QPaintEvent* event)
     for (const Quad& quad : quads) {
         const int row = quad.row;
         const int col = quad.col;
-        const double z00 = valueAt(row, col);
-        const double z10 = valueAt(row, col + 1);
-        const double z11 = valueAt(row + 1, col + 1);
-        const double z01 = valueAt(row + 1, col);
-        const double t = zNorm((z00 + z10 + z11 + z01) * 0.25);
+        const double d00 = displayValueAt(row, col);
+        const double d10 = displayValueAt(row, col + 1);
+        const double d11 = displayValueAt(row + 1, col + 1);
+        const double d01 = displayValueAt(row + 1, col);
+        const double t = zNorm((d00 + d10 + d11 + d01) * 0.25);
 
-        const Vec3 p00 = modelPoint(col, row, zNorm(z00));
-        const Vec3 p10 = modelPoint(col + 1, row, zNorm(z10));
-        const Vec3 p01 = modelPoint(col, row + 1, zNorm(z01));
+        const Vec3 p00 = modelPoint(col, row, zNorm(d00));
+        const Vec3 p10 = modelPoint(col + 1, row, zNorm(d10));
+        const Vec3 p01 = modelPoint(col, row + 1, zNorm(d01));
         Vec3 normal = normalize(cross(p10 - p00, p01 - p00));
         if (normal.z < 0.0) normal = {-normal.x, -normal.y, -normal.z};
         const Vec3 light = normalize({-0.35, -0.55, 1.0});
@@ -393,20 +405,20 @@ void Potentiostat3DWidget::paintEvent(QPaintEvent* event)
         const QColor fill = shadeColor(valueToColor(t), shade);
 
         QPolygonF poly;
-        poly << projectCell(col, row, z00)
-             << projectCell(col + 1, row, z10)
-             << projectCell(col + 1, row + 1, z11)
-             << projectCell(col, row + 1, z01);
+        poly << projectCell(col, row, d00)
+             << projectCell(col + 1, row, d10)
+             << projectCell(col + 1, row + 1, d11)
+             << projectCell(col, row + 1, d01);
 
         painter.setBrush(fill);
         painter.setPen(QPen(shadeColor(fill, 0.92), 0.25));
         painter.drawPolygon(poly);
     }
 
-    const QPointF p00 = projectCell(0, 0, zMin);
-    const QPointF p10 = projectCell(cMax, 0, zMin);
-    const QPointF p11 = projectCell(cMax, rMax, zMin);
-    const QPointF p01 = projectCell(0, rMax, zMin);
+    const QPointF p00 = projectCell(0, 0, displayMin);
+    const QPointF p10 = projectCell(cMax, 0, displayMin);
+    const QPointF p11 = projectCell(cMax, rMax, displayMin);
+    const QPointF p01 = projectCell(0, rMax, displayMin);
 
     painter.setPen(QPen(QColor("#31343a"), 1.1));
     painter.drawLine(p00, p10);
@@ -460,21 +472,26 @@ void Potentiostat3DWidget::paintEvent(QPaintEvent* event)
         return a.base.y() < b.base.y();
     });
 
-    const QPointF zBase = projectCell(zCorner.col, zCorner.row, zMin);
-    const QPointF zTop = projectCell(zCorner.col, zCorner.row, zMax);
+    const QPointF zBase = projectCell(zCorner.col, zCorner.row, displayMin);
+    const QPointF zTop = projectCell(zCorner.col, zCorner.row, displayMax);
     painter.setPen(QPen(QColor("#31343a"), 1.2));
     painter.drawLine(zBase, zTop);
 
     double currentScale = 1.0;
-    const QString currentUnit = currentUnitLabel(zMin, zMax, &currentScale);
+    const double rawBottom = currentFromElectrodeDisplay(displayMin, electrodeMode_);
+    const double rawTop = currentFromElectrodeDisplay(displayMax, electrodeMode_);
+    const QString currentUnit = currentUnitLabel(
+        std::min(rawBottom, rawTop),
+        std::max(rawBottom, rawTop),
+        &currentScale);
     const QPointF tickDir = (zCorner.base.x() > plotRect.center().x()) ? QPointF(8.0, 0.0) : QPointF(-8.0, 0.0);
     const double labelX = tickDir.x() > 0.0 ? 6.0 : -74.0;
     const Qt::Alignment labelAlign = tickDir.x() > 0.0
         ? (Qt::AlignLeft | Qt::AlignVCenter)
         : (Qt::AlignRight | Qt::AlignVCenter);
 
-    for (const auto& tick : {std::pair<double, QString>(zMin, formatScaledCurrent(zMin, currentScale)),
-                             std::pair<double, QString>(zMax, formatScaledCurrent(zMax, currentScale))}) {
+    for (const auto& tick : {std::pair<double, QString>(displayMin, formatScaledCurrent(rawBottom, currentScale)),
+                             std::pair<double, QString>(displayMax, formatScaledCurrent(rawTop, currentScale))}) {
         const QPointF p = projectCell(zCorner.col, zCorner.row, tick.first);
         painter.drawLine(p, p + tickDir);
         painter.drawText(QRectF(p.x() + labelX, p.y() - 10.0, 68.0, 20.0),

@@ -76,6 +76,7 @@ qt_add_executable(LaserBench
     src/ui/MainWindow.hpp
     src/ui/PotentiostatGraphWidget.cpp
     src/ui/PotentiostatGraphWidget.hpp
+    src/ui/PotentiostatElectrodeMode.hpp
     src/ui/PotentiostatHeatmapWidget.cpp
     src/ui/PotentiostatHeatmapWidget.hpp
     src/ui/Potentiostat3DWidget.cpp

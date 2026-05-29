@@ -8,6 +8,8 @@
 #include <utility>
 #include <vector>
 
+#include "ui/PotentiostatElectrodeMode.hpp"
+
 namespace laserbench::ui {
 
 class PotentiostatHeatmapWidget final : public QWidget
@@ -23,6 +25,7 @@ public:
         std::vector<std::optional<double>> values,
         std::optional<std::pair<int, int>> highlightedCell = std::nullopt
     );
+    void setElectrodeMode(PotentiostatElectrodeMode mode);
     void clear();
 
 signals:
@@ -41,6 +44,7 @@ private:
 
     int rows_ {0};
     int cols_ {0};
+    PotentiostatElectrodeMode electrodeMode_ {PotentiostatElectrodeMode::Anode};
     std::vector<std::optional<double>> values_;
     std::optional<std::pair<int, int>> highlightedCell_;
 };
