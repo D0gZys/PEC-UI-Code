@@ -88,6 +88,7 @@ constexpr int kDefaultMotorTimeoutMs = 30000;
 constexpr double kOverlayPredictionEpsilonMm = 0.002;
 constexpr double kOverlayStabilityDeadbandMm = 0.00075;
 constexpr double kScanPlanningEpsilonMm = 1e-9;
+constexpr double kLiveGraphWindowSeconds = 60.0;
 constexpr double kContinuousPollingPeriodS = 0.002;
 constexpr double kContinuousGuaranteedSamplePeriodS = 0.02;
 constexpr double kContinuousFreshValueTimeoutS = 0.25;
@@ -5799,7 +5800,41 @@ void MainWindow::refreshPotentiostatVisualization()
             break;
         }
         potentiostatGraphWidget_->setGraphMode(graphMode);
-        potentiostatGraphWidget_->setSeries(potentiostatPlotTimes_, potentiostatPlotCurrents_, potentiostatPlotEwe_);
+
+        const std::size_t graphPointCount = std::min({
+            potentiostatPlotTimes_.size(),
+            potentiostatPlotCurrents_.size(),
+            potentiostatPlotEwe_.size()
+        });
+        if (potentiostatBusy_.load() && graphPointCount > 0) {
+            std::size_t firstVisibleIndex = 0;
+            const double latestTime = potentiostatPlotTimes_[graphPointCount - 1];
+            if (std::isfinite(latestTime)) {
+                const double firstVisibleTime = latestTime - kLiveGraphWindowSeconds;
+                const auto firstIt = std::lower_bound(
+                    potentiostatPlotTimes_.begin(),
+                    potentiostatPlotTimes_.begin() + static_cast<std::ptrdiff_t>(graphPointCount),
+                    firstVisibleTime);
+                firstVisibleIndex = static_cast<std::size_t>(
+                    std::distance(potentiostatPlotTimes_.begin(), firstIt));
+                if (firstVisibleIndex >= graphPointCount - 1 && firstVisibleIndex > 0) {
+                    --firstVisibleIndex;
+                }
+            }
+
+            std::vector<double> visibleTimes(
+                potentiostatPlotTimes_.begin() + static_cast<std::ptrdiff_t>(firstVisibleIndex),
+                potentiostatPlotTimes_.begin() + static_cast<std::ptrdiff_t>(graphPointCount));
+            std::vector<double> visibleCurrents(
+                potentiostatPlotCurrents_.begin() + static_cast<std::ptrdiff_t>(firstVisibleIndex),
+                potentiostatPlotCurrents_.begin() + static_cast<std::ptrdiff_t>(graphPointCount));
+            std::vector<double> visibleEwe(
+                potentiostatPlotEwe_.begin() + static_cast<std::ptrdiff_t>(firstVisibleIndex),
+                potentiostatPlotEwe_.begin() + static_cast<std::ptrdiff_t>(graphPointCount));
+            potentiostatGraphWidget_->setSeries(std::move(visibleTimes), std::move(visibleCurrents), std::move(visibleEwe));
+        } else {
+            potentiostatGraphWidget_->setSeries(potentiostatPlotTimes_, potentiostatPlotCurrents_, potentiostatPlotEwe_);
+        }
     }
 
     if (potentiostatHeatmapWidget_ != nullptr) {
@@ -8029,6 +8064,7 @@ void MainWindow::onStartCaPotentiostat()
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - measurementStartedAt).count());
             QMetaObject::invokeMethod(this, [this, stateMsg, simpleMeasurement, measurementDurationS]() {
                 potentiostatBusy_.store(false);
+                refreshPotentiostatVisualization();
                 if (potentiostatRunButton_   != nullptr) potentiostatRunButton_->setEnabled(true);
                 if (potentiostatStopButton_  != nullptr) potentiostatStopButton_->setEnabled(false);
                 if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(true);
@@ -8946,6 +8982,7 @@ void MainWindow::onStartCaPotentiostat()
                 potentiostatMeasurementDurationS_ = measurementDurationS;
                 potentiostatMeasurementStartTime_.reset();
                 currentWaypointIndex_ = simpleMeasurement ? potentiostatSampleCount_ : nPoints;
+                refreshPotentiostatVisualization();
                 if (potentiostatRunButton_    != nullptr) potentiostatRunButton_->setEnabled(true);
                 if (potentiostatStopButton_   != nullptr) potentiostatStopButton_->setEnabled(false);
                 if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(true);
