@@ -45,6 +45,7 @@
 #include <QPolygonF>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QRegion>
 #include <QScrollArea>
 #include <QSplitter>
 #include <QStackedWidget>
@@ -141,6 +142,367 @@ QPushButton* createActionButton(const QString& text)
     button->setMinimumHeight(34);
     return button;
 }
+
+} // namespace
+
+class TutorialOverlayWidget final : public QWidget
+{
+public:
+    explicit TutorialOverlayWidget(QWidget* parent = nullptr)
+        : QWidget(parent)
+    {
+        setAttribute(Qt::WA_StyledBackground, false);
+        setAttribute(Qt::WA_NoSystemBackground, true);
+        setFocusPolicy(Qt::StrongFocus);
+        setMouseTracking(true);
+
+        previousButton_ = new QPushButton("Precedent", this);
+        nextButton_ = new QPushButton("Suivant", this);
+        actionButton_ = new QPushButton(this);
+        closeButton_ = new QPushButton("Quitter", this);
+
+        const QString navStyle =
+            "QPushButton { min-height:28px; border-radius:5px; border:1px solid #cfd8e3;"
+            " background:#ffffff; color:#16202c; padding:0 12px; font-size:9pt; }"
+            "QPushButton:hover { background:#eef4ff; border-color:#1f6feb; }"
+            "QPushButton:disabled { color:#98a2b3; background:#f3f5f8; }";
+        previousButton_->setStyleSheet(navStyle);
+        nextButton_->setStyleSheet(navStyle);
+        closeButton_->setStyleSheet(navStyle);
+        actionButton_->setStyleSheet(
+            "QPushButton { min-height:28px; border-radius:5px; border:1px solid #1558c0;"
+            " background:#1f6feb; color:#ffffff; padding:0 12px; font-size:9pt; font-weight:600; }"
+            "QPushButton:hover { background:#1b63d3; }");
+
+        connect(previousButton_, &QPushButton::clicked, this, [this]() {
+            if (onPrevious) onPrevious();
+        });
+        connect(nextButton_, &QPushButton::clicked, this, [this]() {
+            if (onNext) onNext();
+        });
+        connect(actionButton_, &QPushButton::clicked, this, [this]() {
+            if (onAction) onAction();
+        });
+        connect(closeButton_, &QPushButton::clicked, this, [this]() {
+            if (onClose) onClose();
+        });
+    }
+
+    void setStep(
+        const QRect& targetRect,
+        const QString& title,
+        const QString& body,
+        int stepIndex,
+        int stepCount,
+        const QString& actionLabel)
+    {
+        targetRect_ = targetRect;
+        title_ = title;
+        body_ = body;
+        stepIndex_ = stepIndex;
+        stepCount_ = stepCount;
+        actionLabel_ = actionLabel;
+
+        previousButton_->setEnabled(stepIndex_ > 0);
+        nextButton_->setText(stepIndex_ + 1 >= stepCount_ ? "Terminer" : "Suivant");
+        actionButton_->setText(actionLabel_);
+        actionButton_->setVisible(!actionLabel_.isEmpty());
+
+        updateButtonGeometry();
+        updateInteractionMask();
+        update();
+    }
+
+    std::function<void()> onPrevious;
+    std::function<void()> onNext;
+    std::function<void()> onAction;
+    std::function<void()> onClose;
+
+protected:
+    void resizeEvent(QResizeEvent* event) override
+    {
+        QWidget::resizeEvent(event);
+        updateButtonGeometry();
+        updateInteractionMask();
+    }
+
+    void mousePressEvent(QMouseEvent* event) override
+    {
+        if (forwardMouseEventToTarget(event)) {
+            return;
+        }
+        event->accept();
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override
+    {
+        if (forwardMouseEventToTarget(event)) {
+            return;
+        }
+        event->accept();
+    }
+
+    void mouseDoubleClickEvent(QMouseEvent* event) override
+    {
+        if (forwardMouseEventToTarget(event)) {
+            return;
+        }
+        event->accept();
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override
+    {
+        if (event->buttons() != Qt::NoButton && forwardMouseEventToTarget(event)) {
+            return;
+        }
+        event->accept();
+    }
+
+    void paintEvent(QPaintEvent* event) override
+    {
+        Q_UNUSED(event);
+
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.fillRect(rect(), QColor(9, 15, 28, 154));
+
+        if (!targetRect_.isNull()) {
+            const QRect highlight = targetRect_.adjusted(-6, -6, 6, 6).intersected(rect());
+            painter.setBrush(QColor(255, 255, 255, 42));
+            painter.setPen(QPen(QColor("#58a6ff"), 3));
+            painter.drawRoundedRect(highlight, 8, 8);
+
+            painter.setPen(QPen(QColor(255, 255, 255, 115), 1));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawRoundedRect(highlight.adjusted(-4, -4, 4, 4), 10, 10);
+        }
+
+        const QRect bubble = bubbleRect();
+        painter.setPen(QPen(QColor(32, 44, 62, 220), 1));
+        painter.setBrush(QColor(255, 255, 255, 246));
+        painter.drawRoundedRect(bubble, 8, 8);
+
+        QRect content = bubble.adjusted(18, 14, -18, -62);
+        painter.setPen(QColor("#0f172a"));
+        QFont titleFont = font();
+        titleFont.setPointSize(12);
+        titleFont.setBold(true);
+        painter.setFont(titleFont);
+        const QRect titleRect(content.left(), content.top(), content.width() - 72, 28);
+        painter.drawText(titleRect, Qt::AlignLeft | Qt::AlignVCenter, title_);
+
+        painter.setPen(QColor("#64748b"));
+        QFont counterFont = font();
+        counterFont.setPointSize(9);
+        painter.setFont(counterFont);
+        painter.drawText(
+            QRect(content.right() - 62, content.top(), 62, 28),
+            Qt::AlignRight | Qt::AlignVCenter,
+            QString("%1/%2").arg(stepIndex_ + 1).arg(stepCount_));
+
+        painter.setPen(QColor("#243244"));
+        QFont bodyFont = font();
+        bodyFont.setPointSize(9);
+        painter.setFont(bodyFont);
+        QTextOption option;
+        option.setWrapMode(QTextOption::WordWrap);
+        option.setAlignment(Qt::AlignLeft | Qt::AlignTop);
+        painter.drawText(QRectF(content.left(), content.top() + 38, content.width(), content.height() - 34), body_, option);
+    }
+
+private:
+    QRect bubbleRect() const
+    {
+        const int widthPx = std::min(560, std::max(470, width() - 48));
+        const int heightPx = 168;
+        const int margin = 18;
+        int x = margin;
+        int y = margin;
+
+        if (!targetRect_.isNull()) {
+            x = targetRect_.center().x() - widthPx / 2;
+            if (targetRect_.center().y() < height() / 2) {
+                y = targetRect_.bottom() + 18;
+            } else {
+                y = targetRect_.top() - heightPx - 18;
+            }
+        } else {
+            x = (width() - widthPx) / 2;
+            y = (height() - heightPx) / 2;
+        }
+
+        x = std::clamp(x, margin, std::max(margin, width() - widthPx - margin));
+        y = std::clamp(y, margin, std::max(margin, height() - heightPx - margin));
+        return QRect(x, y, widthPx, heightPx);
+    }
+
+    void updateInteractionMask()
+    {
+        QRegion mask(rect());
+        if (!targetRect_.isNull()) {
+            const QRect clickThroughRect = targetRect_.adjusted(-8, -8, 8, 8).intersected(rect());
+            mask = mask.subtracted(QRegion(clickThroughRect));
+        }
+
+        const QRegion bubbleRegion(bubbleRect().adjusted(-2, -2, 2, 2));
+        mask = mask.united(bubbleRegion);
+        setMask(mask);
+    }
+
+    void updateButtonGeometry()
+    {
+        const QRect bubble = bubbleRect();
+        const int buttonY = bubble.bottom() - 44;
+        const int right = bubble.right() - 18;
+        const int gap = 8;
+
+        closeButton_->setGeometry(bubble.left() + 18, buttonY, 76, 30);
+        previousButton_->setGeometry(right - 86 - gap - 86 - gap - 136, buttonY, 86, 30);
+
+        if (actionButton_->isVisible()) {
+            actionButton_->setGeometry(right - 86 - gap - 136, buttonY, 136, 30);
+            nextButton_->setGeometry(right - 86, buttonY, 86, 30);
+        } else {
+            nextButton_->setGeometry(right - 86, buttonY, 86, 30);
+        }
+    }
+
+    bool forwardMouseEventToTarget(QMouseEvent* event)
+    {
+        const QPoint overlayPos = event->position().toPoint();
+        const QRect interactiveRect = targetRect_.adjusted(-8, -8, 8, 8).intersected(rect());
+        if (targetRect_.isNull() || !interactiveRect.contains(overlayPos)) {
+            return false;
+        }
+
+        if (QWidget* overlayChild = childAt(overlayPos); overlayChild != nullptr) {
+            return false;
+        }
+
+        const bool wasVisible = isVisible();
+        if (wasVisible) {
+            hide();
+        }
+
+        QWidget* receiver = QApplication::widgetAt(event->globalPosition().toPoint());
+
+        if (wasVisible) {
+            show();
+            raise();
+        }
+
+        if (receiver == nullptr || receiver == this || isAncestorOf(receiver)) {
+            return false;
+        }
+
+        const QPoint globalPoint = event->globalPosition().toPoint();
+        const QPointF receiverPos = receiver->mapFromGlobal(globalPoint);
+        QMouseEvent forwarded(
+            event->type(),
+            receiverPos,
+            event->globalPosition(),
+            event->button(),
+            event->buttons(),
+            event->modifiers(),
+            event->pointingDevice());
+        QCoreApplication::sendEvent(receiver, &forwarded);
+        event->accept();
+        return true;
+    }
+
+    QRect targetRect_;
+    QString title_;
+    QString body_;
+    QString actionLabel_;
+    int stepIndex_ {0};
+    int stepCount_ {1};
+    QPushButton* previousButton_ {nullptr};
+    QPushButton* nextButton_ {nullptr};
+    QPushButton* actionButton_ {nullptr};
+    QPushButton* closeButton_ {nullptr};
+};
+
+class TutorialPanelWidget final : public QFrame
+{
+public:
+    explicit TutorialPanelWidget(QWidget* parent = nullptr)
+        : QFrame(parent)
+    {
+        setFrameShape(QFrame::NoFrame);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+        setMaximumHeight(150);
+        setStyleSheet(
+            "QFrame { background:#ffffff; border:1px solid #3b82f6; border-radius:10px; }"
+            "QLabel { border:none; background:transparent; color:#0f172a; }"
+            "QLabel#tutorialPanelBody { color:#243244; font-size:9pt; }"
+            "QLabel#tutorialPanelCounter { color:#64748b; font-size:9pt; }"
+            "QPushButton { min-height:28px; border-radius:5px; border:1px solid #cfd8e3;"
+            " background:#ffffff; color:#16202c; padding:0 12px; font-size:9pt; }"
+            "QPushButton:hover { background:#eef4ff; border-color:#1f6feb; }"
+            "QPushButton:disabled { color:#98a2b3; background:#f3f5f8; }");
+
+        auto* root = new QVBoxLayout(this);
+        root->setContentsMargins(14, 10, 14, 10);
+        root->setSpacing(8);
+
+        auto* header = new QHBoxLayout;
+        titleLabel_ = new QLabel;
+        titleLabel_->setStyleSheet("font-size:11pt; font-weight:700;");
+        counterLabel_ = new QLabel;
+        counterLabel_->setObjectName("tutorialPanelCounter");
+        header->addWidget(titleLabel_, 1);
+        header->addWidget(counterLabel_);
+        root->addLayout(header);
+
+        bodyLabel_ = new QLabel;
+        bodyLabel_->setObjectName("tutorialPanelBody");
+        bodyLabel_->setWordWrap(true);
+        root->addWidget(bodyLabel_);
+
+        auto* buttons = new QHBoxLayout;
+        closeButton_ = new QPushButton("Quitter");
+        previousButton_ = new QPushButton("Precedent");
+        nextButton_ = new QPushButton("Suivant");
+        buttons->addWidget(closeButton_);
+        buttons->addStretch(1);
+        buttons->addWidget(previousButton_);
+        buttons->addWidget(nextButton_);
+        root->addLayout(buttons);
+
+        connect(previousButton_, &QPushButton::clicked, this, [this]() {
+            if (onPrevious) onPrevious();
+        });
+        connect(nextButton_, &QPushButton::clicked, this, [this]() {
+            if (onNext) onNext();
+        });
+        connect(closeButton_, &QPushButton::clicked, this, [this]() {
+            if (onClose) onClose();
+        });
+    }
+
+    void setStep(const QString& title, const QString& body, int stepIndex, int stepCount)
+    {
+        titleLabel_->setText(title);
+        bodyLabel_->setText(body);
+        counterLabel_->setText(QString("%1/%2").arg(stepIndex + 1).arg(stepCount));
+        previousButton_->setEnabled(stepIndex > 0);
+        nextButton_->setText(stepIndex + 1 >= stepCount ? "Terminer" : "Suivant");
+    }
+
+    std::function<void()> onPrevious;
+    std::function<void()> onNext;
+    std::function<void()> onClose;
+
+private:
+    QLabel* titleLabel_ {nullptr};
+    QLabel* bodyLabel_ {nullptr};
+    QLabel* counterLabel_ {nullptr};
+    QPushButton* previousButton_ {nullptr};
+    QPushButton* nextButton_ {nullptr};
+    QPushButton* closeButton_ {nullptr};
+};
+
+namespace {
 
 using RectangleStartCorner = MainWindow::ScanConfig::RectangleStartCorner;
 using RectanglePrimaryAxis = MainWindow::ScanConfig::RectanglePrimaryAxis;
@@ -1975,16 +2337,40 @@ void MainWindow::buildUi()
     auto* topActions = new QHBoxLayout;
     topActions->setSpacing(8);
     auto* quitButton = createActionButton("Quitter");
-    auto* connectionButton = createActionButton("Connexion");
-    auto* calibrationButton = createActionButton("Calibrage");
-    connectionButton->setProperty("accent", true);
+    topConnectionButton_ = createActionButton("Connexion");
+    topCalibrationButton_ = createActionButton("Calibrage");
+    tutorialHelpButton_ = new QPushButton("?");
+    tutorialHelpButton_->setFixedSize(34, 34);
+    tutorialHelpButton_->setToolTip("Lancer le mode decouverte");
+    tutorialHelpButton_->setStyleSheet(
+        "QPushButton { border-radius:17px; border:1px solid #9fb3cc; background:#ffffff;"
+        " color:#1f3b63; font-size:14px; font-weight:700; padding:0; }"
+        "QPushButton:hover { background:#eef4ff; border-color:#1f6feb; color:#1558c0; }"
+        "QPushButton:pressed { background:#dbeafe; }");
+    topConnectionButton_->setProperty("accent", true);
     connect(quitButton, &QPushButton::clicked, this, &QWidget::close);
-    connect(connectionButton, &QPushButton::clicked, this, &MainWindow::openStartupConnectionDialog);
-    connect(calibrationButton, &QPushButton::clicked, this, &MainWindow::openCalibrationDialog);
+    connect(topConnectionButton_, &QPushButton::clicked, this, [this]() {
+        openStartupConnectionDialog();
+        if (tutorialStepIndex_ >= 0
+            && tutorialStepIndex_ < static_cast<int>(tutorialSteps_.size())
+            && tutorialSteps_[static_cast<std::size_t>(tutorialStepIndex_)].target == TutorialTarget::ConnectionButton) {
+            showTutorialStep(tutorialStepIndex_ + 1);
+        }
+    });
+    connect(topCalibrationButton_, &QPushButton::clicked, this, [this]() {
+        openCalibrationDialog();
+        if (tutorialStepIndex_ >= 0
+            && tutorialStepIndex_ < static_cast<int>(tutorialSteps_.size())
+            && tutorialSteps_[static_cast<std::size_t>(tutorialStepIndex_)].target == TutorialTarget::CalibrationButton) {
+            showTutorialStep(tutorialStepIndex_ + 1);
+        }
+    });
+    connect(tutorialHelpButton_, &QPushButton::clicked, this, &MainWindow::startTutorial);
     topActions->addWidget(quitButton);
-    topActions->addWidget(connectionButton);
-    topActions->addWidget(calibrationButton);
+    topActions->addWidget(topConnectionButton_);
+    topActions->addWidget(topCalibrationButton_);
     topActions->addStretch(1);
+    topActions->addWidget(tutorialHelpButton_);
     mainLayout->addLayout(topActions);
 
     tabWidget_ = new QTabWidget;
@@ -2950,8 +3336,8 @@ void MainWindow::openStartupConnectionDialog()
         layout->setSpacing(10);
 
         // ── Moteurs Newport CONEX-CC ──────────────────────────────
-        auto* motorBox = createGroupBox("Moteurs Newport CONEX-CC");
-        auto* motorGrid = new QGridLayout(motorBox);
+        startupConnectionMotorBox_ = createGroupBox("Moteurs Newport CONEX-CC");
+        auto* motorGrid = new QGridLayout(startupConnectionMotorBox_);
         motorGrid->addWidget(new QLabel("Port X"), 0, 0);
         xPortCombo_ = new QComboBox;
         xPortCombo_->setEditable(true);
@@ -2995,11 +3381,11 @@ void MainWindow::openStartupConnectionDialog()
         connect(connectAxesButton_,    &QPushButton::clicked, this, &MainWindow::onConnectAxes);
         connect(homeAxesButton_,       &QPushButton::clicked, this, &MainWindow::onHomeAxes);
         connect(disconnectAxesButton_, &QPushButton::clicked, this, &MainWindow::onDisconnectAxes);
-        layout->addWidget(motorBox);
+        layout->addWidget(startupConnectionMotorBox_);
 
         // ── Camera Thorlabs ───────────────────────────────────────
-        auto* camBox = createGroupBox("Camera Thorlabs");
-        auto* camGrid = new QGridLayout(camBox);
+        startupConnectionCameraBox_ = createGroupBox("Camera Thorlabs");
+        auto* camGrid = new QGridLayout(startupConnectionCameraBox_);
         camGrid->addWidget(new QLabel("Camera"), 0, 0);
         cameraSerialCombo_ = new QComboBox;
         cameraSerialCombo_->setEditable(false);
@@ -3065,11 +3451,11 @@ void MainWindow::openStartupConnectionDialog()
         });
         connect(startCameraLiveButton_, &QPushButton::clicked, this, &MainWindow::startCameraLive);
         connect(stopCameraLiveButton_,  &QPushButton::clicked, this, &MainWindow::stopCameraLive);
-        layout->addWidget(camBox);
+        layout->addWidget(startupConnectionCameraBox_);
 
         // ── Potentiostat BioLogic ─────────────────────────────────
-        auto* potConnBox = createGroupBox("Potentiostat BioLogic");
-        auto* potConnGrid = new QGridLayout(potConnBox);
+        startupConnectionPotentiostatBox_ = createGroupBox("Potentiostat BioLogic");
+        auto* potConnGrid = new QGridLayout(startupConnectionPotentiostatBox_);
         potConnGrid->setSpacing(4);
 
         // DLL path
@@ -3130,7 +3516,7 @@ void MainWindow::openStartupConnectionDialog()
                         potDialogStatusLabel->setText(potentiostatStatusLabel_->text());
                 });
         });
-        layout->addWidget(potConnBox);
+        layout->addWidget(startupConnectionPotentiostatBox_);
 
         // ── Close button ──────────────────────────────────────────
         auto* closeButton = createActionButton("Fermer");
@@ -3173,8 +3559,8 @@ void MainWindow::openCalibrationDialog()
         layout->setContentsMargins(18, 18, 18, 18);
         layout->setSpacing(12);
 
-        auto* laserBox = createGroupBox("Cible laser");
-        auto* laserLayout = new QGridLayout(laserBox);
+        calibrationLaserBox_ = createGroupBox("Cible laser");
+        auto* laserLayout = new QGridLayout(calibrationLaserBox_);
 
         laserLayout->addWidget(new QLabel("Objectif :"), 0, 0);
         calibObjectiveCombo_ = new QComboBox;
@@ -3217,15 +3603,7 @@ void MainWindow::openCalibrationDialog()
         applyLaserButton->setProperty("accent", true);
         laserLayout->addWidget(applyLaserButton, 5, 2, 1, 2);
 
-        layout->addWidget(laserBox);
-
-        auto* helpLabel = new QLabel(QString::fromUtf8(
-            "Aide - Unités : position de cible laser X/Y en pixels (px), "
-            "pas de déplacement de la cible en pixels (px), rayon de la cible en pixels (px). "
-            "Le diamètre métrique affiché dans la page caméra est calculé en micromètres (µm) avec l'objectif sélectionné."));
-        helpLabel->setWordWrap(true);
-        helpLabel->setStyleSheet("color:#5c6570; font-size:9pt;");
-        layout->addWidget(helpLabel);
+        layout->addWidget(calibrationLaserBox_);
 
         connect(moveXMinusButton, &QPushButton::clicked, this, [this]() { nudgeLaserTarget(-1, 0, 0); });
         connect(moveXPlusButton, &QPushButton::clicked, this, [this]() { nudgeLaserTarget(1, 0, 0); });
@@ -3260,6 +3638,413 @@ void MainWindow::openCalibrationDialog()
     calibrationDialog_->show();
     calibrationDialog_->raise();
     calibrationDialog_->activateWindow();
+}
+
+std::vector<MainWindow::TutorialStep> MainWindow::buildTutorialSteps() const
+{
+    return {
+        {TutorialTarget::ConnectionButton,
+         "Connexion des appareils",
+         "Cette premiere etape consiste a connecter les appareils au logiciel. Passez par la fenetre de connexion pour connecter les moteurs, la camera et le potentiostat.",
+         -1,
+         {}},
+        {TutorialTarget::ConnectionDialog,
+         "Fenetre de connexion",
+         "Cette fenetre permet de connecter chaque appareil au logiciel : moteurs, camera et potentiostat. Pensez a initialiser les moteurs et a attendre la fin de l'initialisation avant tout mouvement. Pour le potentiostat, choisissez le bon canal de communication et la bonne adresse IP.",
+         -1,
+         {}},
+        {TutorialTarget::CameraLive,
+         "Live camera",
+         "Activez le live pour voir l'echantillon et le spot laser. Le live rend aussi disponibles le GoTo image, le suivi de zone et les outils de mesure.",
+         0,
+         {}},
+        {TutorialTarget::CameraSettings,
+         "Exposition et gain",
+         "Reglez l'exposition et le gain jusqu'a obtenir une image lisible.",
+         0,
+         {}},
+        {TutorialTarget::Objective,
+         "Objectifs",
+         "Selectionnez l'objectif utilise : 4x, 10x, 50x ou Manuel, selon l'objectif reel installe sur le microscope.",
+         0,
+         {}},
+        {TutorialTarget::CalibrationButton,
+         "Calibrage du laser",
+         "Cliquez sur le bouton Calibrage pour ouvrir les reglages de la cible laser.",
+         -1,
+         {}},
+        {TutorialTarget::CalibrationDialog,
+         "Ajuster la cible rouge",
+         "Utilisez directement X, Y, Rayon et Appliquer cible pour centrer le cercle rouge sur le laser visible. Verifiez ce reglage pour chaque objectif.",
+         -1,
+         {}},
+        {TutorialTarget::Goto,
+         "GoTo image",
+         "Le GoTo permet de cliquer un point dans l'image. LaserBench deplace alors la platine pour amener ce point sous le laser calibre.",
+         0,
+         {}},
+        {TutorialTarget::MeasureTools,
+         "Outils de mesure image",
+         "La colonne d'outils permet de mesurer une distance, un diametre ou un rectangle directement dans l'image. La gomme supprime les annotations.",
+         0,
+         {}},
+        {TutorialTarget::ZoneButton,
+         "Definir une zone de mesure",
+         "Cliquez sur Zone image, puis choisissez deux coins dans l'image. Cette zone de mesure correspond a la partie de l'echantillon qui sera analysee.",
+         0,
+         {}},
+        {TutorialTarget::ScanSettings,
+         "Parametres de balayage",
+         "Cette fenetre permet de choisir la methode de balayage et les principaux parametres de mesure.",
+         0,
+         {}},
+        {TutorialTarget::TraversalSettings,
+         "Parcours du balayage",
+         "Choisissez le point de depart et le sens de parcours. Le mode zig-zag alterne le sens a chaque ligne. Le mode one-way garde le meme sens et revient au debut de la ligne suivante sans acquisition.",
+         0,
+         {}},
+        {TutorialTarget::PotentiostatControls,
+         "Parametres potentiostat",
+         "Dans l'onglet Mesure, choisissez le type d'electrode, la technique CA, OCV ou CVA, puis les parametres de mesure.",
+         1,
+         {}},
+        {TutorialTarget::RunMeasure,
+         "Lancer et arreter",
+         "Le bouton lecture lance l'acquisition. Le bouton stop arrete la mesure en cours.",
+         1,
+         {}},
+        {TutorialTarget::ResultsView,
+         "Visualiser les resultats",
+         "Le graphe suit les donnees en temps reel. La cartographie 2D et la vue 3D affichent la distribution spatiale du courant quand une zone a ete mesuree.",
+         1,
+         {}},
+        {TutorialTarget::Export,
+         "Exporter",
+         "Apres acquisition, exportez les donnees en CSV, MPT, GSF, TIFF ou PDF selon le besoin d'analyse, de publication ou d'archivage.",
+         1,
+         {}},
+        {TutorialTarget::Import,
+         "Importer une mesure",
+         "L'onglet Import permet de rouvrir un CSV LaserBench sans reconnecter le banc, puis de revoir les courbes, la heatmap et la vue 3D.",
+         2,
+         {}},
+    };
+}
+
+void MainWindow::startTutorial()
+{
+    tutorialSteps_ = buildTutorialSteps();
+    if (tutorialSteps_.empty()) {
+        return;
+    }
+
+    appendLog("Mode decouverte lance.");
+    showTutorialStep(0);
+}
+
+void MainWindow::stopTutorial()
+{
+    if (tutorialOverlay_ != nullptr) {
+        tutorialOverlay_->hide();
+        tutorialOverlay_->deleteLater();
+        tutorialOverlay_ = nullptr;
+    }
+    hideTutorialPanel();
+    tutorialSteps_.clear();
+    tutorialStepIndex_ = -1;
+    statusBar()->showMessage("Mode decouverte ferme.", 2500);
+}
+
+void MainWindow::showTutorialPanel(QWidget* parentDialog, const TutorialStep& step)
+{
+    if (parentDialog == nullptr || parentDialog->layout() == nullptr) {
+        return;
+    }
+
+    auto* dialogLayout = qobject_cast<QVBoxLayout*>(parentDialog->layout());
+    if (dialogLayout == nullptr) {
+        return;
+    }
+
+    if (tutorialPanel_ == nullptr) {
+        tutorialPanel_ = new TutorialPanelWidget(this);
+        tutorialPanel_->onPrevious = [this]() { advanceTutorialStep(-1); };
+        tutorialPanel_->onNext = [this]() { advanceTutorialStep(1); };
+        tutorialPanel_->onClose = [this]() { stopTutorial(); };
+    }
+
+    if (tutorialPanel_->parentWidget() != parentDialog) {
+        if (QWidget* oldParent = tutorialPanel_->parentWidget(); oldParent != nullptr && oldParent->layout() != nullptr) {
+            oldParent->layout()->removeWidget(tutorialPanel_);
+        }
+        tutorialPanel_->setParent(parentDialog);
+    }
+
+    if (dialogLayout->indexOf(tutorialPanel_) < 0) {
+        const int insertIndex = std::max(0, dialogLayout->count() - 1);
+        dialogLayout->insertWidget(insertIndex, tutorialPanel_);
+    }
+
+    tutorialPanel_->onPrevious = [this]() { advanceTutorialStep(-1); };
+    tutorialPanel_->onNext = [this]() { advanceTutorialStep(1); };
+    tutorialPanel_->onClose = [this]() { stopTutorial(); };
+    tutorialPanel_->setStep(step.title, step.body, tutorialStepIndex_, static_cast<int>(tutorialSteps_.size()));
+    tutorialPanel_->show();
+    parentDialog->adjustSize();
+}
+
+void MainWindow::hideTutorialPanel()
+{
+    if (tutorialPanel_ == nullptr) {
+        return;
+    }
+
+    if (QWidget* parent = tutorialPanel_->parentWidget(); parent != nullptr && parent->layout() != nullptr) {
+        parent->layout()->removeWidget(tutorialPanel_);
+    }
+    tutorialPanel_->hide();
+    tutorialPanel_->setParent(this);
+}
+
+void MainWindow::advanceTutorialStep(int delta)
+{
+    if (tutorialStepIndex_ >= 0 && tutorialStepIndex_ < static_cast<int>(tutorialSteps_.size()) && delta != 0) {
+        const TutorialTarget currentTarget = tutorialSteps_[static_cast<std::size_t>(tutorialStepIndex_)].target;
+        if (currentTarget == TutorialTarget::ConnectionDialog && startupConnectionDialog_ != nullptr) {
+            startupConnectionDialog_->hide();
+        } else if (currentTarget == TutorialTarget::CalibrationDialog && calibrationDialog_ != nullptr) {
+            calibrationDialog_->hide();
+        }
+    }
+
+    showTutorialStep(tutorialStepIndex_ + delta);
+}
+
+void MainWindow::triggerTutorialAction()
+{
+    if (tutorialStepIndex_ < 0 || tutorialStepIndex_ >= static_cast<int>(tutorialSteps_.size())) {
+        return;
+    }
+
+    const TutorialTarget target = tutorialSteps_[static_cast<std::size_t>(tutorialStepIndex_)].target;
+    if (target == TutorialTarget::ConnectionButton) {
+        openStartupConnectionDialog();
+        showTutorialStep(tutorialStepIndex_ + 1);
+        return;
+    }
+    if (target == TutorialTarget::ConnectionDialog) {
+        if (startupConnectionDialog_ != nullptr) {
+            startupConnectionDialog_->hide();
+        }
+        showTutorialStep(tutorialStepIndex_ + 1);
+        return;
+    }
+    if (target == TutorialTarget::CalibrationButton) {
+        openCalibrationDialog();
+        showTutorialStep(tutorialStepIndex_ + 1);
+        return;
+    }
+    if (target == TutorialTarget::CalibrationDialog) {
+        if (calibrationDialog_ != nullptr) {
+            calibrationDialog_->hide();
+        }
+        showTutorialStep(tutorialStepIndex_ + 1);
+        return;
+    }
+
+    advanceTutorialStep(1);
+}
+
+void MainWindow::showTutorialStep(int index)
+{
+    if (index < 0) {
+        index = 0;
+    }
+    if (index >= static_cast<int>(tutorialSteps_.size())) {
+        stopTutorial();
+        return;
+    }
+
+    tutorialStepIndex_ = index;
+    const TutorialStep& step = tutorialSteps_[static_cast<std::size_t>(tutorialStepIndex_)];
+    ensureTutorialStepContext(step);
+
+    QWidget* targetWidget = tutorialTargetWidget(step.target);
+    QWidget* overlayParent = this;
+    if (targetWidget != nullptr && targetWidget->isVisible()) {
+        overlayParent = targetWidget->window();
+    }
+    if (overlayParent == nullptr) {
+        overlayParent = this;
+    }
+
+    if (step.target == TutorialTarget::ConnectionDialog || step.target == TutorialTarget::CalibrationDialog) {
+        if (tutorialOverlay_ != nullptr) {
+            tutorialOverlay_->hide();
+        }
+        showTutorialPanel(overlayParent, step);
+        return;
+    }
+
+    hideTutorialPanel();
+
+    if (tutorialOverlay_ == nullptr) {
+        tutorialOverlay_ = new TutorialOverlayWidget(overlayParent);
+        tutorialOverlay_->onPrevious = [this]() { advanceTutorialStep(-1); };
+        tutorialOverlay_->onNext = [this]() { advanceTutorialStep(1); };
+        tutorialOverlay_->onAction = [this]() { triggerTutorialAction(); };
+        tutorialOverlay_->onClose = [this]() { stopTutorial(); };
+    } else if (tutorialOverlay_->parentWidget() != overlayParent) {
+        tutorialOverlay_->setParent(overlayParent);
+    }
+
+    tutorialOverlay_->setGeometry(overlayParent->rect());
+    tutorialOverlay_->setStep(
+        tutorialTargetRect(step.target, overlayParent),
+        step.title,
+        step.body,
+        tutorialStepIndex_,
+        static_cast<int>(tutorialSteps_.size()),
+        step.actionLabel);
+    tutorialOverlay_->show();
+    tutorialOverlay_->raise();
+    tutorialOverlay_->setFocus(Qt::OtherFocusReason);
+}
+
+void MainWindow::ensureTutorialStepContext(const TutorialStep& step)
+{
+    if (step.tabIndex >= 0 && tabWidget_ != nullptr && tabWidget_->currentIndex() != step.tabIndex) {
+        tabWidget_->setCurrentIndex(step.tabIndex);
+    }
+
+    if (step.target == TutorialTarget::ConnectionDialog) {
+        openStartupConnectionDialog();
+    } else if (step.target == TutorialTarget::CalibrationDialog) {
+        openCalibrationDialog();
+    }
+}
+
+QWidget* MainWindow::tutorialTargetWidget(TutorialTarget target) const
+{
+    switch (target) {
+    case TutorialTarget::ConnectionButton:
+        return topConnectionButton_;
+    case TutorialTarget::ConnectionDialog:
+        return startupConnectionMotorBox_ != nullptr
+            ? static_cast<QWidget*>(startupConnectionMotorBox_)
+            : static_cast<QWidget*>(startupConnectionDialog_);
+    case TutorialTarget::CameraLive:
+        return cameraPageLiveButton_;
+    case TutorialTarget::CameraSettings:
+        return cameraExposureEdit_;
+    case TutorialTarget::Objective:
+        return objectiveCombo_;
+    case TutorialTarget::CalibrationButton:
+        return topCalibrationButton_;
+    case TutorialTarget::CalibrationDialog:
+        return calibrationLaserBox_ != nullptr
+            ? static_cast<QWidget*>(calibrationLaserBox_)
+            : static_cast<QWidget*>(calibrationDialog_);
+    case TutorialTarget::Goto:
+        return gotoButton_;
+    case TutorialTarget::MeasureTools:
+        return rulerButton_;
+    case TutorialTarget::ZoneButton:
+    case TutorialTarget::ScanSettings:
+    case TutorialTarget::TraversalSettings:
+        return sequencePickButton_;
+    case TutorialTarget::PotentiostatControls:
+        return potentiostatParamsColumn_ != nullptr ? potentiostatParamsColumn_ : potentiostatTechniqueCombo_;
+    case TutorialTarget::RunMeasure:
+        return potentiostatRunButton_;
+    case TutorialTarget::ResultsView:
+        return potentiostatGraphBox_;
+    case TutorialTarget::Export:
+        return potentiostatExportButton_;
+    case TutorialTarget::Import:
+        return importButton_;
+    }
+
+    return nullptr;
+}
+
+QRect MainWindow::tutorialTargetRect(TutorialTarget target, QWidget* overlayParent) const
+{
+    if (overlayParent == nullptr) {
+        return {};
+    }
+
+    auto widgetRect = [overlayParent](QWidget* widget) -> QRect {
+        if (widget == nullptr || !widget->isVisible()) {
+            return {};
+        }
+        if (widget == overlayParent) {
+            return widget->rect();
+        }
+        return QRect(widget->mapTo(overlayParent, QPoint(0, 0)), widget->size());
+    };
+    auto addRect = [](QRect& base, const QRect& rect) {
+        if (rect.isNull()) {
+            return;
+        }
+        base = base.isNull() ? rect : base.united(rect);
+    };
+
+    QRect targetRect;
+    switch (target) {
+    case TutorialTarget::ConnectionDialog:
+        addRect(targetRect, widgetRect(startupConnectionMotorBox_));
+        addRect(targetRect, widgetRect(startupConnectionCameraBox_));
+        addRect(targetRect, widgetRect(startupConnectionPotentiostatBox_));
+        if (targetRect.isNull()) {
+            targetRect = widgetRect(startupConnectionDialog_);
+        }
+        break;
+    case TutorialTarget::CalibrationDialog:
+        targetRect = widgetRect(calibrationLaserBox_ != nullptr
+            ? static_cast<QWidget*>(calibrationLaserBox_)
+            : static_cast<QWidget*>(calibrationDialog_));
+        break;
+    case TutorialTarget::CameraSettings:
+        addRect(targetRect, widgetRect(cameraExposureEdit_));
+        addRect(targetRect, widgetRect(cameraGainEdit_));
+        break;
+    case TutorialTarget::MeasureTools:
+        addRect(targetRect, widgetRect(rulerButton_));
+        addRect(targetRect, widgetRect(circleButton_));
+        addRect(targetRect, widgetRect(rectButton_));
+        addRect(targetRect, widgetRect(eraserButton_));
+        break;
+    case TutorialTarget::ZoneButton:
+        addRect(targetRect, widgetRect(sequencePickButton_));
+        addRect(targetRect, widgetRect(cameraPreviewWidget_));
+        break;
+    case TutorialTarget::PotentiostatControls:
+        addRect(targetRect, widgetRect(potentiostatParamsColumn_));
+        if (targetRect.isNull()) {
+            addRect(targetRect, widgetRect(potentiostatTechniqueCombo_));
+            addRect(targetRect, widgetRect(potentiostatElectrodeCombo_));
+            addRect(targetRect, widgetRect(potentiostatVoltageEdit_));
+        }
+        break;
+    case TutorialTarget::RunMeasure:
+        addRect(targetRect, widgetRect(potentiostatRunButton_));
+        addRect(targetRect, widgetRect(potentiostatStopButton_));
+        break;
+    case TutorialTarget::ResultsView:
+        addRect(targetRect, widgetRect(potentiostatGraphBox_));
+        addRect(targetRect, widgetRect(potentiostatMapBox_));
+        addRect(targetRect, widgetRect(view3DButton_));
+        break;
+    default:
+        targetRect = widgetRect(tutorialTargetWidget(target));
+        break;
+    }
+
+    if (targetRect.isNull()) {
+        return {};
+    }
+    return targetRect.adjusted(-4, -4, 4, 4);
 }
 
 double MainWindow::currentObjectiveMagnification() const
@@ -4868,6 +5653,11 @@ void MainWindow::onPreviewFrameClicked(const QPoint& framePointPx)
                     .arg(endMm.y(), 0, 'f', 4)
             );
             syncSequenceOverlay();
+            if (tutorialStepIndex_ >= 0
+                && tutorialStepIndex_ < static_cast<int>(tutorialSteps_.size())
+                && tutorialSteps_[static_cast<std::size_t>(tutorialStepIndex_)].target == TutorialTarget::ZoneButton) {
+                showTutorialStep(tutorialStepIndex_ + 1);
+            }
             QTimer::singleShot(0, this, &MainWindow::showScanConfigDialog);
         } catch (const std::exception& ex) {
             setSequenceSelectArmed(false);
@@ -5279,6 +6069,7 @@ QWidget* MainWindow::buildMeasureTab()
 
     // ── Left: scrollable params panel ────────────────────────────────────
     auto* leftScroll = new QScrollArea;
+    potentiostatParamsColumn_ = leftScroll;
     leftScroll->setWidgetResizable(true);
     leftScroll->setFrameShape(QFrame::NoFrame);
     leftScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -5301,15 +6092,7 @@ QWidget* MainWindow::buildMeasureTab()
     connLayout->setSpacing(3);
     connLayout->setContentsMargins(6, 4, 6, 4);
 
-    potentiostatStatusLabel_ = new QLabel("Deconnecte");
-    potentiostatStatusLabel_->setStyleSheet("color:#5c6570; font-size:8pt;");
-    auto* openConnBtn = createActionButton("Connexion...");
-    openConnBtn->setMaximumWidth(95);
-    connect(openConnBtn, &QPushButton::clicked, this, &MainWindow::openStartupConnectionDialog);
-    connLayout->addWidget(potentiostatStatusLabel_, 0, 0);
-    connLayout->addWidget(openConnBtn, 0, 1);
-
-    connLayout->addWidget(S("Electrode"), 1, 0);
+    connLayout->addWidget(S("Electrode"), 0, 0);
     potentiostatElectrodeCombo_ = new QComboBox;
     potentiostatElectrodeCombo_->addItems({"Anode", "Cathode"});
     potentiostatElectrodeCombo_->setStyleSheet("font-size:8pt;");
@@ -5320,9 +6103,9 @@ QWidget* MainWindow::buildMeasureTab()
     connect(potentiostatElectrodeCombo_, &QComboBox::currentIndexChanged, this, [this](int) {
         refreshPotentiostatVisualization();
     });
-    connLayout->addWidget(potentiostatElectrodeCombo_, 1, 1);
+    connLayout->addWidget(potentiostatElectrodeCombo_, 0, 1);
 
-    connLayout->addWidget(S("Technique"), 2, 0);
+    connLayout->addWidget(S("Technique"), 1, 0);
     potentiostatTechniqueCombo_ = new QComboBox;
     potentiostatTechniqueCombo_->addItems({"CA", "OCV", "CVA"});
     potentiostatTechniqueCombo_->setStyleSheet("font-size:8pt;");
@@ -5330,7 +6113,7 @@ QWidget* MainWindow::buildMeasureTab()
         v->setStyleSheet("background:#ffffff; color:#18212b;"
                          "selection-background-color:#eef4ff; selection-color:#111927;");
     }
-    connLayout->addWidget(potentiostatTechniqueCombo_, 2, 1);
+    connLayout->addWidget(potentiostatTechniqueCombo_, 1, 1);
     connLayout->setColumnStretch(0, 1);
     leftLayout->addWidget(connBox);
 
@@ -9942,7 +10725,49 @@ MainWindow::promptRectangleTraversalSelection()
     connect(btnBox, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
     layout->addWidget(btnBox);
 
-    if (dlg.exec() != QDialog::Accepted) {
+    const bool traversalTutorialActive =
+        tutorialStepIndex_ >= 0
+        && tutorialStepIndex_ < static_cast<int>(tutorialSteps_.size())
+        && tutorialSteps_[static_cast<std::size_t>(tutorialStepIndex_)].target == TutorialTarget::TraversalSettings;
+    const auto traversalTutorialBody = [zigZagBtn, oneWayOnly]() {
+        const QString base = "Choisissez le point de depart et le sens de parcours.";
+        if (zigZagBtn->isChecked()) {
+            return base + "\n\nZig-zag : le balayage alterne le sens a chaque ligne pour limiter les retours moteurs.";
+        }
+        QString body = base + "\n\nOne-way : le balayage garde toujours le meme sens. Le moteur revient au debut de la ligne suivante sans acquisition.";
+        if (oneWayOnly) {
+            body += "\n\nAvec cet objectif, ce mode est impose.";
+        }
+        return body;
+    };
+    const auto updateTraversalTutorialPanel = [this, traversalTutorialBody]() {
+        if (tutorialPanel_ == nullptr
+            || tutorialStepIndex_ < 0
+            || tutorialStepIndex_ >= static_cast<int>(tutorialSteps_.size())) {
+            return;
+        }
+        const TutorialStep& step = tutorialSteps_[static_cast<std::size_t>(tutorialStepIndex_)];
+        if (step.target != TutorialTarget::TraversalSettings) {
+            return;
+        }
+        tutorialPanel_->setStep(step.title, traversalTutorialBody(), tutorialStepIndex_, static_cast<int>(tutorialSteps_.size()));
+    };
+    if (traversalTutorialActive) {
+        if (tutorialOverlay_ != nullptr) {
+            tutorialOverlay_->hide();
+        }
+        showTutorialPanel(&dlg, tutorialSteps_[static_cast<std::size_t>(tutorialStepIndex_)]);
+        updateTraversalTutorialPanel();
+        tutorialPanel_->onNext = [&dlg]() { dlg.accept(); };
+        connect(zigZagBtn, &QRadioButton::toggled, this, [updateTraversalTutorialPanel](bool) { updateTraversalTutorialPanel(); });
+        connect(oneWayBtn, &QRadioButton::toggled, this, [updateTraversalTutorialPanel](bool) { updateTraversalTutorialPanel(); });
+    }
+
+    const int dialogResult = dlg.exec();
+    if (traversalTutorialActive) {
+        hideTutorialPanel();
+    }
+    if (dialogResult != QDialog::Accepted) {
         return std::nullopt;
     }
 
@@ -10264,11 +11089,57 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
     connect(btnBox, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
     vl->addWidget(btnBox);
 
-    if (dlg.exec() != QDialog::Accepted) return false;
+    const bool scanTutorialActive =
+        tutorialStepIndex_ >= 0
+        && tutorialStepIndex_ < static_cast<int>(tutorialSteps_.size())
+        && tutorialSteps_[static_cast<std::size_t>(tutorialStepIndex_)].target == TutorialTarget::ScanSettings;
+    const auto scanTutorialBody = [ppBtn]() {
+        const QString base = "Cette fenetre permet de choisir la methode de balayage et les principaux parametres de mesure.";
+        if (ppBtn->isChecked()) {
+            return base + "\n\nPoint par point : le moteur se deplace de point en point. Une mesure est prise apres chaque pause.";
+        }
+        return base + "\n\nBalayage continu : le moteur se deplace en continu. Les mesures sont prises regulierement pendant le mouvement.";
+    };
+    const auto updateScanTutorialPanel = [this, scanTutorialBody]() {
+        if (tutorialPanel_ == nullptr
+            || tutorialStepIndex_ < 0
+            || tutorialStepIndex_ >= static_cast<int>(tutorialSteps_.size())) {
+            return;
+        }
+        const TutorialStep& step = tutorialSteps_[static_cast<std::size_t>(tutorialStepIndex_)];
+        if (step.target != TutorialTarget::ScanSettings) {
+            return;
+        }
+        tutorialPanel_->setStep(step.title, scanTutorialBody(), tutorialStepIndex_, static_cast<int>(tutorialSteps_.size()));
+    };
+    if (scanTutorialActive) {
+        if (tutorialOverlay_ != nullptr) {
+            tutorialOverlay_->hide();
+        }
+        showTutorialPanel(&dlg, tutorialSteps_[static_cast<std::size_t>(tutorialStepIndex_)]);
+        updateScanTutorialPanel();
+        tutorialPanel_->onNext = [&dlg]() { dlg.accept(); };
+        connect(ppBtn, &QRadioButton::toggled, this, [updateScanTutorialPanel](bool) { updateScanTutorialPanel(); });
+        connect(cntBtn, &QRadioButton::toggled, this, [updateScanTutorialPanel](bool) { updateScanTutorialPanel(); });
+    }
+
+    const int dialogResult = dlg.exec();
+    if (scanTutorialActive) {
+        hideTutorialPanel();
+    }
+    if (dialogResult != QDialog::Accepted) return false;
 
     const bool rectangleScan = sequenceModeCombo_ != nullptr
         && sequenceModeCombo_->currentText().trimmed() == "Rectangle";
     std::optional<RectangleTraversalChoice> selectedRectangleTraversal;
+    bool traversalTutorialActive = false;
+    if (scanTutorialActive
+        && tutorialStepIndex_ >= 0
+        && tutorialStepIndex_ + 1 < static_cast<int>(tutorialSteps_.size())
+        && tutorialSteps_[static_cast<std::size_t>(tutorialStepIndex_ + 1)].target == TutorialTarget::TraversalSettings) {
+        ++tutorialStepIndex_;
+        traversalTutorialActive = true;
+    }
     if (rectangleScan) {
         selectedRectangleTraversal = promptRectangleTraversalSelection();
         if (!selectedRectangleTraversal.has_value()) {
@@ -10325,6 +11196,13 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
         if (!lastValidatedZoneImage_.isNull()) {
             appendLog("Capture de la zone enregistree pour le rapport.");
         }
+    }
+
+    if (traversalTutorialActive
+        && tutorialStepIndex_ >= 0
+        && tutorialStepIndex_ < static_cast<int>(tutorialSteps_.size())
+        && tutorialSteps_[static_cast<std::size_t>(tutorialStepIndex_)].target == TutorialTarget::TraversalSettings) {
+        QTimer::singleShot(0, this, [this]() { advanceTutorialStep(1); });
     }
 
     return true;

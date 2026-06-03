@@ -3,6 +3,7 @@
 #include <QImage>
 #include <QMainWindow>
 #include <QPoint>
+#include <QRect>
 #include <QSize>
 #include <QStringList>
 
@@ -51,6 +52,8 @@ class CameraPreviewWidget;
 class PotentiostatGraphWidget;
 class PotentiostatHeatmapWidget;
 class Potentiostat3DWidget;
+class TutorialOverlayWidget;
+class TutorialPanelWidget;
 
 class MainWindow final : public QMainWindow
 {
@@ -117,6 +120,11 @@ private:
     void openCameraConnectionDialog();
     void openCameraSettingsDialog();
     void openCalibrationDialog();
+    void startTutorial();
+    void stopTutorial();
+    void showTutorialStep(int index);
+    void advanceTutorialStep(int delta);
+    void triggerTutorialAction();
     void initializeSessionLog();
     void scheduleRuntimeDependencyCheck();
     void runRuntimeDependencyCheck();
@@ -248,6 +256,43 @@ private:
         QPointF positionMm;
     };
 
+    enum class TutorialTarget
+    {
+        ConnectionButton,
+        ConnectionDialog,
+        CameraLive,
+        CameraSettings,
+        Objective,
+        CalibrationButton,
+        CalibrationDialog,
+        Goto,
+        MeasureTools,
+        ZoneButton,
+        ScanSettings,
+        TraversalSettings,
+        PotentiostatControls,
+        RunMeasure,
+        ResultsView,
+        Export,
+        Import,
+    };
+
+    struct TutorialStep
+    {
+        TutorialTarget target {TutorialTarget::ConnectionButton};
+        QString title;
+        QString body;
+        int tabIndex {-1};
+        QString actionLabel;
+    };
+
+    [[nodiscard]] std::vector<TutorialStep> buildTutorialSteps() const;
+    [[nodiscard]] QWidget* tutorialTargetWidget(TutorialTarget target) const;
+    [[nodiscard]] QRect tutorialTargetRect(TutorialTarget target, QWidget* overlayParent) const;
+    void ensureTutorialStepContext(const TutorialStep& step);
+    void showTutorialPanel(QWidget* parentDialog, const TutorialStep& step);
+    void hideTutorialPanel();
+
     core::RuntimeSnapshot snapshot_;
     std::shared_ptr<hardware::NewportConexController> motorController_;
     std::unique_ptr<hardware::ICameraController> cameraController_;
@@ -323,6 +368,18 @@ private:
     std::optional<std::chrono::steady_clock::time_point> lastStatusRefresh_;
 
     QTabWidget* tabWidget_ {nullptr};
+    QPushButton* topConnectionButton_ {nullptr};
+    QPushButton* topCalibrationButton_ {nullptr};
+    QPushButton* tutorialHelpButton_ {nullptr};
+    TutorialOverlayWidget* tutorialOverlay_ {nullptr};
+    TutorialPanelWidget* tutorialPanel_ {nullptr};
+    std::vector<TutorialStep> tutorialSteps_;
+    int tutorialStepIndex_ {-1};
+    QGroupBox* startupConnectionMotorBox_ {nullptr};
+    QGroupBox* startupConnectionCameraBox_ {nullptr};
+    QGroupBox* startupConnectionPotentiostatBox_ {nullptr};
+    QGroupBox* calibrationLaserBox_ {nullptr};
+    QWidget* potentiostatParamsColumn_ {nullptr};
     QLabel* stageSummaryLabel_ {nullptr};
     QLabel* cameraSummaryLabel_ {nullptr};
     QLabel* potentiostatSummaryLabel_ {nullptr};
