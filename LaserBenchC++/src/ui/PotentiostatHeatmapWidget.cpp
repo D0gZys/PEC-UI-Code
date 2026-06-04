@@ -60,6 +60,15 @@ void PotentiostatHeatmapWidget::setGrid(
     update();
 }
 
+void PotentiostatHeatmapWidget::setEnglishUi(bool english)
+{
+    if (englishUi_ == english) {
+        return;
+    }
+    englishUi_ = english;
+    update();
+}
+
 void PotentiostatHeatmapWidget::setElectrodeMode(PotentiostatElectrodeMode mode)
 {
     if (electrodeMode_ == mode) {
@@ -140,13 +149,14 @@ void PotentiostatHeatmapWidget::paintEvent(QPaintEvent* event)
     // Title
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setPen(QColor("#111927"));
-    painter.drawText(QRectF(0.0, 8.0, width(), 18.0), Qt::AlignCenter, "Carte 2D I(x, y)");
+    painter.drawText(QRectF(0.0, 8.0, width(), 18.0), Qt::AlignCenter,
+                     englishUi_ ? "2D map I(x, y)" : "Carte 2D I(x, y)");
 
     painter.fillRect(gr, QColor("#f8fafc"));
 
     if (rows_ <= 0 || cols_ <= 0) {
         painter.setPen(QColor("#5c6570"));
-        painter.drawText(gr, Qt::AlignCenter, "Aucune zone de balayage");
+        painter.drawText(gr, Qt::AlignCenter, englishUi_ ? "No scan zone" : "Aucune zone de balayage");
         return;
     }
 
@@ -259,7 +269,7 @@ void PotentiostatHeatmapWidget::mouseMoveEvent(QMouseEvent* event)
                 if (idx < values_.size() && values_[idx].has_value()) {
                     QToolTip::showText(
                         event->globalPosition().toPoint(),
-                        QString("Ligne %1, Col %2\n%3")
+                        QString(englishUi_ ? "Row %1, Col %2\n%3" : "Ligne %1, Col %2\n%3")
                             .arg(row + 1).arg(col + 1)
                             .arg(formatCurrent(*values_[idx]))
                     );

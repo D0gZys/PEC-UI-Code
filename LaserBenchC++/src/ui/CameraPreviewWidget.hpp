@@ -24,6 +24,7 @@ public:
     explicit CameraPreviewWidget(QWidget* parent = nullptr);
 
     void setFrame(const QImage& frame);
+    void setEnglishUi(bool english);
     void setLaserOverlay(const QPointF& pointPx, int radiusPx, bool visible = true);
     void clearLaserOverlay();
     void setSequenceOverlay(const QPointF& startPointPx, bool hasStartPoint, const QPointF& endPointPx, bool hasEndPoint,
@@ -108,6 +109,7 @@ private:
     QString rectSizeText_;
     double zoomFactor_ {1.0};
     QPointF panOffset_ {0.0, 0.0};
+    bool englishUi_ {false};
     void clampPanOffset();
 };
 

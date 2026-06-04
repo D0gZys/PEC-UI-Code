@@ -35,6 +35,15 @@ void CameraPreviewWidget::setFrame(const QImage& frame)
     update();
 }
 
+void CameraPreviewWidget::setEnglishUi(bool english)
+{
+    if (englishUi_ == english) {
+        return;
+    }
+    englishUi_ = english;
+    update();
+}
+
 void CameraPreviewWidget::setLaserOverlay(const QPointF& pointPx, int radiusPx, bool visible)
 {
     const int boundedRadius = std::max(radiusPx, 1);
@@ -324,7 +333,7 @@ void CameraPreviewWidget::paintEvent(QPaintEvent* event)
 
     if (frameImage_.isNull() || frameSize_.isEmpty()) {
         painter.setPen(QColor("#dbe4ee"));
-        painter.drawText(rect(), Qt::AlignCenter, "Aucune image camera");
+        painter.drawText(rect(), Qt::AlignCenter, englishUi_ ? "No camera image" : "Aucune image camera");
         return;
     }
 
@@ -332,7 +341,7 @@ void CameraPreviewWidget::paintEvent(QPaintEvent* event)
     double displayScale = 1.0;
     if (!computeDisplayGeometry(targetRect, displayScale)) {
         painter.setPen(QColor("#dbe4ee"));
-        painter.drawText(rect(), Qt::AlignCenter, "Aucune image camera");
+        painter.drawText(rect(), Qt::AlignCenter, englishUi_ ? "No camera image" : "Aucune image camera");
         return;
     }
 

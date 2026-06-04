@@ -188,6 +188,13 @@ void PotentiostatGraphWidget::setGraphMode(Mode mode)
     update();
 }
 
+void PotentiostatGraphWidget::setEnglishUi(bool english)
+{
+    if (englishUi_ == english) return;
+    englishUi_ = english;
+    update();
+}
+
 void PotentiostatGraphWidget::setSeries(
     std::vector<double> times,
     std::vector<double> currents,
@@ -246,7 +253,7 @@ void PotentiostatGraphWidget::paintEvent(QPaintEvent* event)
     DisplaySeries display;
     switch (mode_) {
     case Mode::CurrentVsTime:
-        display.title = "I vs t";
+        display.title = englishUi_ ? "I vs t" : "I = f(t)";
         display.xLabel = "t / s";
         display.yLabel = "I / mA";
         display.timeBasedMode = true;
@@ -257,7 +264,7 @@ void PotentiostatGraphWidget::paintEvent(QPaintEvent* event)
         }
         break;
     case Mode::EweVsTime:
-        display.title = "Ewe vs t";
+        display.title = englishUi_ ? "Ewe vs t" : "Ewe = f(t)";
         display.xLabel = "t / s";
         display.yLabel = "Ewe / V";
         display.timeBasedMode = true;
@@ -265,7 +272,7 @@ void PotentiostatGraphWidget::paintEvent(QPaintEvent* event)
         display.ys = eweValues_;
         break;
     case Mode::CurrentVsEwe:
-        display.title = "I vs Ewe";
+        display.title = englishUi_ ? "I vs Ewe" : "I = f(Ewe)";
         display.xLabel = "Ewe / V";
         display.yLabel = "I / mA";
         display.xs = eweValues_;
@@ -275,7 +282,7 @@ void PotentiostatGraphWidget::paintEvent(QPaintEvent* event)
         }
         break;
     case Mode::EweVsCurrent:
-        display.title = "Ewe vs I";
+        display.title = englishUi_ ? "Ewe vs I" : "Ewe = f(I)";
         display.xLabel = "I / mA";
         display.yLabel = "Ewe / V";
         display.xs.reserve(currents_.size());
@@ -322,7 +329,7 @@ void PotentiostatGraphWidget::paintEvent(QPaintEvent* event)
     if (finiteXs.size() < 2 || finiteYs.size() < 2 || finiteXs.size() != finiteYs.size()) {
         painter.setFont(tickFont);
         painter.setPen(kTickText);
-        painter.drawText(rect(), Qt::AlignCenter, "Aucune donnee de mesure");
+        painter.drawText(rect(), Qt::AlignCenter, englishUi_ ? "No measurement data" : "Aucune donnee de mesure");
         return;
     }
 

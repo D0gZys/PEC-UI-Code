@@ -156,6 +156,15 @@ Potentiostat3DWidget::Potentiostat3DWidget(QWidget* parent)
     setAutoFillBackground(false);
 }
 
+void Potentiostat3DWidget::setEnglishUi(bool english)
+{
+    if (englishUi_ == english) {
+        return;
+    }
+    englishUi_ = english;
+    update();
+}
+
 void Potentiostat3DWidget::setGrid(
     int rows, int cols,
     std::vector<std::optional<double>> values,
@@ -260,14 +269,15 @@ void Potentiostat3DWidget::paintEvent(QPaintEvent* event)
         f.setBold(true);
         painter.setFont(f);
         painter.setPen(QColor("#111927"));
-        painter.drawText(QRectF(0, 6, width(), 20), Qt::AlignCenter, "Surface 3D  I(x, y)");
+        painter.drawText(QRectF(0, 6, width(), 20), Qt::AlignCenter,
+                         englishUi_ ? "3D surface  I(x, y)" : "Surface 3D  I(x, y)");
         f.setBold(false);
         painter.setFont(f);
     }
 
     if (rows_ < 2 || cols_ < 2) {
         painter.setPen(QColor("#5c6570"));
-        painter.drawText(plotRect, Qt::AlignCenter, "Aucune donnee de mesure");
+        painter.drawText(plotRect, Qt::AlignCenter, englishUi_ ? "No measurement data" : "Aucune donnee de mesure");
         return;
     }
 
@@ -282,7 +292,7 @@ void Potentiostat3DWidget::paintEvent(QPaintEvent* event)
     }
     if (displayMin == std::numeric_limits<double>::max()) {
         painter.setPen(QColor("#5c6570"));
-        painter.drawText(plotRect, Qt::AlignCenter, "Aucune donnee de mesure");
+        painter.drawText(plotRect, Qt::AlignCenter, englishUi_ ? "No measurement data" : "Aucune donnee de mesure");
         return;
     }
     if (displayMax <= displayMin) {
@@ -506,7 +516,9 @@ void Potentiostat3DWidget::paintEvent(QPaintEvent* event)
         painter.setPen(QColor("#9ca3af"));
         painter.drawText(QRectF(kLeft, height() - kBottom + 10, plotRect.width(), 16),
                          Qt::AlignCenter,
-                         "Glisser : rotation autour du centre   Molette : zoom");
+                         englishUi_
+                             ? "Drag: rotate around center   Wheel: zoom"
+                             : "Glisser : rotation autour du centre   Molette : zoom");
     }
 }
 

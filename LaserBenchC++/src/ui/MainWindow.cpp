@@ -23,7 +23,6 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QFormLayout>
 #include <QFrame>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -47,6 +46,7 @@
 #include <QRegularExpression>
 #include <QRegion>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStandardPaths>
@@ -141,6 +141,301 @@ QPushButton* createActionButton(const QString& text)
     auto* button = new QPushButton(text);
     button->setMinimumHeight(34);
     return button;
+}
+
+struct UiTranslation
+{
+    const char* fr;
+    const char* en;
+};
+
+const std::vector<UiTranslation>& uiTranslations()
+{
+    static const std::vector<UiTranslation> translations {
+        {"Quitter", "Exit"},
+        {"Connexion", "Connection"},
+        {"Calibrage", "Calibration"},
+        {"Lancer le mode decouverte", "Start discovery mode"},
+        {"Interface en francais", "French interface"},
+        {"Interface en anglais", "English interface"},
+        {"Camera", "Camera"},
+        {"Mesure", "Measurement"},
+        {"Import", "Import"},
+        {"Pret", "Ready"},
+        {"Precedent", "Previous"},
+        {"Suivant", "Next"},
+        {"Terminer", "Finish"},
+        {"Annuler", "Cancel"},
+        {"Mode decouverte ferme.", "Discovery mode closed."},
+
+        {"Connexion des appareils", "Device connection"},
+        {"Fenetre de connexion", "Connection window"},
+        {"Moteurs Newport CONEX-CC", "Newport CONEX-CC motors"},
+        {"Port X", "X port"},
+        {"Port Y", "Y port"},
+        {"Inv.", "Swap"},
+        {"Chercher COM", "Scan COM"},
+        {"Connecter", "Connect"},
+        {"Init / Home", "Init / Home"},
+        {"Deconnecter", "Disconnect"},
+        {"La dependance Newport est chargee automatiquement depuis le depot.", "The Newport dependency is loaded automatically from the project."},
+        {"Camera Thorlabs", "Thorlabs camera"},
+        {"Chercher", "Scan"},
+        {"Deconnecte", "Disconnected"},
+        {"Connecte", "Connected"},
+        {"Deconnectee", "Disconnected"},
+        {"Connectee", "Connected"},
+        {"Connectee - live", "Connected - live"},
+        {"Camera connectee.", "Camera connected."},
+        {"Camera deconnectee.", "Camera disconnected."},
+        {"Camera live demarre.", "Camera live started."},
+        {"Camera live stop.", "Camera live stopped."},
+        {"Parametres camera appliques.", "Camera settings applied."},
+        {"Potentiostat BioLogic", "BioLogic potentiostat"},
+        {"Chemin DLL", "DLL path"},
+        {"Chemin vers EClib64.dll...", "Path to EClib64.dll..."},
+        {"IP", "IP"},
+        {"Canal", "Channel"},
+        {"Fermer", "Close"},
+
+        {"Camera Control", "Camera control"},
+        {"Activer / arreter le flux video", "Start / stop the video stream"},
+        {"Exp (ms)", "Exp. (ms)"},
+        {"Gain", "Gain"},
+        {"Objectif :", "Objective:"},
+        {"Diam. laser :", "Laser diam.:"},
+        {"Motor Control", "Motor control"},
+        {"X abs :", "X abs:"},
+        {"Vit. (mm/s) :", "Speed (mm/s):"},
+        {"Pas (µm) :", "Step (µm):"},
+        {"Pas de déplacement pour les boutons fléchés de l'interface, en µm.", "Movement step for the interface arrow buttons, in µm."},
+        {"GoTo : inactif", "GoTo: inactive"},
+        {"GoTo : clique dans l'image", "GoTo: click in the image"},
+        {"GoTo arme : cliquer dans l'image", "GoTo armed: click in the image"},
+        {"Sequence balayage", "Scan sequence"},
+        {"Lineaire", "Linear"},
+        {"Pas (mm)", "Step (mm)"},
+        {"Duree/pt (s)", "Duration/pt (s)"},
+        {"= temps d'arret moteur par point", "= motor stop time per point"},
+        {"Depart  : ---", "Start: ---"},
+        {"Arrivee : ---", "End: ---"},
+        {"Set Depart", "Set start"},
+        {"Set Arrivee", "Set end"},
+        {"Lancer", "Start"},
+        {"Zone image", "Image zone"},
+        {"Definir zone", "Define zone"},
+        {"Annuler zone", "Cancel zone"},
+        {"Zone image : cliquer le 1er coin", "Image zone: click the first corner"},
+        {"Zone image : cliquer le 2ème coin", "Image zone: click the second corner"},
+        {"Zone image : zone definie", "Image zone: zone defined"},
+        {"Supprimer zone", "Clear zone"},
+        {"Zone supprimee.", "Zone cleared."},
+        {"Zone supprimee. Definir une nouvelle zone pour une cartographie CA.", "Zone cleared. Define a new zone for CA mapping."},
+        {"Position indisponible", "Position unavailable"},
+        {"Mise en position...", "Moving to position..."},
+        {"Arrete.", "Stopped."},
+        {"Arrete", "Stopped"},
+        {"Erreur", "Error"},
+        {"Lancement...", "Starting..."},
+        {"Acquisition terminee.", "Acquisition complete."},
+        {"En attente", "Waiting"},
+        {"Mesure simple", "Simple measurement"},
+        {"Capturer ref.", "Capture ref."},
+        {"Delta", "Delta"},
+        {"Règle", "Ruler"},
+        {"Regle", "Ruler"},
+        {"Cercle", "Circle"},
+        {"Rect.", "Rect."},
+        {"Rectangle", "Rectangle"},
+        {"Gomme (cliquer sur un dessin pour l'effacer, Echap pour quitter)", "Eraser (click a drawing to remove it, Esc to exit)"},
+        {"Cliquez P1", "Click P1"},
+        {"Cliquez P2", "Click P2"},
+        {"Cliquez centre", "Click center"},
+        {"Cliquez bord", "Click edge"},
+        {"Cliquez coin 1", "Click corner 1"},
+        {"Cliquez coin 2", "Click corner 2"},
+
+        {"Calibrage du laser", "Laser calibration"},
+        {"Ajuster la cible rouge", "Adjust the red target"},
+        {"Cible laser", "Laser target"},
+        {"Objectif :", "Objective:"},
+        {"Manuel", "Manual"},
+        {"Pas (px)", "Step (px)"},
+        {"X -", "X -"},
+        {"X +", "X +"},
+        {"Y -", "Y -"},
+        {"Y +", "Y +"},
+        {"Rayon -", "Radius -"},
+        {"Rayon +", "Radius +"},
+        {"X cible (px)", "Target X (px)"},
+        {"Y cible (px)", "Target Y (px)"},
+        {"Rayon (px)", "Radius (px)"},
+        {"Appliquer cible", "Apply target"},
+
+        {"Parametres de balayage", "Scan settings"},
+        {"Paramètres de balayage", "Scan settings"},
+        {"Infos zone / estimation", "Zone info / estimate"},
+        {"Diam. laser", "Laser diam."},
+        {"Zone X", "Zone X"},
+        {"Zone Y", "Zone Y"},
+        {"Grille", "Grid"},
+        {"Points", "Points"},
+        {"Duree ligne", "Line duration"},
+        {"Duree totale", "Total duration"},
+        {"Point par point : deplacement de ligne + (pause + marge commande/lecture) x points/ligne. Continu : balayage des lignes + zones d'elan + repositionnements entre lignes.",
+         "Point by point: line move + (pause + command/read margin) x points/line. Continuous: line scans + run-up areas + repositioning between lines."},
+        {"Mode d'acquisition", "Acquisition mode"},
+        {"Point par point", "Point by point"},
+        {"Balayage continu", "Continuous scan"},
+        {"Pas :", "Step:"},
+        {"Pas d'acquisition :", "Acquisition step:"},
+        {"Durée pause avant mesure :", "Pause before measurement:"},
+        {"Nb mesures / point :", "Measurements / point:"},
+        {"Vitesse moteur :", "Motor speed:"},
+        {"Le meme pas est utilise entre les lignes ou colonnes du rectangle.",
+         "The same step is used between rectangle lines or columns."},
+        {"Parcours du balayage rectangle", "Rectangle scan path"},
+        {"Parcours du balayage", "Scan path"},
+        {"Cliquer sur une fleche pour choisir le point de depart et la direction initiale du balayage.",
+         "Click an arrow to choose the starting point and the initial scan direction."},
+        {"Type de parcours", "Path type"},
+        {"Zig-zag", "Zig-zag"},
+        {"One-way", "One-way"},
+        {"Zig-zag alterne le sens a chaque ligne. One-way garde le meme sens et revient au depart de la ligne suivante sans acquisition.",
+         "Zig-zag alternates direction on each line. One-way keeps the same direction and returns to the start of the next line without acquisition."},
+
+        {"Potentiostat", "Potentiostat"},
+        {"Electrode", "Electrode"},
+        {"Technique", "Technique"},
+        {"Anode", "Anode"},
+        {"Cathode", "Cathode"},
+        {"Non connecte", "Not connected"},
+        {"Lancer l'acquisition", "Start acquisition"},
+        {"Arreter l'acquisition", "Stop acquisition"},
+        {"Mesurer le dark current (CA 0 V, noir complet, 60 s)", "Measure dark current (CA 0 V, complete darkness, 60 s)"},
+        {"Etat : non pret", "Status: not ready"},
+        {"Etat : non connecte", "Status: not connected"},
+        {"Etat : ", "Status: "},
+        {"Connexion et chargement firmware...", "Connection and firmware loading..."},
+        {"Calibration dark current...", "Dark current calibration..."},
+        {"Calibration dark current arretee.", "Dark current calibration stopped."},
+        {"Dark current calibre.", "Dark current calibrated."},
+        {"Erreur dark current.", "Dark current error."},
+        {"Courant :", "Current:"},
+        {"Progression :", "Progress:"},
+        {"Duree :", "Duration:"},
+        {"Exporter...", "Export..."},
+        {"Exporter les données", "Export data"},
+        {"Aucune donnée à exporter.", "No data to export."},
+        {"Formats à exporter", "Formats to export"},
+        {"Tableau CSV  (.csv)  —  données tabulaires pour Excel / Python", "CSV table  (.csv)  -  tabular data for Excel / Python"},
+        {"EC-Lab ASCII  (.mpt)  —  format texte BioLogic, visualisation dans EC-Lab", "EC-Lab ASCII  (.mpt)  -  BioLogic text format, visualization in EC-Lab"},
+        {"Gwyddion Simple Field  (.gsf)  —  données brutes float32", "Gwyddion Simple Field  (.gsf)  -  raw float32 data"},
+        {"Carte 2D  (.tiff)  —  image de la heatmap", "2D map  (.tiff)  -  heatmap image"},
+        {"Surface 3D  (.tiff)  —  image de la vue 3D", "3D surface  (.tiff)  -  3D view image"},
+        {"Rapport PDF  (.pdf)  —  synthèse avec vues LaserBench 2D/3D", "PDF report  (.pdf)  -  summary with LaserBench 2D/3D views"},
+        {"Commentaire du rapport", "Report comment"},
+        {"Commentaire optionnel à ajouter dans les données du PDF...", "Optional comment to add to the PDF data..."},
+        {"Dossier de destination", "Destination folder"},
+        {"Dossier...", "Folder..."},
+        {"Parcourir...", "Browse..."},
+        {"Nom de base (les extensions seront ajoutées automatiquement)", "Base name (extensions will be added automatically)"},
+        {"Choisir un dossier", "Choose a folder"},
+        {"Impossible de créer le dossier :\n%1", "Could not create folder:\n%1"},
+        {"Impossible d'ouvrir :\n%1", "Could not open:\n%1"},
+        {"Rapport PDF", "PDF report"},
+        {"Impossible de créer le PDF.", "Could not create the PDF."},
+        {"Aucun format sélectionné ou erreur d'écriture.", "No format selected or write error."},
+        {"Export terminé : %1 fichier(s) dans %2", "Export complete: %1 file(s) in %2"},
+        {"Graphe :", "Graph:"},
+        {"Vue 3D", "3D view"},
+        {"Vue 2D", "2D view"},
+        {"Basculer entre vue 2D et surface 3D I(x,y)", "Toggle between 2D view and 3D I(x,y) surface"},
+        {"Courbes", "Curves"},
+        {"Cartographie", "Map"},
+        {"Surface 3D I(x, y)", "3D surface I(x, y)"},
+        {"Repos tR", "Rest tR"},
+        {"E Range", "E range"},
+        {"I Range", "I range"},
+        {"Bandwidth", "Bandwidth"},
+        {"Cycles", "Cycles"},
+        {"Initialisation", "Initialization"},
+        {"Balayage", "Scan"},
+        {"Plages", "Ranges"},
+        {"Fin de balayage", "End of scan"},
+        {"Vers Ef", "To Ef"},
+
+        {"Importer CSV", "Import CSV"},
+        {"Importer CSV...", "Import CSV..."},
+        {"Ouvrir CSV...", "Open CSV..."},
+        {"Importer", "Import"},
+        {"Aucun fichier importé", "No file imported"},
+        {"Aucun fichier importe", "No file imported"},
+        {"Graphe", "Graph"},
+        {"Type", "Type"},
+        {"Reinitialiser", "Reset"},
+        {"Details cellule", "Cell details"},
+        {"Surface 3D", "3D surface"},
+        {"Importer un fichier CSV", "Import a CSV file"},
+        {"Aucune donnée valide trouvée dans le fichier CSV.", "No valid data found in the CSV file."},
+
+        {"Live camera", "Live camera"},
+        {"Exposition et gain", "Exposure and gain"},
+        {"Objectifs", "Objectives"},
+        {"GoTo image", "Image GoTo"},
+        {"Outils de mesure image", "Image measurement tools"},
+        {"Definir une zone de mesure", "Define a measurement zone"},
+        {"Parametres potentiostat", "Potentiostat settings"},
+        {"Lancer et arreter", "Start and stop"},
+        {"Visualiser les resultats", "View results"},
+        {"Exporter", "Export"},
+        {"Importer une mesure", "Import a measurement"},
+        {"Cette premiere etape consiste a connecter les appareils au logiciel. Passez par la fenetre de connexion pour connecter les moteurs, la camera et le potentiostat.",
+         "The first step is to connect the devices to the software. Use the connection window to connect the motors, camera and potentiostat."},
+        {"Cette fenetre permet de connecter chaque appareil au logiciel : moteurs, camera et potentiostat. Pensez a initialiser les moteurs et a attendre la fin de l'initialisation avant tout mouvement. Pour le potentiostat, choisissez le bon canal de communication et la bonne adresse IP.",
+         "This window connects each device to the software: motors, camera and potentiostat. Initialize the motors and wait for initialization to finish before any movement. For the potentiostat, choose the correct communication channel and IP address."},
+        {"Activez le live pour voir l'echantillon et le spot laser. Le live rend aussi disponibles le GoTo image, le suivi de zone et les outils de mesure.",
+         "Start live view to see the sample and laser spot. Live view also enables image GoTo, zone tracking and measurement tools."},
+        {"Reglez l'exposition et le gain jusqu'a obtenir une image lisible.",
+         "Adjust exposure and gain until the image is readable."},
+        {"Selectionnez l'objectif utilise : 4x, 10x, 50x ou Manuel, selon l'objectif reel installe sur le microscope.",
+         "Select the objective in use: 4x, 10x, 50x or Manual, depending on the actual microscope objective."},
+        {"Cliquez sur le bouton Calibrage pour ouvrir les reglages de la cible laser.",
+         "Click Calibration to open the laser target settings."},
+        {"Utilisez directement X, Y, Rayon et Appliquer cible pour centrer le cercle rouge sur le laser visible. Verifiez ce reglage pour chaque objectif.",
+         "Use X, Y, Radius and Apply target to center the red circle on the visible laser. Check this setting for each objective."},
+        {"Le GoTo permet de cliquer un point dans l'image. LaserBench deplace alors la platine pour amener ce point sous le laser calibre.",
+         "GoTo lets you click a point in the image. LaserBench then moves the stage to bring that point under the calibrated laser."},
+        {"La colonne d'outils permet de mesurer une distance, un diametre ou un rectangle directement dans l'image. La gomme supprime les annotations.",
+         "The tool column measures a distance, diameter or rectangle directly in the image. The eraser removes annotations."},
+        {"Cliquez sur Zone image, puis choisissez deux coins dans l'image. Cette zone de mesure correspond a la partie de l'echantillon qui sera analysee.",
+         "Click Image zone, then choose two corners in the image. This measurement zone is the part of the sample that will be analyzed."},
+        {"Cette fenetre permet de choisir la methode de balayage et les principaux parametres de mesure.",
+         "This window lets you choose the scan method and the main measurement settings."},
+        {"Point par point : le moteur se deplace de point en point. Une mesure est prise apres chaque pause.",
+         "Point by point: the motor moves from point to point. A measurement is taken after each pause."},
+        {"Balayage continu : le moteur se deplace en continu. Reglez le pas d'acquisition ; le meme pas est utilise entre les lignes ou colonnes du rectangle.",
+         "Continuous scan: the motor moves continuously. Set the acquisition step; the same step is used between rectangle lines or columns."},
+        {"Choisissez le point de depart et le sens de parcours.",
+         "Choose the starting point and scan direction."},
+        {"Zig-zag : le balayage alterne le sens a chaque ligne pour limiter les retours moteurs.",
+         "Zig-zag: the scan alternates direction on each line to limit motor returns."},
+        {"One-way : le balayage garde toujours le meme sens. Le moteur revient au debut de la ligne suivante sans acquisition.",
+         "One-way: the scan always keeps the same direction. The motor returns to the start of the next line without acquisition."},
+        {"Avec cet objectif, ce mode est impose.",
+         "With this objective, this mode is required."},
+        {"Dans l'onglet Mesure, choisissez le type d'electrode, la technique CA, OCV ou CVA, puis les parametres de mesure.",
+         "In the Measurement tab, choose the electrode type, CA, OCV or CVA technique, then the measurement settings."},
+        {"Le bouton lecture lance l'acquisition. Le bouton stop arrete la mesure en cours.",
+         "The play button starts acquisition. The stop button stops the current measurement."},
+        {"Le graphe suit les donnees en temps reel. La cartographie 2D et la vue 3D affichent la distribution spatiale du courant quand une zone a ete mesuree.",
+         "The graph follows data in real time. The 2D map and 3D view show the spatial current distribution when a zone has been measured."},
+        {"Apres acquisition, exportez les donnees en CSV, MPT, GSF, TIFF ou PDF selon le besoin d'analyse, de publication ou d'archivage.",
+         "After acquisition, export data as CSV, MPT, GSF, TIFF or PDF depending on analysis, publication or archiving needs."},
+        {"L'onglet Import permet de rouvrir un CSV LaserBench sans reconnecter le banc, puis de revoir les courbes, la heatmap et la vue 3D.",
+         "The Import tab reopens a LaserBench CSV without reconnecting the bench, then lets you review curves, the heatmap and the 3D view."},
+    };
+    return translations;
 }
 
 } // namespace
@@ -1078,11 +1373,6 @@ QString zoneShapeLabel(bool simpleMeasurement, bool rectangleMode)
     return rectangleMode ? "Rectangle" : "Lineaire";
 }
 
-QString continuousTriggerLabel(MainWindow::ScanConfig::ContinuousTrigger trigger)
-{
-    return trigger == MainWindow::ScanConfig::ContinuousTrigger::Distance ? "Distance" : "Temps";
-}
-
 int motionDirection(double deltaMm)
 {
     if (deltaMm > kOverlayPredictionEpsilonMm) {
@@ -1613,7 +1903,8 @@ QImage renderReportHeatmapSnapshot(
     int cols,
     const std::vector<std::optional<double>>& values,
     const std::vector<std::pair<int, int>>& scanOrder,
-    PotentiostatElectrodeMode electrodeMode)
+    PotentiostatElectrodeMode electrodeMode,
+    bool english)
 {
     if (rows <= 0 || cols <= 0) {
         return {};
@@ -1633,6 +1924,7 @@ QImage renderReportHeatmapSnapshot(
 
     PotentiostatHeatmapWidget heatmap;
     heatmap.resize(imageSize);
+    heatmap.setEnglishUi(english);
     heatmap.setElectrodeMode(electrodeMode);
     heatmap.setGrid(rows, cols, values, std::nullopt);
     QImage image = renderWidgetSnapshot(&heatmap, imageSize);
@@ -1836,7 +2128,55 @@ void drawReportBox(QPainter& painter, const QRectF& rect, const QString& title)
     painter.restore();
 }
 
-void drawReportTextBox(QPainter& painter, const QRectF& rect, const QString& title, const QStringList& lines)
+QString reportText(bool english, const char* french, const char* englishText)
+{
+    return QString::fromUtf8(english ? englishText : french);
+}
+
+QString translateReportLine(QString line, bool english)
+{
+    if (!english) {
+        return line;
+    }
+
+    line.replace("Objectif utilise:", "Objective used:");
+    line.replace("Diametre laser:", "Laser diameter:");
+    line.replace("Mode de deplacement:", "Movement mode:");
+    line.replace("point par point", "point by point");
+    line.replace("continu", "continuous");
+    line.replace("Parametres:", "Settings:");
+    line.replace("mesures/point=", "measurements/point=");
+    line.replace("vitesse=", "speed=");
+    line.replace("pas lignes/colonnes=", "line/column step=");
+    line.replace("pas=", "step=");
+    line.replace("Parcours: ligne", "Path: line");
+    line.replace("Parcours:", "Path:");
+    line.replace("depart=", "start=");
+    line.replace("axe=", "axis=");
+    line.replace("Coin superieur gauche", "top-left corner");
+    line.replace("Coin superieur droit", "top-right corner");
+    line.replace("Coin inferieur gauche", "bottom-left corner");
+    line.replace("Coin inferieur droit", "bottom-right corner");
+    line.replace("Gauche-droite", "left-right");
+    line.replace("Haut-bas", "top-bottom");
+    return line;
+}
+
+QStringList translateReportLines(const QStringList& lines, bool english)
+{
+    if (!english) {
+        return lines;
+    }
+
+    QStringList translated;
+    translated.reserve(lines.size());
+    for (const QString& line : lines) {
+        translated << translateReportLine(line, english);
+    }
+    return translated;
+}
+
+void drawReportTextBox(QPainter& painter, const QRectF& rect, const QString& title, const QStringList& lines, bool english)
 {
     drawReportBox(painter, rect, title);
 
@@ -1851,7 +2191,9 @@ void drawReportTextBox(QPainter& painter, const QRectF& rect, const QString& tit
     if (visibleLines.size() > kMaxReportLines) {
         const int hidden = visibleLines.size() - kMaxReportLines;
         visibleLines = visibleLines.mid(0, kMaxReportLines);
-        visibleLines << QString("... %1 ligne(s) supplementaire(s)").arg(hidden);
+        visibleLines << (english
+            ? QString("... %1 additional line(s)").arg(hidden)
+            : QString("... %1 ligne(s) supplementaire(s)").arg(hidden));
     }
 
     QTextOption option;
@@ -1865,10 +2207,11 @@ void drawReportParametersBox(
     const QRectF& rect,
     const QString& title,
     const QStringList& lines,
-    const QImage& pathSketchImage)
+    const QImage& pathSketchImage,
+    bool english)
 {
     if (pathSketchImage.isNull()) {
-        drawReportTextBox(painter, rect, title, lines);
+        drawReportTextBox(painter, rect, title, lines, english);
         return;
     }
 
@@ -1890,7 +2233,9 @@ void drawReportParametersBox(
     if (visibleLines.size() > kMaxReportLinesWithSketch) {
         const int hidden = visibleLines.size() - kMaxReportLinesWithSketch;
         visibleLines = visibleLines.mid(0, kMaxReportLinesWithSketch);
-        visibleLines << QString("... %1 ligne(s) supplementaire(s)").arg(hidden);
+        visibleLines << (english
+            ? QString("... %1 additional line(s)").arg(hidden)
+            : QString("... %1 ligne(s) supplementaire(s)").arg(hidden));
     }
 
     QTextOption option;
@@ -1904,7 +2249,7 @@ void drawReportParametersBox(
     painter.setPen(QColor("#162033"));
     painter.drawText(QRectF(sketchRect.left(), sketchRect.top(), sketchRect.width(), 22.0),
                      Qt::AlignLeft | Qt::AlignVCenter,
-                     "Chemin laser");
+                     reportText(english, "Chemin laser", "Laser path"));
 
     const QRectF imageRect = sketchRect.adjusted(0, 26, 0, 0);
     const double scale = std::min(
@@ -1960,6 +2305,7 @@ bool writeLaserBenchReportPdf(
     const QImage& graphImage,
     const QImage& heatmapImage,
     const QImage& surface3DImage,
+    bool english,
     QString* errorMessage)
 {
     QPdfWriter writer(filePath);
@@ -1973,7 +2319,7 @@ bool writeLaserBenchReportPdf(
     QPainter painter(&writer);
     if (!painter.isActive()) {
         if (errorMessage != nullptr) {
-            *errorMessage = "Impossible d'initialiser l'ecriture PDF.";
+            *errorMessage = reportText(english, "Impossible d'initialiser l'ecriture PDF.", "Could not initialize PDF writing.");
         }
         return false;
     }
@@ -2001,7 +2347,8 @@ bool writeLaserBenchReportPdf(
     painter.setPen(QColor("#596273"));
     painter.drawText(QRectF(frame.left(), frame.top() + 58.0, frame.width(), 36.0),
                      Qt::AlignLeft | Qt::AlignVCenter,
-                     QString("Genere le %1").arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss")));
+                     reportText(english, "Genere le %1", "Generated on %1")
+                        .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss")));
 
     const double contentTop = frame.top() + 104.0;
     const double contentHeight = frame.bottom() - contentTop;
@@ -2018,11 +2365,37 @@ bool writeLaserBenchReportPdf(
     const QRectF twoDRect(rightLeft, bottomTop, bottomWidth, bottomHeight);
     const QRectF threeDRect(twoDRect.right() + gap, bottomTop, bottomWidth, bottomHeight);
 
-    drawReportParametersBox(painter, paramsRect, "Parametres de mesure", parameterLines, pathSketchImage);
-    drawReportImageBox(painter, zoneRect, "Zone selectionnee", zoneImage, "Image camera indisponible");
-    drawReportImageBox(painter, graphRect, "Evolution du courant", graphImage, "Graphe indisponible");
-    drawReportImageBox(painter, twoDRect, "Matrice 2D LaserBench", heatmapImage, "Vue 2D indisponible");
-    drawReportImageBox(painter, threeDRect, "Surface 3D LaserBench", surface3DImage, "Vue 3D indisponible");
+    drawReportParametersBox(
+        painter,
+        paramsRect,
+        reportText(english, "Parametres de mesure", "Measurement settings"),
+        parameterLines,
+        pathSketchImage,
+        english);
+    drawReportImageBox(
+        painter,
+        zoneRect,
+        reportText(english, "Zone selectionnee", "Selected zone"),
+        zoneImage,
+        reportText(english, "Image camera indisponible", "Camera image unavailable"));
+    drawReportImageBox(
+        painter,
+        graphRect,
+        reportText(english, "Evolution du courant", "Current evolution"),
+        graphImage,
+        reportText(english, "Graphe indisponible", "Graph unavailable"));
+    drawReportImageBox(
+        painter,
+        twoDRect,
+        reportText(english, "Matrice 2D LaserBench", "LaserBench 2D matrix"),
+        heatmapImage,
+        reportText(english, "Vue 2D indisponible", "2D view unavailable"));
+    drawReportImageBox(
+        painter,
+        threeDRect,
+        reportText(english, "Surface 3D LaserBench", "LaserBench 3D surface"),
+        surface3DImage,
+        reportText(english, "Vue 3D indisponible", "3D view unavailable"));
 
     painter.end();
     return true;
@@ -2322,6 +2695,205 @@ void MainWindow::buildMenus()
     menuBar()->hide();
 }
 
+QString MainWindow::translateUiString(const QString& text) const
+{
+    if (text.isEmpty()) {
+        return text;
+    }
+
+    const bool toEnglish = uiLanguage_ == UiLanguage::English;
+    for (const UiTranslation& translation : uiTranslations()) {
+        const QString fr = QString::fromUtf8(translation.fr);
+        const QString en = QString::fromUtf8(translation.en);
+        if (toEnglish && text == fr) {
+            return en;
+        }
+        if (!toEnglish && text == en) {
+            return fr;
+        }
+    }
+    return text;
+}
+
+void MainWindow::translateWidgetTree(QWidget* root)
+{
+    if (root == nullptr) {
+        return;
+    }
+
+    auto translateWidget = [this](QWidget* widget) {
+        widget->setWindowTitle(translateUiString(widget->windowTitle()));
+        widget->setToolTip(translateUiString(widget->toolTip()));
+        widget->setStatusTip(translateUiString(widget->statusTip()));
+        widget->setWhatsThis(translateUiString(widget->whatsThis()));
+
+        if (auto* label = qobject_cast<QLabel*>(widget); label != nullptr) {
+            label->setText(translateUiString(label->text()));
+        }
+        if (auto* button = qobject_cast<QAbstractButton*>(widget); button != nullptr) {
+            if (button != languageFrButton_ && button != languageEnButton_) {
+                button->setText(translateUiString(button->text()));
+            }
+        }
+        if (auto* groupBox = qobject_cast<QGroupBox*>(widget); groupBox != nullptr) {
+            groupBox->setTitle(translateUiString(groupBox->title()));
+        }
+        if (auto* lineEdit = qobject_cast<QLineEdit*>(widget); lineEdit != nullptr) {
+            lineEdit->setPlaceholderText(translateUiString(lineEdit->placeholderText()));
+        }
+        if (auto* combo = qobject_cast<QComboBox*>(widget); combo != nullptr) {
+            for (int i = 0; i < combo->count(); ++i) {
+                combo->setItemText(i, translateUiString(combo->itemText(i)));
+            }
+            if (combo->lineEdit() != nullptr) {
+                combo->lineEdit()->setPlaceholderText(translateUiString(combo->lineEdit()->placeholderText()));
+            }
+        }
+        if (auto* tabs = qobject_cast<QTabWidget*>(widget); tabs != nullptr) {
+            for (int i = 0; i < tabs->count(); ++i) {
+                tabs->setTabText(i, translateUiString(tabs->tabText(i)));
+                tabs->setTabToolTip(i, translateUiString(tabs->tabToolTip(i)));
+            }
+        }
+
+        const QList<QAction*> actions = widget->actions();
+        for (QAction* action : actions) {
+            if (action == nullptr) {
+                continue;
+            }
+            action->setText(translateUiString(action->text()));
+            action->setToolTip(translateUiString(action->toolTip()));
+            action->setStatusTip(translateUiString(action->statusTip()));
+        }
+    };
+
+    translateWidget(root);
+    const QList<QWidget*> widgets = root->findChildren<QWidget*>();
+    for (QWidget* widget : widgets) {
+        translateWidget(widget);
+    }
+}
+
+void MainWindow::applyCustomWidgetLanguage()
+{
+    const bool english = uiLanguage_ == UiLanguage::English;
+    if (cameraPreviewWidget_ != nullptr) {
+        cameraPreviewWidget_->setEnglishUi(english);
+    }
+    if (potentiostatGraphWidget_ != nullptr) {
+        potentiostatGraphWidget_->setEnglishUi(english);
+    }
+    if (potentiostatHeatmapWidget_ != nullptr) {
+        potentiostatHeatmapWidget_->setEnglishUi(english);
+    }
+    if (potentiostat3DWidget_ != nullptr) {
+        potentiostat3DWidget_->setEnglishUi(english);
+    }
+    if (importGraphWidget_ != nullptr) {
+        importGraphWidget_->setEnglishUi(english);
+    }
+    if (importHeatmapWidget_ != nullptr) {
+        importHeatmapWidget_->setEnglishUi(english);
+    }
+    if (import3DWidget_ != nullptr) {
+        import3DWidget_->setEnglishUi(english);
+    }
+}
+
+void MainWindow::updateImportInfoLabel()
+{
+    if (importInfoLabel_ == nullptr) {
+        return;
+    }
+
+    const bool english = uiLanguage_ == UiLanguage::English;
+    if (importRows_ > 0 && importCols_ > 0 && !importMatrix_.empty()) {
+        const QString fileLine = importFileName_.isEmpty() ? QString() : QString("\n%1").arg(importFileName_);
+        importInfoLabel_->setText(english
+            ? QString("Grid %1x%2: %3 cells%4")
+                .arg(importCols_).arg(importRows_)
+                .arg(static_cast<qulonglong>(importPlotTimes_.size()))
+                .arg(fileLine)
+            : QString("Grille %1x%2 : %3 cellules%4")
+                .arg(importCols_).arg(importRows_)
+                .arg(static_cast<qulonglong>(importPlotTimes_.size()))
+                .arg(fileLine));
+        return;
+    }
+
+    if (!importPlotTimes_.empty()) {
+        importInfoLabel_->setText(english
+            ? QString("Simple measurement: %1 points").arg(static_cast<qulonglong>(importPlotTimes_.size()))
+            : QString("Mesure simple : %1 points").arg(static_cast<qulonglong>(importPlotTimes_.size())));
+        return;
+    }
+
+    importInfoLabel_->setText(english ? "No file imported" : "Aucun fichier importe");
+}
+
+void MainWindow::applyCurrentLanguage(QWidget* root)
+{
+    if (root != nullptr) {
+        translateWidgetTree(root);
+    } else {
+        translateWidgetTree(this);
+        for (QWidget* widget : QApplication::topLevelWidgets()) {
+            if (widget != nullptr && widget != this && (widget->parentWidget() == this || isAncestorOf(widget))) {
+                translateWidgetTree(widget);
+            }
+        }
+        if (statusBar() != nullptr) {
+            statusBar()->showMessage(translateUiString(statusBar()->currentMessage()));
+        }
+    }
+
+    if (tutorialOverlay_ != nullptr) {
+        translateWidgetTree(tutorialOverlay_);
+    }
+    if (tutorialPanel_ != nullptr) {
+        translateWidgetTree(tutorialPanel_);
+    }
+    applyCustomWidgetLanguage();
+    updateImportInfoLabel();
+}
+
+void MainWindow::updateLanguageSwitchUi()
+{
+    const bool french = uiLanguage_ == UiLanguage::French;
+    if (languageFrButton_ != nullptr) {
+        languageFrButton_->setChecked(french);
+        languageFrButton_->setProperty("selected", french);
+        languageFrButton_->style()->unpolish(languageFrButton_);
+        languageFrButton_->style()->polish(languageFrButton_);
+    }
+    if (languageEnButton_ != nullptr) {
+        languageEnButton_->setChecked(!french);
+        languageEnButton_->setProperty("selected", !french);
+        languageEnButton_->style()->unpolish(languageEnButton_);
+        languageEnButton_->style()->polish(languageEnButton_);
+    }
+}
+
+void MainWindow::setUiLanguage(UiLanguage language)
+{
+    if (uiLanguage_ == language) {
+        updateLanguageSwitchUi();
+        return;
+    }
+
+    uiLanguage_ = language;
+    updateLanguageSwitchUi();
+
+    if (tutorialStepIndex_ >= 0) {
+        const int stepIndex = tutorialStepIndex_;
+        tutorialSteps_ = buildTutorialSteps();
+        showTutorialStep(stepIndex);
+    }
+
+    applyCurrentLanguage();
+    statusBar()->showMessage(translateUiString(uiLanguage_ == UiLanguage::English ? "Ready" : "Pret"), 2500);
+}
+
 void MainWindow::buildUi()
 {
     auto* central = new QWidget;
@@ -2339,6 +2911,31 @@ void MainWindow::buildUi()
     auto* quitButton = createActionButton("Quitter");
     topConnectionButton_ = createActionButton("Connexion");
     topCalibrationButton_ = createActionButton("Calibrage");
+    auto* languageSwitch = new QWidget;
+    auto* languageLayout = new QHBoxLayout(languageSwitch);
+    languageLayout->setContentsMargins(0, 0, 0, 0);
+    languageLayout->setSpacing(0);
+    languageFrButton_ = new QPushButton("FR");
+    languageEnButton_ = new QPushButton("EN");
+    languageFrButton_->setCheckable(true);
+    languageEnButton_->setCheckable(true);
+    languageFrButton_->setFixedSize(34, 30);
+    languageEnButton_->setFixedSize(34, 30);
+    const QString languageButtonStyle =
+        "QPushButton { border:1px solid #9fb3cc; background:#ffffff; color:#1f3b63;"
+        " font-size:9pt; font-weight:700; padding:0; }"
+        "QPushButton:hover { background:#eef4ff; border-color:#1f6feb; }"
+        "QPushButton[selected='true'] { background:#1f6feb; border-color:#1558c0; color:#ffffff; }";
+    languageFrButton_->setStyleSheet(languageButtonStyle + "QPushButton { border-top-left-radius:15px; border-bottom-left-radius:15px; border-right:none; }");
+    languageEnButton_->setStyleSheet(languageButtonStyle + "QPushButton { border-top-right-radius:15px; border-bottom-right-radius:15px; }");
+    languageFrButton_->setToolTip("Interface en francais");
+    languageEnButton_->setToolTip("Interface en anglais");
+    connect(languageFrButton_, &QPushButton::clicked, this, [this]() { setUiLanguage(UiLanguage::French); });
+    connect(languageEnButton_, &QPushButton::clicked, this, [this]() { setUiLanguage(UiLanguage::English); });
+    languageLayout->addWidget(languageFrButton_);
+    languageLayout->addWidget(languageEnButton_);
+    updateLanguageSwitchUi();
+
     tutorialHelpButton_ = new QPushButton("?");
     tutorialHelpButton_->setFixedSize(34, 34);
     tutorialHelpButton_->setToolTip("Lancer le mode decouverte");
@@ -2370,6 +2967,7 @@ void MainWindow::buildUi()
     topActions->addWidget(topConnectionButton_);
     topActions->addWidget(topCalibrationButton_);
     topActions->addStretch(1);
+    topActions->addWidget(languageSwitch);
     topActions->addWidget(tutorialHelpButton_);
     mainLayout->addLayout(topActions);
 
@@ -2397,7 +2995,7 @@ void MainWindow::buildUi()
     statusBar()->addPermanentWidget(cameraSummaryLabel_, 1);
     statusBar()->addPermanentWidget(potentiostatSummaryLabel_, 1);
     statusBar()->addPermanentWidget(mouseCoordsLabel_);
-    statusBar()->showMessage("Pret");
+    statusBar()->showMessage(translateUiString("Pret"));
 }
 
 void MainWindow::initializeSessionLog()
@@ -2573,7 +3171,7 @@ QWidget* MainWindow::buildSetupTab()
     cameraLayout->addWidget(objLbl,          2, 0);
     cameraLayout->addWidget(objectiveCombo_, 2, 1, 1, 3);
 
-    manualObjectiveCheck_ = new QCheckBox("Manual");
+    manualObjectiveCheck_ = new QCheckBox("Manuel");
     manualObjectiveCheck_->setStyleSheet(
         "QCheckBox { font-size:8pt; spacing:6px; }"
         "QCheckBox::indicator {"
@@ -2607,7 +3205,16 @@ QWidget* MainWindow::buildSetupTab()
     connect(cameraGainEdit_,     &QLineEdit::editingFinished, this, &MainWindow::applyCameraSettings);
     objectiveCombo_->setProperty("lastPresetObjective", objectiveCombo_->currentText());
     objectiveCombo_->setProperty("lastManualObjective", QString("30"));
-    auto syncManualObjectiveUi = [this]() {
+    auto restoreObjectivePresetItems = [this]() {
+        if (objectiveCombo_ == nullptr) {
+            return;
+        }
+        objectiveCombo_->clear();
+        for (const ObjectivePreset& preset : kObjectivePresets) {
+            objectiveCombo_->addItem(QLatin1String(preset.name));
+        }
+    };
+    auto syncManualObjectiveUi = [this, restoreObjectivePresetItems]() {
         if (objectiveCombo_ == nullptr || manualObjectiveCheck_ == nullptr) {
             return;
         }
@@ -2618,15 +3225,25 @@ QWidget* MainWindow::buildSetupTab()
                 objectiveCombo_->setProperty("lastPresetObjective", current);
             }
             const QString manualText = objectiveCombo_->property("lastManualObjective").toString().trimmed();
+            const QSignalBlocker blocker(objectiveCombo_);
             objectiveCombo_->setEditable(true);
+            objectiveCombo_->clear();
             objectiveCombo_->setCurrentText(manualText.isEmpty() ? QString("30") : manualText);
+            if (QAbstractItemView* v = objectiveCombo_->view()) {
+                v->setEnabled(false);
+            }
             if (objectiveCombo_->lineEdit() != nullptr) {
                 objectiveCombo_->lineEdit()->selectAll();
             }
         } else {
             objectiveCombo_->setProperty("lastManualObjective", objectiveCombo_->currentText().trimmed());
-            objectiveCombo_->setEditable(false);
             const QString presetText = objectiveCombo_->property("lastPresetObjective").toString().trimmed();
+            const QSignalBlocker blocker(objectiveCombo_);
+            objectiveCombo_->setEditable(false);
+            restoreObjectivePresetItems();
+            if (QAbstractItemView* v = objectiveCombo_->view()) {
+                v->setEnabled(true);
+            }
             objectiveCombo_->setCurrentText(findObjectivePreset(presetText) != nullptr ? presetText : QString("4x"));
         }
     };
@@ -3432,7 +4049,7 @@ void MainWindow::openStartupConnectionDialog()
             try {
                 cameraController_->connectCamera(cameraSerialCombo_->currentText().trimmed());
                 appendLog(QString("Camera connectee: %1").arg(cameraController_->cameraIdentifier()));
-                statusBar()->showMessage("Camera connectee.", 3000);
+                statusBar()->showMessage(translateUiString("Camera connectee."), 3000);
                 refreshSummaries();
             } catch (const std::exception& ex) {
                 QMessageBox::warning(this, "Camera", QString::fromUtf8(ex.what()));
@@ -3443,7 +4060,7 @@ void MainWindow::openStartupConnectionDialog()
                 stopCameraLive();
                 cameraController_->disconnectCamera();
                 appendLog("Camera deconnectee.");
-                statusBar()->showMessage("Camera deconnectee.", 3000);
+                statusBar()->showMessage(translateUiString("Camera deconnectee."), 3000);
                 refreshSummaries();
             } catch (const std::exception& ex) {
                 QMessageBox::warning(this, "Camera", QString::fromUtf8(ex.what()));
@@ -3534,6 +4151,7 @@ void MainWindow::openStartupConnectionDialog()
     startupConnectionDialog_->show();
     startupConnectionDialog_->raise();
     startupConnectionDialog_->activateWindow();
+    applyCurrentLanguage(startupConnectionDialog_);
 }
 
 void MainWindow::openCameraSettingsDialog()
@@ -3563,14 +4181,9 @@ void MainWindow::openCalibrationDialog()
         auto* laserLayout = new QGridLayout(calibrationLaserBox_);
 
         laserLayout->addWidget(new QLabel("Objectif :"), 0, 0);
-        calibObjectiveCombo_ = new QComboBox;
-        for (const ObjectivePreset& preset : kObjectivePresets) {
-            calibObjectiveCombo_->addItem(QLatin1String(preset.name));
-        }
-        calibObjectiveCombo_->addItem("Manuel");
-        const QString curObj = objectiveCombo_ != nullptr ? objectiveCombo_->currentText() : QString("4x");
-        calibObjectiveCombo_->setCurrentText(curObj);
-        laserLayout->addWidget(calibObjectiveCombo_, 0, 1, 1, 3);
+        calibObjectiveValueLabel_ = new QLabel(currentObjectiveLabel());
+        calibObjectiveValueLabel_->setStyleSheet("font-size:10pt; font-weight:600; color:#18212b;");
+        laserLayout->addWidget(calibObjectiveValueLabel_, 0, 1, 1, 3);
 
         laserLayout->addWidget(new QLabel("Pas (px)"), 1, 0);
         laserMoveStepEdit_ = new QLineEdit("10");
@@ -3615,22 +4228,6 @@ void MainWindow::openCalibrationDialog()
         connect(laserXEdit_, &QLineEdit::returnPressed, this, &MainWindow::applyLaserCalibrationEdits);
         connect(laserYEdit_, &QLineEdit::returnPressed, this, &MainWindow::applyLaserCalibrationEdits);
         connect(laserSizeEdit_, &QLineEdit::returnPressed, this, &MainWindow::applyLaserCalibrationEdits);
-        // Chargement des valeurs du preset quand l'objectif change dans le dialog
-        connect(calibObjectiveCombo_, &QComboBox::currentTextChanged,
-                this, [this](const QString& name) {
-            const ObjectivePreset* preset = findObjectivePreset(name);
-            if (preset == nullptr) {
-                if (isManualObjectiveName(name)) {
-                    if (laserXEdit_)    laserXEdit_->setText(QString::number(laserPointPx_.x()));
-                    if (laserYEdit_)    laserYEdit_->setText(QString::number(laserPointPx_.y()));
-                    if (laserSizeEdit_) laserSizeEdit_->setText(QString::number(laserRadiusPx_));
-                }
-                return;
-            }
-            if (laserXEdit_)    laserXEdit_->setText(QString::number(preset->laserX));
-            if (laserYEdit_)    laserYEdit_->setText(QString::number(preset->laserY));
-            if (laserSizeEdit_) laserSizeEdit_->setText(QString::number(preset->laserRadiusPx));
-        });
     }
 
     syncCalibrationUi();
@@ -3638,11 +4235,12 @@ void MainWindow::openCalibrationDialog()
     calibrationDialog_->show();
     calibrationDialog_->raise();
     calibrationDialog_->activateWindow();
+    applyCurrentLanguage(calibrationDialog_);
 }
 
 std::vector<MainWindow::TutorialStep> MainWindow::buildTutorialSteps() const
 {
-    return {
+    std::vector<TutorialStep> steps {
         {TutorialTarget::ConnectionButton,
          "Connexion des appareils",
          "Cette premiere etape consiste a connecter les appareils au logiciel. Passez par la fenetre de connexion pour connecter les moteurs, la camera et le potentiostat.",
@@ -3729,6 +4327,15 @@ std::vector<MainWindow::TutorialStep> MainWindow::buildTutorialSteps() const
          2,
          {}},
     };
+
+    if (uiLanguage_ == UiLanguage::English) {
+        for (TutorialStep& step : steps) {
+            step.title = translateUiString(step.title);
+            step.body = translateUiString(step.body);
+            step.actionLabel = translateUiString(step.actionLabel);
+        }
+    }
+    return steps;
 }
 
 void MainWindow::startTutorial()
@@ -3752,7 +4359,7 @@ void MainWindow::stopTutorial()
     hideTutorialPanel();
     tutorialSteps_.clear();
     tutorialStepIndex_ = -1;
-    statusBar()->showMessage("Mode decouverte ferme.", 2500);
+    statusBar()->showMessage(translateUiString("Mode decouverte ferme."), 2500);
 }
 
 void MainWindow::showTutorialPanel(QWidget* parentDialog, const TutorialStep& step)
@@ -3790,6 +4397,7 @@ void MainWindow::showTutorialPanel(QWidget* parentDialog, const TutorialStep& st
     tutorialPanel_->onClose = [this]() { stopTutorial(); };
     tutorialPanel_->setStep(step.title, step.body, tutorialStepIndex_, static_cast<int>(tutorialSteps_.size()));
     tutorialPanel_->show();
+    applyCurrentLanguage(tutorialPanel_);
     parentDialog->adjustSize();
 }
 
@@ -3908,6 +4516,7 @@ void MainWindow::showTutorialStep(int index)
         step.actionLabel);
     tutorialOverlay_->show();
     tutorialOverlay_->raise();
+    applyCurrentLanguage(tutorialOverlay_);
     tutorialOverlay_->setFocus(Qt::OtherFocusReason);
 }
 
@@ -4202,7 +4811,7 @@ void MainWindow::setGotoArmed(bool armed)
 {
     gotoArmed_ = armed;
     if (gotoStatusLabel_ != nullptr) {
-        gotoStatusLabel_->setText(gotoArmed_ ? "GoTo : clique dans l'image" : "GoTo : inactif");
+        gotoStatusLabel_->setText(translateUiString(gotoArmed_ ? "GoTo : clique dans l'image" : "GoTo : inactif"));
     }
     if (gotoButton_ != nullptr && gotoButton_->isChecked() != armed)
         gotoButton_->setChecked(armed);
@@ -4213,20 +4822,15 @@ void MainWindow::setSequenceSelectArmed(bool armed)
 {
     sequenceSelectArmed_ = armed;
     if (sequencePickButton_ != nullptr) {
-        sequencePickButton_->setText(sequenceSelectArmed_ ? "Annuler zone" : "Zone image");
+        sequencePickButton_->setText(translateUiString(sequenceSelectArmed_ ? "Annuler zone" : "Zone image"));
     }
     updatePreviewCursor();
 }
 
 void MainWindow::syncCalibrationUi()
 {
-    // Aligner la combo objectif du dialog sur l'objectif courant
-    if (calibObjectiveCombo_ != nullptr && objectiveCombo_ != nullptr) {
-        const QString cur = objectiveCombo_->currentText();
-        if (calibObjectiveCombo_->currentText() != cur) {
-            QSignalBlocker blocker(calibObjectiveCombo_);
-            calibObjectiveCombo_->setCurrentText(cur);
-        }
+    if (calibObjectiveValueLabel_ != nullptr) {
+        calibObjectiveValueLabel_->setText(translateUiString(currentObjectiveLabel()));
     }
 
     // Afficher les valeurs runtime (laserPointPx_ / laserRadiusPx_)
@@ -4263,16 +4867,16 @@ void MainWindow::clearDefinedSequenceZone()
     lastValidatedZoneImage_ = {};
     clearSequencePreviewSelection();
     if (sequenceStartLabel_ != nullptr) {
-        sequenceStartLabel_->setText("Depart  : ---");
+        sequenceStartLabel_->setText(translateUiString("Depart  : ---"));
     }
     if (sequenceEndLabel_ != nullptr) {
-        sequenceEndLabel_->setText("Arrivee : ---");
+        sequenceEndLabel_->setText(translateUiString("Arrivee : ---"));
     }
     if (sequenceStatusLabel_ != nullptr) {
-        sequenceStatusLabel_->setText("Zone supprimee.");
+        sequenceStatusLabel_->setText(translateUiString("Zone supprimee."));
     }
     appendLog("Zone image supprimee.");
-    statusBar()->showMessage("Zone supprimee. Definir une nouvelle zone pour une cartographie CA.", 5000);
+    statusBar()->showMessage(translateUiString("Zone supprimee. Definir une nouvelle zone pour une cartographie CA."), 5000);
 }
 
 void MainWindow::updateSequenceLabels(const QPointF& startMm, const QPointF& endMm)
@@ -4598,10 +5202,9 @@ void MainWindow::applyLaserCalibrationEdits()
         return;
     }
 
-    // Sauvegarde dans le preset de l'objectif sélectionné dans le dialog
-    const QString targetObj = calibObjectiveCombo_ != nullptr
-        ? calibObjectiveCombo_->currentText()
-        : (objectiveCombo_ != nullptr ? objectiveCombo_->currentText() : QString());
+    // Sauvegarde dans le preset de l'objectif sélectionné dans Camera Control
+    const QString targetObj = objectiveCombo_ != nullptr ? objectiveCombo_->currentText().trimmed() : QString("4x");
+    const QString targetLabel = currentObjectiveLabel();
     ObjectivePreset* preset = findObjectivePreset(targetObj);
     if (preset != nullptr) {
         preset->laserX       = targetX;
@@ -4609,17 +5212,13 @@ void MainWindow::applyLaserCalibrationEdits()
         preset->laserRadiusPx = std::max(targetSize, 1);
     }
 
-    // Si l'objectif calibré est le courant, mettre à jour les valeurs runtime
-    const QString currentObj = objectiveCombo_ != nullptr ? objectiveCombo_->currentText() : QString();
-    if (targetObj == currentObj || targetObj.isEmpty()) {
-        laserPointPx_.setX(targetX);
-        laserPointPx_.setY(targetY);
-        laserRadiusPx_ = std::max(targetSize, 1);
-        syncLaserOverlay();
-    }
+    laserPointPx_.setX(targetX);
+    laserPointPx_.setY(targetY);
+    laserRadiusPx_ = std::max(targetSize, 1);
+    syncLaserOverlay();
     saveCalibrationPresets();
     appendLog(QString("Cible laser calibree [%1]: X=%2 px Y=%3 px Rayon=%4 px")
-        .arg(targetObj).arg(targetX).arg(targetY).arg(std::max(targetSize, 1)));
+        .arg(targetLabel).arg(targetX).arg(targetY).arg(std::max(targetSize, 1)));
 }
 
 void MainWindow::nudgeLaserTarget(int dxPx, int dyPx, int dRadiusPx)
@@ -4633,6 +5232,42 @@ void MainWindow::nudgeLaserTarget(int dxPx, int dyPx, int dRadiusPx)
         }
     }
 
+    if (calibrationDialog_ != nullptr
+        && calibrationDialog_->isVisible()
+        && laserXEdit_ != nullptr
+        && laserYEdit_ != nullptr
+        && laserSizeEdit_ != nullptr) {
+        bool xOk = false;
+        bool yOk = false;
+        bool radiusOk = false;
+        int targetX = laserXEdit_->text().trimmed().toInt(&xOk);
+        int targetY = laserYEdit_->text().trimmed().toInt(&yOk);
+        int targetRadius = laserSizeEdit_->text().trimmed().toInt(&radiusOk);
+        if (!xOk) {
+            targetX = laserPointPx_.x();
+        }
+        if (!yOk) {
+            targetY = laserPointPx_.y();
+        }
+        if (!radiusOk || targetRadius <= 0) {
+            targetRadius = laserRadiusPx_;
+        }
+
+        targetX += dxPx * stepPx;
+        targetY += dyPx * stepPx;
+        targetRadius = std::max(1, targetRadius + dRadiusPx * stepPx);
+
+        laserXEdit_->setText(QString::number(targetX));
+        laserYEdit_->setText(QString::number(targetY));
+        laserSizeEdit_->setText(QString::number(targetRadius));
+
+        laserPointPx_.setX(targetX);
+        laserPointPx_.setY(targetY);
+        laserRadiusPx_ = targetRadius;
+        syncLaserOverlay();
+        return;
+    }
+
     laserPointPx_.setX(laserPointPx_.x() + (dxPx * stepPx));
     laserPointPx_.setY(laserPointPx_.y() + (dyPx * stepPx));
     if (dRadiusPx != 0) {
@@ -4643,13 +5278,8 @@ void MainWindow::nudgeLaserTarget(int dxPx, int dyPx, int dRadiusPx)
 
 double MainWindow::autoMmPerPxForObjective(const QString& objectiveName) const
 {
-    double magnification = 0.0;
-    if (manualObjectiveCheck_ != nullptr && manualObjectiveCheck_->isChecked()) {
-        magnification = currentObjectiveMagnification();
-    } else {
-        const std::optional<double> parsedMagnification = objectiveMagnificationFromText(objectiveName);
-        magnification = parsedMagnification.value_or(0.0);
-    }
+    const std::optional<double> parsedMagnification = objectiveMagnificationFromText(objectiveName);
+    const double magnification = parsedMagnification.value_or(0.0);
 
     if (magnification <= 0.0) {
         return kDefaultGotoMmPerPx;
@@ -4860,7 +5490,7 @@ void MainWindow::onToggleRuler()
         rulerHasP1_ = false;
         rulerHasP2_ = false;
         if (cameraPreviewWidget_ != nullptr) cameraPreviewWidget_->clearRulerOverlay();
-        if (rulerDistanceLabel_ != nullptr)  rulerDistanceLabel_->setText("Cliquez P1");
+        if (rulerDistanceLabel_ != nullptr)  rulerDistanceLabel_->setText(translateUiString("Cliquez P1"));
         if (rulerButton_ != nullptr)         rulerButton_->setChecked(true);
     } else {
         if (rulerButton_ != nullptr) rulerButton_->setChecked(false);
@@ -4901,7 +5531,7 @@ void MainWindow::updateRulerOverlay()
     cameraPreviewWidget_->setRulerOverlay(rulerP1Px_, rulerHasP2_, rulerP2Px_, distText);
 
     if (rulerDistanceLabel_ != nullptr) {
-        rulerDistanceLabel_->setText(rulerHasP2_ ? distText : "Cliquez P2");
+        rulerDistanceLabel_->setText(rulerHasP2_ ? distText : translateUiString("Cliquez P2"));
     }
 }
 
@@ -4911,15 +5541,15 @@ void MainWindow::disarmAllMeasureTools()
 {
     if (rulerArmed_) {
         rulerArmed_ = false;
-        if (rulerButton_ != nullptr) rulerButton_->setText("Regle");
+        if (rulerButton_ != nullptr) rulerButton_->setText(translateUiString("Regle"));
     }
     if (circleArmed_) {
         circleArmed_ = false;
-        if (circleButton_ != nullptr) circleButton_->setText("Cercle");
+        if (circleButton_ != nullptr) circleButton_->setText(translateUiString("Cercle"));
     }
     if (rectArmed_) {
         rectArmed_ = false;
-        if (rectButton_ != nullptr) rectButton_->setText("Rect.");
+        if (rectButton_ != nullptr) rectButton_->setText(translateUiString("Rect."));
     }
 }
 
@@ -4938,7 +5568,7 @@ void MainWindow::onToggleCircle()
         circleHasCenter_ = false;
         circleHasEdge_   = false;
         if (cameraPreviewWidget_ != nullptr) cameraPreviewWidget_->clearCircleOverlay();
-        if (circleDiameterLabel_ != nullptr) circleDiameterLabel_->setText("Cliquez centre");
+        if (circleDiameterLabel_ != nullptr) circleDiameterLabel_->setText(translateUiString("Cliquez centre"));
         if (circleButton_ != nullptr)        circleButton_->setChecked(true);
     } else {
         if (circleButton_ != nullptr) circleButton_->setChecked(false);
@@ -4970,7 +5600,7 @@ void MainWindow::updateCircleOverlay()
     const QString text = computeCircleDiameterText();
     cameraPreviewWidget_->setCircleOverlay(circleCenterPx_, circleHasEdge_, circleEdgePx_, text);
     if (circleDiameterLabel_ != nullptr)
-        circleDiameterLabel_->setText(circleHasEdge_ ? text : "Cliquez bord");
+        circleDiameterLabel_->setText(circleHasEdge_ ? text : translateUiString("Cliquez bord"));
 }
 
 // ── Rectangle measurement tool ────────────────────────────────────────────────
@@ -4988,7 +5618,7 @@ void MainWindow::onToggleRect()
         rectHasP1_ = false;
         rectHasP2_ = false;
         if (cameraPreviewWidget_ != nullptr) cameraPreviewWidget_->clearRectOverlay();
-        if (rectSizeLabel_ != nullptr) rectSizeLabel_->setText("Cliquez coin 1");
+        if (rectSizeLabel_ != nullptr) rectSizeLabel_->setText(translateUiString("Cliquez coin 1"));
         if (rectButton_ != nullptr)    rectButton_->setChecked(true);
     } else {
         if (rectButton_ != nullptr) rectButton_->setChecked(false);
@@ -5021,7 +5651,7 @@ void MainWindow::updateRectOverlay()
     const QString text = computeRectSizeText();
     cameraPreviewWidget_->setRectOverlay(rectP1Px_, rectHasP2_, rectP2Px_, text);
     if (rectSizeLabel_ != nullptr)
-        rectSizeLabel_->setText(rectHasP2_ ? text : "Cliquez coin 2");
+        rectSizeLabel_->setText(rectHasP2_ ? text : translateUiString("Cliquez coin 2"));
 }
 
 // ── Capture position ─────────────────────────────────────────────────────────
@@ -5037,7 +5667,7 @@ void MainWindow::onCapturePosition()
             return;
         }
         capturedMotorPos_ = pos;
-        captureButton_->setText("Delta");
+        captureButton_->setText(translateUiString("Delta"));
         captureButton_->setProperty("accent", false);
         captureButton_->setStyleSheet(
             "QPushButton { background:#f59e0b; color:#fff; border-radius:6px; "
@@ -5059,11 +5689,11 @@ void MainWindow::onCapturePosition()
                     .arg(dy,   0, 'f', 4)
                     .arg(dist, 0, 'f', 4));
         } else {
-            captureDeltaLabel_->setText("Position indisponible");
+            captureDeltaLabel_->setText(translateUiString("Position indisponible"));
         }
         // Reset button
         capturedMotorPos_.reset();
-        captureButton_->setText("Capturer ref.");
+        captureButton_->setText(translateUiString("Capturer ref."));
         captureButton_->setProperty("accent", true);
         captureButton_->setStyleSheet("");
         captureButton_->style()->unpolish(captureButton_);
@@ -5178,7 +5808,7 @@ void MainWindow::onArmGoto()
     }
 
     setGotoArmed(true);
-    statusBar()->showMessage("GoTo arme : cliquer dans l'image", 3000);
+    statusBar()->showMessage(translateUiString("GoTo arme : cliquer dans l'image"), 3000);
     appendLog("GoTo arme. Clique dans l'image pour deplacer la platine.");
 }
 
@@ -5237,7 +5867,7 @@ void MainWindow::onArmSequenceRectangle()
         sequenceRectFollowSample_ = false;
         cachedMotorMm_ = baseMotorMm;
         stableOverlayMotorMm_ = baseMotorMm;
-        statusBar()->showMessage("Zone image : cliquer le 1er coin", 4000);
+        statusBar()->showMessage(translateUiString("Zone image : cliquer le 1er coin"), 4000);
         setSequenceSelectArmed(true);
         appendLog(QString("Zone image armee depuis X=%1 Y=%2 mm.").arg(baseMotorMm.x(), 0, 'f', 4).arg(baseMotorMm.y(), 0, 'f', 4));
         syncSequenceOverlay();
@@ -5625,7 +6255,7 @@ void MainWindow::onPreviewFrameClicked(const QPoint& framePointPx)
             sequenceFirstFramePoint_ = framePointPx;
             sequenceRectStartFrame_ = framePointPx;
             sequenceRectEndFrame_ = framePointPx;
-            statusBar()->showMessage("Zone image : cliquer le 2ème coin", 4000);
+            statusBar()->showMessage(translateUiString("Zone image : cliquer le 2ème coin"), 4000);
             appendLog(QString("Zone image: premier coin px=(%1,%2)").arg(framePointPx.x()).arg(framePointPx.y()));
             syncSequenceOverlay();
             return;
@@ -5643,7 +6273,7 @@ void MainWindow::onPreviewFrameClicked(const QPoint& framePointPx)
             if (sequenceModeCombo_ != nullptr) {
                 sequenceModeCombo_->setCurrentText("Rectangle");
             }
-            statusBar()->showMessage("Zone image : zone definie", 3000);
+            statusBar()->showMessage(translateUiString("Zone image : zone definie"), 3000);
             setSequenceSelectArmed(false);
             appendLog(
                 QString("Zone image definie: (%1,%2) -> (%3,%4) mm")
@@ -6049,7 +6679,7 @@ QWidget* MainWindow::buildMeasureTab()
     connect(view3DButton_, &QPushButton::toggled, this, [this](bool is3D) {
         if (measureRightStack_ != nullptr)
             measureRightStack_->setCurrentIndex(is3D ? 1 : 0);
-        view3DButton_->setText(is3D ? "Vue 2D" : "Vue 3D");
+        view3DButton_->setText(translateUiString(is3D ? "Vue 2D" : "Vue 3D"));
     });
     topLayout->addWidget(view3DButton_);
 
@@ -6386,7 +7016,7 @@ QWidget* MainWindow::buildImportTab()
         if (importRightStack_ != nullptr) {
             importRightStack_->setCurrentIndex(checked ? 1 : 0);
         }
-        importView3DButton_->setText(checked ? "Vue 2D" : "Vue 3D");
+        importView3DButton_->setText(translateUiString(checked ? "Vue 2D" : "Vue 3D"));
     });
     leftLayout->addWidget(importView3DButton_);
 
@@ -6431,6 +7061,7 @@ QWidget* MainWindow::buildImportTab()
 
     connect(importButton_, &QPushButton::clicked, this, &MainWindow::onImportCsv);
 
+    updateImportInfoLabel();
     return page;
 }
 
@@ -6663,12 +7294,18 @@ void MainWindow::showCellDetailDialog(int row, int col)
     const double meanI = std::accumulate(samples.begin(), samples.end(), 0.0) / n;
 
     QDialog dlg(this);
-    dlg.setWindowTitle(QString("D\u00e9tail cellule \u2014 ligne %1, col %2").arg(row + 1).arg(col + 1));
+    dlg.setWindowTitle(uiLanguage_ == UiLanguage::English
+        ? QString("Cell detail - row %1, col %2").arg(row + 1).arg(col + 1)
+        : QString("D\u00e9tail cellule \u2014 ligne %1, col %2").arg(row + 1).arg(col + 1));
     dlg.setMinimumSize(500, 320);
     auto* vl = new QVBoxLayout(&dlg);
 
-    auto* infoLabel = new QLabel(
-        QString("%1 mesure(s) sur %2 s  |  moyenne : %3 A")
+    auto* infoLabel = new QLabel(uiLanguage_ == UiLanguage::English
+        ? QString("%1 measurement(s) over %2 s  |  average: %3 A")
+            .arg(n)
+            .arg(potentiostatLastDwellS_, 0, 'f', 3)
+            .arg(meanI, 0, 'e', 4)
+        : QString("%1 mesure(s) sur %2 s  |  moyenne : %3 A")
             .arg(n)
             .arg(potentiostatLastDwellS_, 0, 'f', 3)
             .arg(meanI, 0, 'e', 4));
@@ -6677,6 +7314,7 @@ void MainWindow::showCellDetailDialog(int row, int col)
 
     auto* graphWidget = new PotentiostatGraphWidget;
     graphWidget->setMinimumHeight(220);
+    graphWidget->setEnglishUi(uiLanguage_ == UiLanguage::English);
 
     std::vector<double> times;
     times.reserve(static_cast<std::size_t>(n));
@@ -6689,6 +7327,9 @@ void MainWindow::showCellDetailDialog(int row, int col)
     vl->addWidget(graphWidget, 1);
 
     auto* btnBox = new QDialogButtonBox(QDialogButtonBox::Close);
+    if (auto* closeButton = btnBox->button(QDialogButtonBox::Close); closeButton != nullptr) {
+        closeButton->setText(translateUiString("Fermer"));
+    }
     connect(btnBox, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
     connect(btnBox, &QDialogButtonBox::accepted,  &dlg, &QDialog::accept);
     vl->addWidget(btnBox);
@@ -6740,21 +7381,30 @@ void MainWindow::showImportCellDetailDialog(int row, int col)
     const double meanI = std::accumulate(samples.begin(), samples.end(), 0.0) / n;
 
     QDialog dlg(this);
-    dlg.setWindowTitle(QString("D\u00e9tail cellule import\u00e9e \u2014 ligne %1, col %2").arg(row + 1).arg(col + 1));
+    dlg.setWindowTitle(uiLanguage_ == UiLanguage::English
+        ? QString("Imported cell detail - row %1, col %2").arg(row + 1).arg(col + 1)
+        : QString("D\u00e9tail cellule import\u00e9e \u2014 ligne %1, col %2").arg(row + 1).arg(col + 1));
     dlg.setMinimumSize(500, 320);
     auto* vl = new QVBoxLayout(&dlg);
 
     auto* infoLabel = new QLabel(
-        importLastDwellS_ > 0.0
-            ? QString("%1 mesure(s) sur %2 s  |  moyenne : %3 A")
-                  .arg(n).arg(importLastDwellS_, 0, 'f', 3).arg(meanI, 0, 'e', 4)
-            : QString("%1 mesure(s)  |  moyenne : %2 A")
-                  .arg(n).arg(meanI, 0, 'e', 4));
+        uiLanguage_ == UiLanguage::English
+            ? (importLastDwellS_ > 0.0
+                  ? QString("%1 measurement(s) over %2 s  |  average: %3 A")
+                        .arg(n).arg(importLastDwellS_, 0, 'f', 3).arg(meanI, 0, 'e', 4)
+                  : QString("%1 measurement(s)  |  average: %2 A")
+                        .arg(n).arg(meanI, 0, 'e', 4))
+            : (importLastDwellS_ > 0.0
+                  ? QString("%1 mesure(s) sur %2 s  |  moyenne : %3 A")
+                        .arg(n).arg(importLastDwellS_, 0, 'f', 3).arg(meanI, 0, 'e', 4)
+                  : QString("%1 mesure(s)  |  moyenne : %2 A")
+                        .arg(n).arg(meanI, 0, 'e', 4)));
     infoLabel->setAlignment(Qt::AlignCenter);
     vl->addWidget(infoLabel);
 
     auto* graphWidget = new PotentiostatGraphWidget;
     graphWidget->setMinimumHeight(220);
+    graphWidget->setEnglishUi(uiLanguage_ == UiLanguage::English);
 
     std::vector<double> times;
     times.reserve(static_cast<std::size_t>(n));
@@ -6771,6 +7421,9 @@ void MainWindow::showImportCellDetailDialog(int row, int col)
     vl->addWidget(graphWidget, 1);
 
     auto* btnBox = new QDialogButtonBox(QDialogButtonBox::Close);
+    if (auto* closeButton = btnBox->button(QDialogButtonBox::Close); closeButton != nullptr) {
+        closeButton->setText(translateUiString("Fermer"));
+    }
     connect(btnBox, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
     connect(btnBox, &QDialogButtonBox::accepted,  &dlg, &QDialog::accept);
     vl->addWidget(btnBox);
@@ -6869,7 +7522,8 @@ void MainWindow::refreshMotorUi()
     // Build colored HTML for status bar
     const bool motorsAnyConnected = xSnapshot.connected || ySnapshot.connected;
     const QString motorColor = motorsAnyConnected ? QLatin1String("#1a7f37") : QLatin1String("#c82020");
-    QString stageHtml = QString("<span style='font-weight:600; color:%1;'>Moteurs</span>").arg(motorColor);
+    QString stageHtml = QString("<span style='font-weight:600; color:%1;'>%2</span>")
+        .arg(motorColor, uiLanguage_ == UiLanguage::English ? QString("Motors") : QString("Moteurs"));
     if (motorsAnyConnected) {
         stageHtml += QString("&nbsp;&nbsp;X: %1&nbsp;&nbsp;Y: %2").arg(xText, yText);
     }
@@ -6979,7 +7633,7 @@ void MainWindow::refreshCameraUi()
             ? "color:#1a7f37; font-size:9pt;"
             : "color:#1f6feb; font-size:9pt;";
     }
-    setLabelTextIfChanged(cameraPageStatusLabel_, cameraStatus);
+    setLabelTextIfChanged(cameraPageStatusLabel_, translateUiString(cameraStatus));
     setLabelStyleIfChanged(cameraPageStatusLabel_, cameraStatusStyle);
 
     setWidgetEnabledIfChanged(scanCameraButton_, true);
@@ -7073,7 +7727,7 @@ void MainWindow::applyCameraSettings()
         return;
     }
     appendLog(QString("Camera: Exposure=%1 ms, Gain=%2").arg(exposureUs / 1000.0, 0, 'f', 3).arg(gain, 0, 'f', 1));
-    statusBar()->showMessage("Parametres camera appliques.", 3000);
+        statusBar()->showMessage(translateUiString("Parametres camera appliques."), 3000);
     refreshSummaries();
 }
 
@@ -7087,7 +7741,7 @@ void MainWindow::startCameraLive()
             cameraPollTimer_->stop();
         }
         appendLog("Camera live demarre.");
-        statusBar()->showMessage("Camera live demarre.", 3000);
+        statusBar()->showMessage(translateUiString("Camera live demarre."), 3000);
         refreshSummaries();
     } catch (const std::exception& ex) {
         QMessageBox::warning(this, "Camera", QString::fromUtf8(ex.what()));
@@ -7106,7 +7760,7 @@ void MainWindow::stopCameraLive()
         stopCameraPolling();
         cameraController_->stopLive();
         appendLog("Camera live stop.");
-        statusBar()->showMessage("Camera live stop.", 3000);
+        statusBar()->showMessage(translateUiString("Camera live stop."), 3000);
         refreshSummaries();
     } catch (const std::exception& ex) {
         QMessageBox::warning(this, "Camera", QString::fromUtf8(ex.what()));
@@ -7804,7 +8458,7 @@ void MainWindow::onConnectPotentiostat()
     if (potentiostatConnectButton_    != nullptr) potentiostatConnectButton_->setEnabled(false);
     if (potentiostatDisconnectButton_ != nullptr) potentiostatDisconnectButton_->setEnabled(false);
     if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(false);
-    if (potentiostatStatusLabel_      != nullptr) potentiostatStatusLabel_->setText("Connexion et chargement firmware...");
+    if (potentiostatStatusLabel_      != nullptr) potentiostatStatusLabel_->setText(translateUiString("Connexion et chargement firmware..."));
 
     const QString dllPath = potentiostatDllPathEdit_  != nullptr ? potentiostatDllPathEdit_->text()  : QString();
     const QString address = potentiostatAddressEdit_  != nullptr ? potentiostatAddressEdit_->text()  : "169.254.3.150";
@@ -7834,7 +8488,7 @@ void MainWindow::onConnectPotentiostat()
             potentiostatBusy_.store(false);
             const QString style = ready ? "color:#1a7f37; font-size:9pt;" : "color:#c0392b; font-size:9pt;";
             if (potentiostatStatusLabel_      != nullptr) { potentiostatStatusLabel_->setText(msg);      potentiostatStatusLabel_->setStyleSheet(style); }
-            if (potentiostatMeasureStateLabel_ != nullptr) { potentiostatMeasureStateLabel_->setText(ready ? QString("Etat : %1").arg(msg) : "Etat : non pret"); potentiostatMeasureStateLabel_->setStyleSheet(style); }
+            if (potentiostatMeasureStateLabel_ != nullptr) { potentiostatMeasureStateLabel_->setText(ready ? QString("%1%2").arg(translateUiString("Etat : "), msg) : translateUiString("Etat : non pret")); potentiostatMeasureStateLabel_->setStyleSheet(style); }
             if (potentiostatRunButton_        != nullptr) potentiostatRunButton_->setEnabled(ready);
             if (potentiostatStopButton_       != nullptr) potentiostatStopButton_->setEnabled(false);
             if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(ready);
@@ -7863,8 +8517,8 @@ void MainWindow::onDisconnectPotentiostat()
         QMetaObject::invokeMethod(this, [this]() {
             potentiostatBusy_.store(false);
             constexpr auto kStyleOff = "color:#5c6570; font-size:9pt;";
-            if (potentiostatStatusLabel_       != nullptr) { potentiostatStatusLabel_->setText("Deconnecte");       potentiostatStatusLabel_->setStyleSheet(kStyleOff); }
-            if (potentiostatMeasureStateLabel_ != nullptr) { potentiostatMeasureStateLabel_->setText("Etat : non connecte"); potentiostatMeasureStateLabel_->setStyleSheet(kStyleOff); }
+            if (potentiostatStatusLabel_       != nullptr) { potentiostatStatusLabel_->setText(translateUiString("Deconnecte"));       potentiostatStatusLabel_->setStyleSheet(kStyleOff); }
+            if (potentiostatMeasureStateLabel_ != nullptr) { potentiostatMeasureStateLabel_->setText(translateUiString("Etat : non connecte")); potentiostatMeasureStateLabel_->setStyleSheet(kStyleOff); }
             if (potentiostatRunButton_         != nullptr) potentiostatRunButton_->setEnabled(false);
             if (potentiostatStopButton_        != nullptr) potentiostatStopButton_->setEnabled(false);
             if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(false);
@@ -7897,7 +8551,7 @@ void MainWindow::onCalibrateDarkCurrent()
 
     auto* btnBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
     btnBox->button(QDialogButtonBox::Ok)->setText("Start");
-    btnBox->button(QDialogButtonBox::Cancel)->setText("Annuler");
+    btnBox->button(QDialogButtonBox::Cancel)->setText(translateUiString("Annuler"));
     connect(btnBox, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
     connect(btnBox, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
     layout->addWidget(btnBox);
@@ -7928,7 +8582,7 @@ void MainWindow::onCalibrateDarkCurrent()
     if (potentiostatStopButton_ != nullptr) potentiostatStopButton_->setEnabled(true);
     if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(false);
     if (potentiostatExportButton_ != nullptr) potentiostatExportButton_->setEnabled(false);
-    if (potentiostatMeasureStateLabel_ != nullptr) potentiostatMeasureStateLabel_->setText("Calibration dark current...");
+    if (potentiostatMeasureStateLabel_ != nullptr) potentiostatMeasureStateLabel_->setText(translateUiString("Calibration dark current..."));
     if (potentiostatProgressLabel_ != nullptr) potentiostatProgressLabel_->setText("Dark current");
     if (potentiostatCurrentLabel_ != nullptr) potentiostatCurrentLabel_->setText("---  A");
     if (potentiostatPointCountLabel_ != nullptr) potentiostatPointCountLabel_->setText("0");
@@ -8001,8 +8655,8 @@ void MainWindow::onCalibrateDarkCurrent()
                     if (potentiostatRunButton_ != nullptr) potentiostatRunButton_->setEnabled(true);
                     if (potentiostatStopButton_ != nullptr) potentiostatStopButton_->setEnabled(false);
                     if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(true);
-                    if (potentiostatMeasureStateLabel_ != nullptr) potentiostatMeasureStateLabel_->setText("Calibration dark current arretee.");
-                    if (potentiostatProgressLabel_ != nullptr) potentiostatProgressLabel_->setText("Arrete");
+                    if (potentiostatMeasureStateLabel_ != nullptr) potentiostatMeasureStateLabel_->setText(translateUiString("Calibration dark current arretee."));
+                    if (potentiostatProgressLabel_ != nullptr) potentiostatProgressLabel_->setText(translateUiString("Arrete"));
                     statusBar()->showMessage("Calibration dark current arretee.", 5000);
                     appendLog("Calibration dark current arretee par l'utilisateur.");
                 }, Qt::QueuedConnection);
@@ -8024,7 +8678,7 @@ void MainWindow::onCalibrateDarkCurrent()
                 if (potentiostatRunButton_ != nullptr) potentiostatRunButton_->setEnabled(true);
                 if (potentiostatStopButton_ != nullptr) potentiostatStopButton_->setEnabled(false);
                 if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(true);
-                if (potentiostatMeasureStateLabel_ != nullptr) potentiostatMeasureStateLabel_->setText("Dark current calibre.");
+                if (potentiostatMeasureStateLabel_ != nullptr) potentiostatMeasureStateLabel_->setText(translateUiString("Dark current calibre."));
                 if (potentiostatProgressLabel_ != nullptr) potentiostatProgressLabel_->setText("Dark OK");
                 if (potentiostatCurrentLabel_ != nullptr) potentiostatCurrentLabel_->setText(formatReportCurrent(mean));
                 if (potentiostatPointCountLabel_ != nullptr) potentiostatPointCountLabel_->setText(QString::number(sampleCount));
@@ -8045,8 +8699,8 @@ void MainWindow::onCalibrateDarkCurrent()
                 if (potentiostatRunButton_ != nullptr) potentiostatRunButton_->setEnabled(true);
                 if (potentiostatStopButton_ != nullptr) potentiostatStopButton_->setEnabled(false);
                 if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(true);
-                if (potentiostatMeasureStateLabel_ != nullptr) potentiostatMeasureStateLabel_->setText("Erreur dark current.");
-                if (potentiostatProgressLabel_ != nullptr) potentiostatProgressLabel_->setText("Erreur");
+                if (potentiostatMeasureStateLabel_ != nullptr) potentiostatMeasureStateLabel_->setText(translateUiString("Erreur dark current."));
+                if (potentiostatProgressLabel_ != nullptr) potentiostatProgressLabel_->setText(translateUiString("Erreur"));
                 statusBar()->showMessage("Erreur calibration dark current.", 8000);
                 appendLog("Erreur calibration dark current : " + error);
                 QMessageBox::warning(this, "Dark current", error);
@@ -8113,7 +8767,7 @@ void MainWindow::onStartCaPotentiostat()
         auto* launchButton = launchPrompt.addButton("Lancer sans modifier", QMessageBox::NoRole);
         auto* simpleButton = launchPrompt.addButton("Mesure simple", QMessageBox::ActionRole);
         auto* cancelButton = launchPrompt.addButton(QMessageBox::Cancel);
-        cancelButton->setText("Annuler");
+        cancelButton->setText(translateUiString("Annuler"));
         launchPrompt.setDefaultButton(launchButton);
         launchPrompt.exec();
 
@@ -8202,51 +8856,30 @@ void MainWindow::onStartCaPotentiostat()
             QMessageBox::warning(this, techniqueLabel, "La vitesse de balayage continu doit etre strictement positive.");
             return;
         }
-        if (cfg.trigger == ScanConfig::ContinuousTrigger::Distance) {
-            if (cfg.triggerDistanceMm <= 0.0) {
-                QMessageBox::warning(this, techniqueLabel, "Le pas d'acquisition en mode continu doit etre strictement positif.");
-                return;
-            }
-            const double recommendedMaxSpeed = cfg.triggerDistanceMm / kContinuousGuaranteedSamplePeriodS;
-            if (cfg.scanSpeedMmPerS > recommendedMaxSpeed + kScanPlanningEpsilonMm) {
-                QMessageBox::warning(
-                    this,
-                    techniqueLabel,
-                    QString("Vitesse trop elevee pour garantir un echantillonnage tous les %1 mm.\n"
-                            "Vitesse maximale recommandee : %2 mm/s.")
-                        .arg(cfg.triggerDistanceMm, 0, 'f', 4)
-                        .arg(recommendedMaxSpeed, 0, 'f', 4));
-                return;
-            }
-            continuousSamplePitchMm = cfg.triggerDistanceMm;
-        } else {
-            if (cfg.triggerTimeS <= 0.0) {
-                QMessageBox::warning(this, techniqueLabel, "L'intervalle d'acquisition temporel doit etre strictement positif.");
-                return;
-            }
-            if (cfg.triggerTimeS < kContinuousGuaranteedSamplePeriodS - kScanPlanningEpsilonMm) {
-                QMessageBox::warning(
-                    this,
-                    techniqueLabel,
-                    QString("Intervalle temporel trop court pour garantir un balayage continu precis.\n"
-                            "Intervalle minimal recommande : %1 s.")
-                        .arg(kContinuousGuaranteedSamplePeriodS, 0, 'f', 3));
-                return;
-            }
-            continuousSamplePitchMm = cfg.scanSpeedMmPerS * cfg.triggerTimeS;
+        if (cfg.triggerDistanceMm <= 0.0) {
+            QMessageBox::warning(this, techniqueLabel, "Le pas d'acquisition en mode continu doit etre strictement positif.");
+            return;
         }
+        const double recommendedMaxSpeed = cfg.triggerDistanceMm / kContinuousGuaranteedSamplePeriodS;
+        if (cfg.scanSpeedMmPerS > recommendedMaxSpeed + kScanPlanningEpsilonMm) {
+            QMessageBox::warning(
+                this,
+                techniqueLabel,
+                QString("Vitesse trop elevee pour garantir un echantillonnage tous les %1 mm.\n"
+                        "Vitesse maximale recommandee : %2 mm/s.")
+                    .arg(cfg.triggerDistanceMm, 0, 'f', 4)
+                    .arg(recommendedMaxSpeed, 0, 'f', 4));
+            return;
+        }
+        continuousSamplePitchMm = cfg.triggerDistanceMm;
 
         if (continuousSamplePitchMm <= 0.0) {
-            QMessageBox::warning(this, techniqueLabel, "Intervalle d'acquisition continu invalide.");
+            QMessageBox::warning(this, techniqueLabel, "Pas d'acquisition continu invalide.");
             return;
         }
 
         if (rectangleMode) {
-            continuousRowStepMm = cfg.rowStepMm;
-            if (continuousRowStepMm <= 0.0) {
-                QMessageBox::warning(this, techniqueLabel, "Le saut ligne/colonne doit etre strictement positif en mode continu.");
-                return;
-            }
+            continuousRowStepMm = continuousSamplePitchMm;
             const auto scale = currentGotoScale();
             continuousPlan = buildContinuousRectanglePlan(
                 startMm,
@@ -8494,7 +9127,7 @@ void MainWindow::onStartCaPotentiostat()
     launchConfirmation.setInformativeText("Valider quand le banc est pret pour demarrer la mesure.");
     auto* confirmLaunchButton = launchConfirmation.addButton("Lancer la mesure", QMessageBox::AcceptRole);
     auto* cancelLaunchButton = launchConfirmation.addButton(QMessageBox::Cancel);
-    cancelLaunchButton->setText("Annuler");
+        cancelLaunchButton->setText(translateUiString("Annuler"));
     launchConfirmation.setDefaultButton(confirmLaunchButton);
     launchConfirmation.exec();
     if (launchConfirmation.clickedButton() != confirmLaunchButton) {
@@ -8547,7 +9180,7 @@ void MainWindow::onStartCaPotentiostat()
         if (view3DButton_->isChecked()) {
             view3DButton_->setChecked(false);
         }
-        view3DButton_->setText("Vue 3D");
+        view3DButton_->setText(translateUiString("Vue 3D"));
         view3DButton_->setVisible(!simpleMeasurement);
         view3DButton_->setEnabled(!simpleMeasurement);
     }
@@ -8569,9 +9202,9 @@ void MainWindow::onStartCaPotentiostat()
     if (potentiostatDarkCalibrateButton_ != nullptr) potentiostatDarkCalibrateButton_->setEnabled(false);
     if (potentiostatExportButton_ != nullptr) potentiostatExportButton_->setEnabled(false);
     if (potentiostatCurrentLabel_   != nullptr) potentiostatCurrentLabel_->setText("...");
-    if (potentiostatMeasureStateLabel_ != nullptr) potentiostatMeasureStateLabel_->setText("Lancement...");
+    if (potentiostatMeasureStateLabel_ != nullptr) potentiostatMeasureStateLabel_->setText(translateUiString("Lancement..."));
     if (potentiostatProgressLabel_ != nullptr) {
-        potentiostatProgressLabel_->setText(simpleMeasurement ? "Mesure simple" : "En attente");
+        potentiostatProgressLabel_->setText(translateUiString(simpleMeasurement ? "Mesure simple" : "En attente"));
     }
     if (potentiostatDurationLabel_ != nullptr) {
         potentiostatDurationLabel_->setText(formatMeasurementDuration(0.0));
@@ -8611,14 +9244,13 @@ void MainWindow::onStartCaPotentiostat()
             .arg(nPoints)
             .arg(durationS, 0, 'f', 2));
     } else {
-        appendLog(QString("%1 continu : %2 pts (%3 x %4) | pas acquisition=%5 mm | vitesse=%6 mm/s | pas transversal=%7 mm")
+        appendLog(QString("%1 continu : %2 pts (%3 x %4) | pas acquisition=%5 mm | vitesse=%6 mm/s")
             .arg(techniqueLabel)
             .arg(nPoints)
             .arg(cols)
             .arg(rows)
             .arg(continuousSamplePitchMm, 0, 'f', 4)
-            .arg(cfg.scanSpeedMmPerS, 0, 'f', 3)
-            .arg(rectangleMode ? continuousRowStepMm : 0.0, 0, 'f', 4));
+            .arg(cfg.scanSpeedMmPerS, 0, 'f', 3));
         if (rectangleMode) {
             appendLog(QString("Zone continue effective : X [%1, %2] mm (origine=%3 mm, effective=%4 mm) | Y [%5, %6] mm (origine=%7 mm, effective=%8 mm)")
                 .arg(continuousPlan.xMinMm, 0, 'f', 4)
@@ -8728,17 +9360,11 @@ void MainWindow::onStartCaPotentiostat()
             .arg(cfg.dwellSamples)
             .arg(stageSpeedMmPerS, 0, 'f', 4);
     } else {
-        QString triggerLine = QString("Balayage continu: pas acquisition=%1 mm | vitesse=%2 mm/s | trigger=%3")
+        QString triggerLine = QString("Balayage continu: pas acquisition=%1 mm | vitesse=%2 mm/s")
             .arg(continuousSamplePitchMm, 0, 'f', 4)
-            .arg(cfg.scanSpeedMmPerS, 0, 'f', 4)
-            .arg(continuousTriggerLabel(cfg.trigger));
-        if (cfg.trigger == ScanConfig::ContinuousTrigger::Distance) {
-            triggerLine += QString(" | pas trigger=%1 mm").arg(cfg.triggerDistanceMm, 0, 'f', 4);
-        } else {
-            triggerLine += QString(" | pas trigger=%1 s").arg(cfg.triggerTimeS, 0, 'f', 4);
-        }
+            .arg(cfg.scanSpeedMmPerS, 0, 'f', 4);
         if (rectangleMode) {
-            triggerLine += QString(" | saut transversal=%1 mm").arg(continuousRowStepMm, 0, 'f', 4);
+            triggerLine += QString(" | pas lignes/colonnes=%1 mm").arg(continuousRowStepMm, 0, 'f', 4);
             if (rectangleTraversalMode == ScanConfig::RectangleTraversalMode::OneWay) {
                 triggerLine += QString(" | retour_ligne=%1 mm/s").arg(kContinuousOneWayReturnSpeedMmPerS, 0, 'f', 3);
             }
@@ -8806,18 +9432,12 @@ void MainWindow::onStartCaPotentiostat()
                     .arg(cfg.dwellSamples)
                     .arg(stageSpeedMmPerS, 0, 'f', 3);
         } else {
-            QString acquisitionText;
-            if (cfg.trigger == ScanConfig::ContinuousTrigger::Distance) {
-                acquisitionText = QString("distance=%1 um").arg(cfg.triggerDistanceMm * 1000.0, 0, 'f', 1);
-            } else {
-                acquisitionText = QString("temps=%1 s").arg(cfg.triggerTimeS, 0, 'f', 2);
-            }
+            QString continuousParams = QString("Parametres: vitesse=%1 mm/s | pas=%2 um")
+                .arg(cfg.scanSpeedMmPerS, 0, 'f', 3)
+                .arg(continuousSamplePitchMm * 1000.0, 0, 'f', 1);
             reportMovementLines
                 << "Mode de deplacement: continu"
-                << QString("Parametres: vitesse=%1 mm/s | acquisition=%2 | saut transversal=%3 um")
-                    .arg(cfg.scanSpeedMmPerS, 0, 'f', 3)
-                    .arg(acquisitionText)
-                    .arg(continuousRowStepMm * 1000.0, 0, 'f', 1);
+                << continuousParams;
         }
 
         reportMovementLines << (rectangleMode
@@ -9487,14 +10107,7 @@ void MainWindow::onStartCaPotentiostat()
                         }
 
                         const double targetDistanceMm = continuousPlan.samplePitchMm * static_cast<double>(sampleOffset);
-                        std::optional<QPointF> triggerMotorPos;
-                        if (cfg.trigger == ScanConfig::ContinuousTrigger::Distance) {
-                            triggerMotorPos = waitForTargetDistanceMm(targetDistanceMm);
-                        } else {
-                            // For time-based trigger: use the calibrated time prediction
-                            // rather than a fixed lineStartTime offset, for consistency.
-                            triggerMotorPos = waitForTargetDistanceMm(targetDistanceMm);
-                        }
+                        const std::optional<QPointF> triggerMotorPos = waitForTargetDistanceMm(targetDistanceMm);
 
                         if (potentiostatStopRequested_.load() || instrumentStopped) {
                             break;
@@ -9815,25 +10428,25 @@ void MainWindow::onExportPotentiostat()
     const bool hasGrid = potentiostatRows_ > 0 && potentiostatCols_ > 0 && !potentiostatMatrix_.empty();
     const bool hasTimeSeries = !potentiostatPlotTimes_.empty();
     if (!hasGrid && !hasTimeSeries) {
-        QMessageBox::information(this, "Export", "Aucune donnée à exporter.");
+        QMessageBox::information(this, translateUiString("Export"), translateUiString("Aucune donnée à exporter."));
         return;
     }
 
     // ── Dialog ────────────────────────────────────────────────────────────────
     QDialog dlg(this);
-    dlg.setWindowTitle("Exporter les données");
+    dlg.setWindowTitle(translateUiString("Exporter les données"));
     dlg.setMinimumWidth(500);
     auto* vl = new QVBoxLayout(&dlg);
 
     // Formats (checkboxes — export all selected at once)
-    auto* fmtBox = new QGroupBox("Formats à exporter");
+    auto* fmtBox = new QGroupBox(translateUiString("Formats à exporter"));
     auto* fmtLayout = new QVBoxLayout(fmtBox);
-    auto* cbCsv  = new QCheckBox("Tableau CSV  (.csv)  —  données tabulaires pour Excel / Python");
-    auto* cbMpt  = new QCheckBox("EC-Lab ASCII  (.mpt)  —  format texte BioLogic, visualisation dans EC-Lab");
-    auto* cbGsf  = new QCheckBox("Gwyddion Simple Field  (.gsf)  —  données brutes float32");
-    auto* cbHeat = new QCheckBox("Carte 2D  (.tiff)  —  image de la heatmap");
-    auto* cb3D   = new QCheckBox("Surface 3D  (.tiff)  —  image de la vue 3D");
-    auto* cbReport = new QCheckBox("Rapport PDF  (.pdf)  —  synthèse avec vues LaserBench 2D/3D");
+    auto* cbCsv  = new QCheckBox(translateUiString("Tableau CSV  (.csv)  —  données tabulaires pour Excel / Python"));
+    auto* cbMpt  = new QCheckBox(translateUiString("EC-Lab ASCII  (.mpt)  —  format texte BioLogic, visualisation dans EC-Lab"));
+    auto* cbGsf  = new QCheckBox(translateUiString("Gwyddion Simple Field  (.gsf)  —  données brutes float32"));
+    auto* cbHeat = new QCheckBox(translateUiString("Carte 2D  (.tiff)  —  image de la heatmap"));
+    auto* cb3D   = new QCheckBox(translateUiString("Surface 3D  (.tiff)  —  image de la vue 3D"));
+    auto* cbReport = new QCheckBox(translateUiString("Rapport PDF  (.pdf)  —  synthèse avec vues LaserBench 2D/3D"));
     cbCsv->setChecked(true);
     cbMpt->setChecked(hasTimeSeries);
     cbGsf->setChecked(hasGrid);
@@ -9853,10 +10466,10 @@ void MainWindow::onExportPotentiostat()
     fmtLayout->addWidget(cbReport);
     vl->addWidget(fmtBox);
 
-    auto* reportCommentBox = new QGroupBox("Commentaire du rapport");
+    auto* reportCommentBox = new QGroupBox(translateUiString("Commentaire du rapport"));
     auto* reportCommentLayout = new QVBoxLayout(reportCommentBox);
     auto* reportCommentEdit = new QPlainTextEdit;
-    reportCommentEdit->setPlaceholderText("Commentaire optionnel à ajouter dans les données du PDF...");
+    reportCommentEdit->setPlaceholderText(translateUiString("Commentaire optionnel à ajouter dans les données du PDF..."));
     reportCommentEdit->setMaximumHeight(86);
     reportCommentLayout->addWidget(reportCommentEdit);
     reportCommentBox->setVisible(hasGrid && cbReport->isChecked());
@@ -9866,19 +10479,19 @@ void MainWindow::onExportPotentiostat()
     vl->addWidget(reportCommentBox);
 
     // Dossier de destination
-    auto* dirBox = new QGroupBox("Dossier de destination");
+    auto* dirBox = new QGroupBox(translateUiString("Dossier de destination"));
     auto* dirHl  = new QHBoxLayout(dirBox);
     auto* dirEdit = new QLineEdit;
-    dirEdit->setPlaceholderText("Dossier...");
+    dirEdit->setPlaceholderText(translateUiString("Dossier..."));
     dirEdit->setText(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation));
-    auto* browseBtn = new QPushButton("Parcourir...");
+    auto* browseBtn = new QPushButton(translateUiString("Parcourir..."));
     browseBtn->setFixedWidth(100);
     dirHl->addWidget(dirEdit);
     dirHl->addWidget(browseBtn);
     vl->addWidget(dirBox);
 
     // Nom de base
-    auto* nameBox = new QGroupBox("Nom de base (les extensions seront ajoutées automatiquement)");
+    auto* nameBox = new QGroupBox(translateUiString("Nom de base (les extensions seront ajoutées automatiquement)"));
     auto* nameHl  = new QHBoxLayout(nameBox);
     auto* nameEdit = new QLineEdit;
     const QString baseName = hasGrid
@@ -9891,13 +10504,14 @@ void MainWindow::onExportPotentiostat()
     // Parcourir
     QObject::connect(browseBtn, &QPushButton::clicked, &dlg, [&]() {
         const QString dir = QFileDialog::getExistingDirectory(
-            &dlg, "Choisir un dossier", dirEdit->text());
+            &dlg, translateUiString("Choisir un dossier"), dirEdit->text());
         if (!dir.isEmpty()) dirEdit->setText(dir);
     });
 
     // Boutons OK / Annuler
     auto* btnBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-    btnBox->button(QDialogButtonBox::Ok)->setText("Exporter");
+    btnBox->button(QDialogButtonBox::Ok)->setText(translateUiString("Exporter"));
+    btnBox->button(QDialogButtonBox::Cancel)->setText(translateUiString("Annuler"));
     QObject::connect(btnBox, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
     QObject::connect(btnBox, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
     vl->addWidget(btnBox);
@@ -9917,8 +10531,8 @@ void MainWindow::onExportPotentiostat()
     // Create a subfolder with the base name inside the selected directory
     QDir parentDir(dirEdit->text());
     if (!parentDir.mkpath(name)) {
-        QMessageBox::critical(this, "Export",
-            QString("Impossible de créer le dossier :\n%1").arg(parentDir.absoluteFilePath(name)));
+        QMessageBox::critical(this, translateUiString("Export"),
+            translateUiString("Impossible de créer le dossier :\n%1").arg(parentDir.absoluteFilePath(name)));
         return;
     }
     const QDir outDir(parentDir.absoluteFilePath(name));
@@ -9934,8 +10548,8 @@ void MainWindow::onExportPotentiostat()
 
         QFile file(gsfPath);
         if (!file.open(QIODevice::WriteOnly)) {
-            QMessageBox::critical(this, "Export",
-                QString("Impossible d'ouvrir :\n%1").arg(file.errorString()));
+            QMessageBox::critical(this, translateUiString("Export"),
+                translateUiString("Impossible d'ouvrir :\n%1").arg(file.errorString()));
             return false;
         }
 
@@ -9998,8 +10612,8 @@ void MainWindow::onExportPotentiostat()
         const QString csvPath = outDir.absoluteFilePath(name + ".csv");
         QFile csvFile(csvPath);
         if (!csvFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            QMessageBox::critical(this, "Export",
-                QString("Impossible d'ouvrir :\n%1").arg(csvFile.errorString()));
+            QMessageBox::critical(this, translateUiString("Export"),
+                translateUiString("Impossible d'ouvrir :\n%1").arg(csvFile.errorString()));
         } else {
             QTextStream ts(&csvFile);
 
@@ -10132,8 +10746,8 @@ void MainWindow::onExportPotentiostat()
         const QString mptPath = outDir.absoluteFilePath(name + ".mpt");
         QFile mptFile(mptPath);
         if (!mptFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            QMessageBox::critical(this, "Export",
-                QString("Impossible d'ouvrir :\n%1").arg(mptFile.errorString()));
+            QMessageBox::critical(this, translateUiString("Export"),
+                translateUiString("Impossible d'ouvrir :\n%1").arg(mptFile.errorString()));
         } else {
             // Helper: format a double in EC-Lab scientific notation
             // e.g.  1,289685542360530E-006  (comma decimal, 3-digit exponent, 15 places)
@@ -10264,18 +10878,38 @@ void MainWindow::onExportPotentiostat()
 
     // ── Export rapport PDF LaserBench ────────────────────────────────────────
     if (cbReport->isChecked() && hasGrid) {
+        const bool reportEnglish = uiLanguage_ == UiLanguage::English;
         PotentiostatGraphWidget reportGraph;
         reportGraph.resize(1400, 760);
+        reportGraph.setEnglishUi(reportEnglish);
         reportGraph.setGraphMode(PotentiostatGraphWidget::Mode::CurrentVsTime);
         reportGraph.setSeries(potentiostatPlotTimes_, potentiostatPlotCurrents_, potentiostatPlotEwe_);
 
         QStringList parameterLines;
         const double widthUm = std::abs(potentiostatXMax_ - potentiostatXMin_) * 1000.0;
         const double heightUm = std::abs(potentiostatYMax_ - potentiostatYMin_) * 1000.0;
-        parameterLines << QString("Dimension: %1 x %2 um")
+        parameterLines << QString("%1: %2 x %3 um")
+            .arg(reportEnglish ? QString("Dimensions") : QString("Dimension"))
             .arg(widthUm, 0, 'f', 1)
             .arg(heightUm, 0, 'f', 1);
         parameterLines << QString("Electrode: %1").arg(exportElectrodeLabel);
+        const int measuredPointCount = static_cast<int>(std::count_if(
+            potentiostatMatrix_.begin(),
+            potentiostatMatrix_.end(),
+            [](const std::optional<double>& value) {
+                return value.has_value() && std::isfinite(*value);
+            }));
+        const int plannedPointCount = std::max(0, potentiostatRows_ * potentiostatCols_);
+        if (plannedPointCount > 0 && measuredPointCount < plannedPointCount) {
+            parameterLines << QString("%1: %2 / %3")
+                .arg(reportEnglish ? QString("Measurement points") : QString("Points de mesure"))
+                .arg(measuredPointCount)
+                .arg(plannedPointCount);
+        } else {
+            parameterLines << QString("%1: %2")
+                .arg(reportEnglish ? QString("Measurement points") : QString("Points de mesure"))
+                .arg(measuredPointCount);
+        }
 
         QStringList setupLines = lastReportSetupLines_;
         if (setupLines.isEmpty()) {
@@ -10283,8 +10917,11 @@ void MainWindow::onExportPotentiostat()
             const double laserDiameterPx = static_cast<double>(laserRadiusPx_) * 2.0;
             const double laserDiameterUm = laserDiameterPx * autoMmPerPxForObjective(objectiveName) * 1000.0;
             setupLines
-                << QString("Objectif utilise: %1").arg(objectiveName)
-                << QString("Diametre laser: %1 um").arg(laserDiameterUm, 0, 'f', 1);
+                << QString("%1: %2")
+                    .arg(reportEnglish ? QString("Objective used") : QString("Objectif utilise"), objectiveName)
+                << QString("%1: %2 um")
+                    .arg(reportEnglish ? QString("Laser diameter") : QString("Diametre laser"))
+                    .arg(laserDiameterUm, 0, 'f', 1);
 
             if (selectedPotentiostatTechnique() == PotentiostatTechnique::CA) {
                 bool eweOk = false;
@@ -10299,13 +10936,15 @@ void MainWindow::onExportPotentiostat()
                 }
             }
         }
-        parameterLines << setupLines;
+        parameterLines << translateReportLines(setupLines, reportEnglish);
 
         double reportDurationS = potentiostatMeasurementDurationS_;
         if (reportDurationS <= 0.0 && !potentiostatPlotTimes_.empty() && std::isfinite(potentiostatPlotTimes_.back())) {
             reportDurationS = std::max(0.0, potentiostatPlotTimes_.back());
         }
-        parameterLines << QString("Temps de mesure: %1").arg(formatMeasurementDuration(reportDurationS));
+        parameterLines << QString("%1: %2")
+            .arg(reportEnglish ? QString("Measurement time") : QString("Temps de mesure"),
+                 formatMeasurementDuration(reportDurationS));
 
         std::vector<double> finiteCurrents;
         finiteCurrents.reserve(potentiostatMatrix_.size());
@@ -10318,17 +10957,20 @@ void MainWindow::onExportPotentiostat()
             const auto [minIt, maxIt] = std::minmax_element(finiteCurrents.begin(), finiteCurrents.end());
             const double mean = std::accumulate(finiteCurrents.begin(), finiteCurrents.end(), 0.0)
                 / static_cast<double>(finiteCurrents.size());
-            parameterLines << QString("Courant: min=%1 | max=%2 | moyenne=%3")
+            parameterLines << (reportEnglish
+                ? QString("Current: min=%1 | max=%2 | average=%3")
+                : QString("Courant: min=%1 | max=%2 | moyenne=%3"))
                 .arg(formatReportCurrent(*minIt))
                 .arg(formatReportCurrent(*maxIt))
                 .arg(formatReportCurrent(mean));
         }
 
         if (!lastReportMovementLines_.isEmpty()) {
-            parameterLines << lastReportMovementLines_;
+            parameterLines << translateReportLines(lastReportMovementLines_, reportEnglish);
         }
         if (!reportComment.isEmpty()) {
-            parameterLines << QString("Commentaire: %1").arg(reportComment);
+            parameterLines << QString("%1: %2")
+                .arg(reportEnglish ? QString("Comment") : QString("Commentaire"), reportComment);
         }
 
         const QImage zoneImage = !lastValidatedZoneImage_.isNull()
@@ -10340,7 +10982,8 @@ void MainWindow::onExportPotentiostat()
             potentiostatCols_,
             potentiostatMatrix_,
             potentiostatScanOrder_,
-            exportElectrodeMode);
+            exportElectrodeMode,
+            reportEnglish);
         const QImage pathSketchImage = !lastReportPathSketchImage_.isNull()
             ? lastReportPathSketchImage_
             : renderReportPathSketch(
@@ -10353,26 +10996,27 @@ void MainWindow::onExportPotentiostat()
         QString pdfError;
         if (writeLaserBenchReportPdf(
                 pdfPath,
-                QString("Rapport LaserBench - %1").arg(name),
+                reportText(reportEnglish, "Rapport LaserBench - %1", "LaserBench report - %1").arg(name),
                 parameterLines,
                 pathSketchImage,
                 zoneImage,
                 graphImage,
                 heatmapImage,
                 surface3DImage,
+                reportEnglish,
                 &pdfError)) {
             appendLog(QString("Rapport PDF : %1").arg(pdfPath));
             ++exportCount;
         } else {
-            QMessageBox::critical(this, "Rapport PDF",
-                pdfError.isEmpty() ? QString("Impossible de créer le PDF.") : pdfError);
+            QMessageBox::critical(this, translateUiString("Rapport PDF"),
+                pdfError.isEmpty() ? translateUiString("Impossible de créer le PDF.") : pdfError);
         }
     }
 
     if (exportCount == 0) {
-        QMessageBox::warning(this, "Export", "Aucun format sélectionné ou erreur d'écriture.");
+        QMessageBox::warning(this, translateUiString("Export"), translateUiString("Aucun format sélectionné ou erreur d'écriture."));
     } else {
-        appendLog(QString("Export terminé : %1 fichier(s) dans %2").arg(exportCount).arg(outDir.absolutePath()));
+        appendLog(translateUiString("Export terminé : %1 fichier(s) dans %2").arg(exportCount).arg(outDir.absolutePath()));
     }
 }
 
@@ -10382,13 +11026,18 @@ void MainWindow::onExportPotentiostat()
 void MainWindow::onImportCsv()
 {
     const QString path = QFileDialog::getOpenFileName(
-        this, "Importer un fichier CSV", QString(), "CSV (*.csv);;Tous (*)");
+        this,
+        translateUiString("Importer un fichier CSV"),
+        QString(),
+        uiLanguage_ == UiLanguage::English ? "CSV (*.csv);;All (*)" : "CSV (*.csv);;Tous (*)");
     if (path.isEmpty()) return;
 
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         QMessageBox::critical(this, "Import",
-            QString("Impossible d'ouvrir :\n%1").arg(file.errorString()));
+            uiLanguage_ == UiLanguage::English
+                ? QString("Cannot open:\n%1").arg(file.errorString())
+                : QString("Impossible d'ouvrir :\n%1").arg(file.errorString()));
         return;
     }
 
@@ -10516,7 +11165,7 @@ void MainWindow::onImportCsv()
     file.close();
 
     if (gridData.empty() && tsData.empty()) {
-        QMessageBox::warning(this, "Import", "Aucune donnée valide trouvée dans le fichier CSV.");
+        QMessageBox::warning(this, "Import", translateUiString("Aucune donnée valide trouvée dans le fichier CSV."));
         return;
     }
 
@@ -10535,6 +11184,7 @@ void MainWindow::onImportCsv()
     importXMin_ = importXMax_ = importYMin_ = importYMax_ = 0.0;
     importLastDwellS_ = 0.0;
     importElectrodeMode_ = metaElectrodeMode;
+    importFileName_ = QFileInfo(path).fileName();
 
     // ── Populate import data ──────────────────────────────────────────────────
     if (!gridData.empty()) {
@@ -10624,16 +11274,7 @@ void MainWindow::onImportCsv()
     }
 
     refreshImportVisualization();
-
-    if (importInfoLabel_ != nullptr) {
-        const QString info = gridData.empty()
-            ? QString("Mesure simple : %1 points").arg(tsData.size())
-            : QString("Grille %1×%2 : %3 cellules\n%4")
-                .arg(metaCols).arg(metaRows)
-                .arg(gridData.size())
-                .arg(QFileInfo(path).fileName());
-        importInfoLabel_->setText(info);
-    }
+    updateImportInfoLabel();
     if (tabWidget_ != nullptr) tabWidget_->setCurrentIndex(2);  // Switch to "Import"
     appendLog(QString("Import CSV : %1  (%2 points)")
         .arg(path).arg(gridData.empty() ? tsData.size() : gridData.size()));
@@ -10724,19 +11365,29 @@ MainWindow::promptRectangleTraversalSelection()
     connect(btnBox, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
     connect(btnBox, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
     layout->addWidget(btnBox);
+    applyCurrentLanguage(&dlg);
 
     const bool traversalTutorialActive =
         tutorialStepIndex_ >= 0
         && tutorialStepIndex_ < static_cast<int>(tutorialSteps_.size())
         && tutorialSteps_[static_cast<std::size_t>(tutorialStepIndex_)].target == TutorialTarget::TraversalSettings;
-    const auto traversalTutorialBody = [zigZagBtn, oneWayOnly]() {
-        const QString base = "Choisissez le point de depart et le sens de parcours.";
+    const auto traversalTutorialBody = [this, zigZagBtn, oneWayOnly]() {
+        const bool english = uiLanguage_ == UiLanguage::English;
+        const QString base = english
+            ? QString("Choose the starting point and scan direction.")
+            : QString("Choisissez le point de depart et le sens de parcours.");
         if (zigZagBtn->isChecked()) {
-            return base + "\n\nZig-zag : le balayage alterne le sens a chaque ligne pour limiter les retours moteurs.";
+            return english
+                ? base + "\n\nZig-zag: the scan alternates direction on each line to limit motor returns."
+                : base + "\n\nZig-zag : le balayage alterne le sens a chaque ligne pour limiter les retours moteurs.";
         }
-        QString body = base + "\n\nOne-way : le balayage garde toujours le meme sens. Le moteur revient au debut de la ligne suivante sans acquisition.";
+        QString body = english
+            ? base + "\n\nOne-way: the scan always keeps the same direction. The motor returns to the start of the next line without acquisition."
+            : base + "\n\nOne-way : le balayage garde toujours le meme sens. Le moteur revient au debut de la ligne suivante sans acquisition.";
         if (oneWayOnly) {
-            body += "\n\nAvec cet objectif, ce mode est impose.";
+            body += english
+                ? "\n\nWith this objective, this mode is required."
+                : "\n\nAvec cet objectif, ce mode est impose.";
         }
         return body;
     };
@@ -10883,37 +11534,18 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
     speedSpin->setRange(0.001, 10.0); speedSpin->setDecimals(3); speedSpin->setSuffix(" mm/s");
     speedSpin->setValue(scanConfig_.scanSpeedMmPerS);
     cntGrid->addWidget(speedSpin, 0, 1);
-    cntGrid->addWidget(new QLabel("Saut ligne/colonne :"), 1, 0);
-    auto* rowStepSpin = new QDoubleSpinBox;
-    rowStepSpin->setRange(kMinimumScanStepMm, 25.0); rowStepSpin->setDecimals(4); rowStepSpin->setSingleStep(kMinimumScanStepMm); rowStepSpin->setSuffix(" mm");
-    const QString objNameForScan = objectiveCombo_ != nullptr
-        ? objectiveCombo_->currentText().trimmed() : QString("4x");
-    const double laserDiameterMm = laserRadiusPx_ * 2.0 * autoMmPerPxForObjective(objNameForScan);
-    const double defaultRowStepMm = scanConfig_.rowStepMm > 0.0
-        ? scanConfig_.rowStepMm
-        : std::max(kMinimumScanStepMm, laserDiameterMm);
-    rowStepSpin->setValue(defaultRowStepMm);
-    cntGrid->addWidget(rowStepSpin, 1, 1);
-    auto* rowStepHint = new QLabel("Direction gauche/droite : ecart entre lignes. Direction haut/bas : ecart entre colonnes.");
-    rowStepHint->setWordWrap(true);
-    rowStepHint->setStyleSheet("color:#5c6570; font-size:8pt;");
-    cntGrid->addWidget(rowStepHint, 2, 0, 1, 2);
-
-    auto* intGrp  = new QGroupBox("Intervalle d'acquisition");
-    auto* intGrid = new QGridLayout(intGrp);
-    auto* distBtn = new QRadioButton("Toutes les");
-    auto* timeBtn = new QRadioButton("Toutes les");
-    distBtn->setChecked(scanConfig_.trigger == ScanConfig::ContinuousTrigger::Distance);
-    timeBtn->setChecked(scanConfig_.trigger == ScanConfig::ContinuousTrigger::Time);
+    cntGrid->addWidget(new QLabel("Pas d'acquisition :"), 1, 0);
     auto* distSpin = new QDoubleSpinBox;
     distSpin->setRange(kMinimumScanStepMm, 25.0); distSpin->setDecimals(4); distSpin->setSingleStep(kMinimumScanStepMm); distSpin->setSuffix(" mm");
-    distSpin->setValue(scanConfig_.triggerDistanceMm);
-    auto* timeSpin = new QDoubleSpinBox;
-    timeSpin->setRange(0.01, 3600.0); timeSpin->setDecimals(2); timeSpin->setSuffix(" s");
-    timeSpin->setValue(scanConfig_.triggerTimeS);
-    intGrid->addWidget(distBtn, 0, 0); intGrid->addWidget(distSpin, 0, 1);
-    intGrid->addWidget(timeBtn, 1, 0); intGrid->addWidget(timeSpin, 1, 1);
-    cntGrid->addWidget(intGrp, 3, 0, 1, 2);
+    const double defaultContinuousStepMm = scanConfig_.trigger == ScanConfig::ContinuousTrigger::Time
+        ? scanConfig_.scanSpeedMmPerS * scanConfig_.triggerTimeS
+        : scanConfig_.triggerDistanceMm;
+    distSpin->setValue(std::max(kMinimumScanStepMm, defaultContinuousStepMm));
+    cntGrid->addWidget(distSpin, 1, 1);
+    auto* acquisitionStepHint = new QLabel("Le meme pas est utilise entre les lignes ou colonnes du rectangle.");
+    acquisitionStepHint->setWordWrap(true);
+    acquisitionStepHint->setStyleSheet("color:#5c6570; font-size:8pt;");
+    cntGrid->addWidget(acquisitionStepHint, 2, 0, 1, 2);
     stack->addWidget(cntWidget);  // index 1
 
     controlsLayout->addWidget(stack);
@@ -11000,9 +11632,7 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
             }
         } else {
             const double speedMmPerS = speedSpin->value();
-            const double samplePitchMm = distBtn->isChecked()
-                ? distSpin->value()
-                : std::max(kScanPlanningEpsilonMm, speedMmPerS * timeSpin->value());
+            const double samplePitchMm = distSpin->value();
 
             if (rectangleScan) {
                 try {
@@ -11011,7 +11641,7 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
                         startMm,
                         endMm,
                         samplePitchMm,
-                        rowStepSpin->value(),
+                        samplePitchMm,
                         effectiveRectangleStartCorner(),
                         effectiveRectanglePrimaryAxis(),
                         effectiveRectangleTraversalMode(),
@@ -11076,11 +11706,7 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
     connect(dwellSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [updateScanEstimate](double) { updateScanEstimate(); });
     connect(dwellSamplesSpin, qOverload<int>(&QSpinBox::valueChanged), this, [updateScanEstimate](int) { updateScanEstimate(); });
     connect(speedSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [updateScanEstimate](double) { updateScanEstimate(); });
-    connect(rowStepSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [updateScanEstimate](double) { updateScanEstimate(); });
-    connect(distBtn, &QRadioButton::toggled, this, [updateScanEstimate](bool) { updateScanEstimate(); });
-    connect(timeBtn, &QRadioButton::toggled, this, [updateScanEstimate](bool) { updateScanEstimate(); });
     connect(distSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [updateScanEstimate](double) { updateScanEstimate(); });
-    connect(timeSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [updateScanEstimate](double) { updateScanEstimate(); });
     updateScanEstimate();
 
     // ── Buttons ──────────────────────────────────────────────────────────────
@@ -11088,17 +11714,25 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
     connect(btnBox, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
     connect(btnBox, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
     vl->addWidget(btnBox);
+    applyCurrentLanguage(&dlg);
 
     const bool scanTutorialActive =
         tutorialStepIndex_ >= 0
         && tutorialStepIndex_ < static_cast<int>(tutorialSteps_.size())
         && tutorialSteps_[static_cast<std::size_t>(tutorialStepIndex_)].target == TutorialTarget::ScanSettings;
-    const auto scanTutorialBody = [ppBtn]() {
-        const QString base = "Cette fenetre permet de choisir la methode de balayage et les principaux parametres de mesure.";
+    const auto scanTutorialBody = [this, ppBtn]() {
+        const bool english = uiLanguage_ == UiLanguage::English;
+        const QString base = english
+            ? QString("This window lets you choose the scan method and the main measurement settings.")
+            : QString("Cette fenetre permet de choisir la methode de balayage et les principaux parametres de mesure.");
         if (ppBtn->isChecked()) {
-            return base + "\n\nPoint par point : le moteur se deplace de point en point. Une mesure est prise apres chaque pause.";
+            return english
+                ? base + "\n\nPoint by point: the motor moves from point to point. A measurement is taken after each pause."
+                : base + "\n\nPoint par point : le moteur se deplace de point en point. Une mesure est prise apres chaque pause.";
         }
-        return base + "\n\nBalayage continu : le moteur se deplace en continu. Les mesures sont prises regulierement pendant le mouvement.";
+        return english
+            ? base + "\n\nContinuous scan: the motor moves continuously. Set the acquisition step; the same step is used between rectangle lines or columns."
+            : base + "\n\nBalayage continu : le moteur se deplace en continu. Reglez le pas d'acquisition ; le meme pas est utilise entre les lignes ou colonnes du rectangle.";
     };
     const auto updateScanTutorialPanel = [this, scanTutorialBody]() {
         if (tutorialPanel_ == nullptr
@@ -11159,21 +11793,15 @@ bool MainWindow::editScanConfigDialog(bool captureZoneSnapshotOnAccept)
     } else {
         scanConfig_.mode              = ScanConfig::AcquisitionMode::Continuous;
         scanConfig_.scanSpeedMmPerS   = speedSpin->value();
-        scanConfig_.trigger           = distBtn->isChecked()
-                                        ? ScanConfig::ContinuousTrigger::Distance
-                                        : ScanConfig::ContinuousTrigger::Time;
+        scanConfig_.trigger           = ScanConfig::ContinuousTrigger::Distance;
         scanConfig_.triggerDistanceMm = distSpin->value();
-        scanConfig_.triggerTimeS      = timeSpin->value();
-        scanConfig_.rowStepMm         = rowStepSpin->value();
-        appendLog(distBtn->isChecked()
-            ? QString("Balayage continu : vitesse=%1 mm/s, acquisition toutes les %2 mm, saut transversal=%3 mm")
-                .arg(scanConfig_.scanSpeedMmPerS, 0, 'f', 3)
-                .arg(scanConfig_.triggerDistanceMm, 0, 'f', 4)
-                .arg(scanConfig_.rowStepMm, 0, 'f', 4)
-            : QString("Balayage continu : vitesse=%1 mm/s, acquisition toutes les %2 s, saut transversal=%3 mm")
-                .arg(scanConfig_.scanSpeedMmPerS, 0, 'f', 3)
-                .arg(scanConfig_.triggerTimeS, 0, 'f', 2)
-                .arg(scanConfig_.rowStepMm, 0, 'f', 4));
+        scanConfig_.triggerTimeS      = scanConfig_.scanSpeedMmPerS > 0.0
+            ? scanConfig_.triggerDistanceMm / scanConfig_.scanSpeedMmPerS
+            : scanConfig_.triggerTimeS;
+        scanConfig_.rowStepMm         = scanConfig_.triggerDistanceMm;
+        appendLog(QString("Balayage continu : vitesse=%1 mm/s, pas acquisition=%2 mm")
+            .arg(scanConfig_.scanSpeedMmPerS, 0, 'f', 3)
+            .arg(scanConfig_.triggerDistanceMm, 0, 'f', 4));
     }
 
     if (selectedRectangleTraversal.has_value()) {

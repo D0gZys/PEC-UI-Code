@@ -59,6 +59,7 @@ qt_standard_project_setup()
 
 qt_add_executable(LaserBench
     src/main.cpp
+    LaserBench.rc
     src/core/AppState.cpp
     src/core/AppState.hpp
     src/hardware/DeviceContracts.hpp

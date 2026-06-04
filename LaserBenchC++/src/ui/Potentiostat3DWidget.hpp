@@ -14,6 +14,7 @@ class Potentiostat3DWidget final : public QWidget
 public:
     explicit Potentiostat3DWidget(QWidget* parent = nullptr);
 
+    void setEnglishUi(bool english);
     // Same data format as PotentiostatHeatmapWidget::setGrid
     // values: row-major [row * cols + col], may be nullopt for unmeasured cells
     void setGrid(int rows, int cols,
@@ -54,6 +55,7 @@ private:
     mutable QPointF origin_;
     mutable double  scaleH_ {1.0};
     mutable double  scaleV_ {1.0};
+    bool englishUi_ {false};
 };
 
 }  // namespace laserbench::ui

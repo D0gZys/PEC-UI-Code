@@ -19,6 +19,7 @@ class PotentiostatHeatmapWidget final : public QWidget
 public:
     explicit PotentiostatHeatmapWidget(QWidget* parent = nullptr);
 
+    void setEnglishUi(bool english);
     void setGrid(
         int rows,
         int cols,
@@ -47,6 +48,7 @@ private:
     PotentiostatElectrodeMode electrodeMode_ {PotentiostatElectrodeMode::Anode};
     std::vector<std::optional<double>> values_;
     std::optional<std::pair<int, int>> highlightedCell_;
+    bool englishUi_ {false};
 };
 
 }  // namespace laserbench::ui

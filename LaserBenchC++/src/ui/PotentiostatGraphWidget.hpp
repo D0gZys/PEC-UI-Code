@@ -27,6 +27,7 @@ public:
 
     explicit PotentiostatGraphWidget(QWidget* parent = nullptr);
 
+    void setEnglishUi(bool english);
     void setGraphMode(Mode mode);
     void setSeries(std::vector<double> times, std::vector<double> currents, std::vector<double> eweValues);
     void setPhases(std::vector<MotorPhase> phases);
@@ -45,6 +46,7 @@ private:
     std::vector<double>     eweValues_;
     std::vector<MotorPhase> phases_;
     bool showPhases_ {false};
+    bool englishUi_ {false};
 };
 
 }  // namespace laserbench::ui

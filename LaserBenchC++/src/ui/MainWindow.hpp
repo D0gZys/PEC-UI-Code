@@ -125,6 +125,14 @@ private:
     void showTutorialStep(int index);
     void advanceTutorialStep(int delta);
     void triggerTutorialAction();
+    enum class UiLanguage { French, English };
+    void setUiLanguage(UiLanguage language);
+    void updateLanguageSwitchUi();
+    void applyCurrentLanguage(QWidget* root = nullptr);
+    void applyCustomWidgetLanguage();
+    void updateImportInfoLabel();
+    void translateWidgetTree(QWidget* root);
+    [[nodiscard]] QString translateUiString(const QString& text) const;
     void initializeSessionLog();
     void scheduleRuntimeDependencyCheck();
     void runRuntimeDependencyCheck();
@@ -370,6 +378,8 @@ private:
     QTabWidget* tabWidget_ {nullptr};
     QPushButton* topConnectionButton_ {nullptr};
     QPushButton* topCalibrationButton_ {nullptr};
+    QPushButton* languageFrButton_ {nullptr};
+    QPushButton* languageEnButton_ {nullptr};
     QPushButton* tutorialHelpButton_ {nullptr};
     TutorialOverlayWidget* tutorialOverlay_ {nullptr};
     TutorialPanelWidget* tutorialPanel_ {nullptr};
@@ -380,6 +390,7 @@ private:
     QGroupBox* startupConnectionPotentiostatBox_ {nullptr};
     QGroupBox* calibrationLaserBox_ {nullptr};
     QWidget* potentiostatParamsColumn_ {nullptr};
+    UiLanguage uiLanguage_ {UiLanguage::French};
     QLabel* stageSummaryLabel_ {nullptr};
     QLabel* cameraSummaryLabel_ {nullptr};
     QLabel* potentiostatSummaryLabel_ {nullptr};
@@ -469,13 +480,14 @@ private:
     QStackedWidget*           importRightStack_         {nullptr};
     QPushButton*              importView3DButton_       {nullptr};
     QLabel*                   importInfoLabel_          {nullptr};
+    QString                   importFileName_;
     QPlainTextEdit* logView_ {nullptr};
     QDialog* startupConnectionDialog_ {nullptr};
     QDialog* motorConnectionDialog_ {nullptr};
     QDialog* cameraConnectionDialog_ {nullptr};
     QDialog* cameraSettingsDialog_ {nullptr};
     QDialog*   calibrationDialog_     {nullptr};
-    QComboBox* calibObjectiveCombo_   {nullptr};
+    QLabel*    calibObjectiveValueLabel_ {nullptr};
 
     QComboBox* xPortCombo_ {nullptr};
     QComboBox* yPortCombo_ {nullptr};
