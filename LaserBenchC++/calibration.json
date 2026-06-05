@@ -1,0 +1,22 @@
+{
+    "objectives": [
+        {
+            "laserRadiusPx": 35,
+            "laserX": 2625,
+            "laserY": 1311,
+            "name": "4x"
+        },
+        {
+            "laserRadiusPx": 47,
+            "laserX": 2573,
+            "laserY": 1460,
+            "name": "10x"
+        },
+        {
+            "laserRadiusPx": 27,
+            "laserX": 2618,
+            "laserY": 1420,
+            "name": "50x"
+        }
+    ]
+}
